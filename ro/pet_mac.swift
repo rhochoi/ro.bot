@@ -35,9 +35,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var lastBackdropSampleTime: TimeInterval = 0
     private var cgWinImgFn: CGWinImgFn? = nil
 
-    // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자 여유 공간(152x146)을 확보해 잘림 없이 화면 끝까지 이동
-    private let compactSize = NSSize(width: 152, height: 146)
-    private let expandedSize = NSSize(width: 356, height: 500)
+    // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자+점프/흔들기 여유 공간(176x168)을 확보해 잘림 방지
+    private let compactSize = NSSize(width: 176, height: 168)
+    private let expandedSize = NSSize(width: 360, height: 520)
     private let edgeMargin: CGFloat = 6.0
 
     init(url: String, wander: Bool) {
@@ -261,7 +261,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             }
             prevMouse = curMouse
 
-            if hypot(dx, dy) > 3.5 {
+            if hypot(dx, dy) > 8.0 {
                 moved = true
             }
             if moved {

@@ -525,7 +525,8 @@ PET_HTML = r"""<!DOCTYPE html>
     flex-direction: column;
     justify-content: flex-end;
     align-items: flex-end;
-    padding: 10px 14px 10px 14px;
+    padding: 16px 20px 18px 20px;
+    box-sizing: border-box;
   }
   /* 화면 상단에 있을 때는 펫이 위쪽(flex-start)에 고정되고 말풍선이 그 아래로 열림 */
   body.place-top .stage {
@@ -600,16 +601,18 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 4px;
+    flex-wrap: nowrap;
   }
   .chip-btn {
     background: var(--panel-soft);
     color: var(--panel-fg);
     border: none;
     border-radius: 999px;
-    padding: 3.5px 8.5px;
+    padding: 3px 7px;
     font-size: 10px;
     font-weight: 600;
     cursor: pointer;
+    white-space: nowrap;
   }
   .chip-btn:hover {
     background: var(--bubble-fill);
@@ -822,7 +825,8 @@ PET_HTML = r"""<!DOCTYPE html>
     flex-direction: column;
     align-items: center;
     cursor: grab;
-    padding: 8px 6px 2px 6px;
+    padding: 12px 14px 10px 14px;
+    overflow: visible;
   }
   .pet-wrap:active { cursor: grabbing; }
 
@@ -834,6 +838,8 @@ PET_HTML = r"""<!DOCTYPE html>
     gap: calc(1 * var(--u)); /* 간격 1u */
     position: relative;
     filter: drop-shadow(0 4px 10px rgba(15, 14, 13, 0.26));
+    overflow: visible;
+    margin-right: 2px;
   }
 
   .pill {
@@ -999,7 +1005,7 @@ PET_HTML = r"""<!DOCTYPE html>
     width: calc(6.2 * var(--u));
     height: calc(2.6 * var(--u));
     stroke: var(--bot-eye);
-    stroke-width: 3.2;
+    stroke-width: 2.8;
     stroke-linecap: round;
     stroke-linejoin: round;
     fill: none;
@@ -1199,8 +1205,8 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   @keyframes alertEyes {
     0%   { transform: translate(0, -50%) scale(1); }
-    24%  { transform: translate(0, -50%) scale(1.4); }
-    60%  { transform: translate(0, -50%) scale(1.18); }
+    24%  { transform: translate(0, calc(-50% - 2.5px)) scale(1.18); }
+    60%  { transform: translate(0, calc(-50% - 1.2px)) scale(1.10); }
     100% { transform: translate(0, -50%) scale(1); }
   }
 
@@ -1338,11 +1344,13 @@ PET_HTML = r"""<!DOCTYPE html>
     font-size: 10.5px;
     font-weight: 700;
     color: var(--panel-fg);
+    white-space: nowrap;
   }
   .act-hint {
     font-size: 9px;
     font-weight: 500;
     color: var(--chalk-muted);
+    white-space: nowrap;
   }
   .act-chips-grid {
     display: flex;
@@ -1358,17 +1366,20 @@ PET_HTML = r"""<!DOCTYPE html>
     font-size: 9.8px;
     font-weight: 600;
     cursor: pointer;
-    transition: background 0.14s, color 0.14s, transform 0.1s;
+    transition: background 0.12s, color 0.12s, transform 0.1s;
   }
   .act-btn:hover {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
+    background: var(--panel-fg);
+    color: var(--panel-bg);
+    opacity: 0.85;
     transform: translateY(-1px);
   }
   .act-btn.active {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
-    box-shadow: 0 2px 6px rgba(15, 14, 13, 0.25);
+    background: var(--bubble-fill) !important;
+    color: var(--bubble-fg) !important;
+    opacity: 1.0 !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    font-weight: 800;
   }
 
   @keyframes baseGrow {
@@ -1411,9 +1422,9 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="toolbar">
         <button id="clearBtn" class="chip-btn" style="display:none;" title="알림/답변 닫기">초기화</button>
-        <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트 열기/닫기">상호작용 ▾</button>
-        <button id="matBtn" class="chip-btn" title="상황별 자동 / 점토 / 리퀴드 글라스 / 젤리 전환">자동·점토</button>
-        <button id="themeBtn" class="chip-btn" title="배경 자동 감지 / 먹 고정 / 분필 고정 전환">자동·먹</button>
+        <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트">상호작용 ▾</button>
+        <button id="matBtn" class="chip-btn" title="재질 전환 (점토 / 리퀴드 글라스 / 젤리)">점토</button>
+        <button id="themeBtn" class="chip-btn" title="색상 전환 (먹 / 분필)">먹</button>
         <button id="closeBtn" class="chip-btn" title="대화창 닫기 (Esc)">닫기</button>
       </div>
     </div>
@@ -1421,8 +1432,8 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 모션 가이드 12종 즉시 상호작용 팔레트 -->
     <div id="actPalette" class="act-palette">
       <div class="act-palette-title">
-        <span>상호작용 즉시 실행 (모션 12종)</span>
-        <span class="act-hint">마우스 쓰다듬기·드래그·흔들기로도 즉시 반응</span>
+        <span>모션 상호작용 12종</span>
+        <span class="act-hint">클릭 또는 마우스 동작</span>
       </div>
       <div class="act-chips-grid">
         <button class="act-btn" data-act="breathe" title="3개 층 시차 숨쉬기 (3초 루프)">숨쉬기</button>
@@ -1505,7 +1516,7 @@ PET_HTML = r"""<!DOCTYPE html>
           <div id="eyeL" class="eye eye-l"></div>
           <div id="eyeR" class="eye eye-r"></div>
           <svg class="resolved-arch" viewBox="0 0 24 10" aria-hidden="true">
-            <path d="M 2 8 C 4.5 2, 9.5 2, 12 7.5 C 14.5 2, 19.5 2, 22 8" />
+            <path d="M 2.5 7.5 C 4.5 2.5, 8.0 2.5, 10.0 7.5 M 14.0 7.5 C 16.0 2.8, 19.5 2.8, 21.5 7.5" />
           </svg>
         </div>
       </div>
@@ -1609,7 +1620,8 @@ function updateMaterialUI() {
     document.body.classList.toggle(`material-${m}`, activeMaterial === m);
   }
   const label = MAT_LABELS[activeMaterial] || "점토";
-  matBtn.textContent = (materialMode === "auto") ? `자동·${label}` : label;
+  matBtn.textContent = label;
+  matBtn.title = (materialMode === "auto") ? `자동 감지 (${label}) — 클릭하여 전환` : `${label} 고정 — 클릭하여 전환`;
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   petCaption.textContent = `ro · ${moodMeta.label} · ${label}`;
 }
@@ -1617,13 +1629,16 @@ function updateMaterialUI() {
 function updateThemeUI() {
   if (themeMode === "auto") {
     isChalk = !!backdropIsDark;
-    themeBtn.textContent = isChalk ? "자동·분필" : "자동·먹";
+    themeBtn.textContent = isChalk ? "분필" : "먹";
+    themeBtn.title = isChalk ? "배경 자동 감지: 어두움(분필)" : "배경 자동 감지: 밝음(먹)";
   } else if (themeMode === "chalk") {
     isChalk = true;
     themeBtn.textContent = "분필";
+    themeBtn.title = "분필 고정";
   } else {
     isChalk = false;
     themeBtn.textContent = "먹";
+    themeBtn.title = "먹 고정";
   }
   document.body.classList.toggle("theme-chalk", isChalk);
 }
@@ -1782,13 +1797,25 @@ window.triggerAction = function(name, durationMs) {
     clearTimeout(actionTimer);
     actionTimer = null;
   }
+  // 시선 추적 인라인 스타일 초기화 (키프레임 애니메이션과의 충돌 방지)
+  eyesWrap.style.transform = "";
+  layerHead.style.transform = "";
+
   for (const act of ALL_ACTIONS) {
     petWrap.classList.remove(`action-${act.replace(/_/g, "-")}`);
   }
   currentAction = name;
 
+  // 모든 버튼의 active를 정리하고 현재 액션에만 정확히 설정
+  document.querySelectorAll(".act-btn").forEach(b => {
+    if (name && b.dataset.act === name) {
+      b.classList.add("active");
+    } else {
+      b.classList.remove("active");
+    }
+  });
+
   if (!name) {
-    document.querySelectorAll(".act-btn").forEach(b => b.classList.remove("active"));
     const meta = MOOD_META[currentMood] || MOOD_META.idle;
     const matLabel = MAT_LABELS[activeMaterial] || "점토";
     petCaption.textContent = `ro · ${meta.label} · ${matLabel}`;
@@ -1798,10 +1825,6 @@ window.triggerAction = function(name, durationMs) {
 
   const cls = `action-${name.replace(/_/g, "-")}`;
   petWrap.classList.add(cls);
-
-  document.querySelectorAll(".act-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.act === name);
-  });
 
   const meta = ACTION_META[name];
   if (meta) {
@@ -1858,14 +1881,15 @@ petWrap.addEventListener("mouseleave", () => {
   }
 });
 
-/* 마우스 시선 추적: 눈이 먼저 가고 머리가 살짝 뒤따른다 */
+/* 마우스 시선 추적: 눈이 먼저 가고 머리가 살짝 뒤따른다 (호버/액션 진행 중에는 간섭 차단) */
 window.addEventListener("mousemove", (e) => {
   recordActivity();
   if (currentMood === "resolved" || currentMood === "recording" || currentMood === "focus") {
     eyesWrap.style.transform = "";
+    layerHead.style.transform = "";
     return;
   }
-  if (currentAction && currentAction !== "gaze") return;
+  if (isPetHover || currentAction) return;
   const rect = layerHead.getBoundingClientRect();
   const cx = rect.left + rect.width * 0.68;
   const cy = rect.top + rect.height * 0.5;
@@ -1904,10 +1928,11 @@ function wakeUpFromSleep() {
   window.triggerAction("alert", 2000);
 }
 
-// 40초 동안 마우스/키보드 입력이 없으면 졸음(drowsy) 진입
+// 75초 동안 마우스/키보드 입력이 없고 대화창이 닫혀 있을 때만 졸음(drowsy) 진입
 setInterval(() => {
-  if (isPetHover || currentAction || currentMood !== "idle" || !bubble.classList.contains("hidden")) return;
-  if (!isDrowsy && (Date.now() - lastUserActivity > 40000)) {
+  if (isPetHover || currentAction || currentMood !== "idle") return;
+  if (!bubble.classList.contains("hidden")) return;
+  if (!isDrowsy && (Date.now() - lastUserActivity > 75000)) {
     isDrowsy = true;
     window.triggerAction("drowsy", 0);
   }
@@ -1975,7 +2000,8 @@ window.addEventListener("mousemove", (e) => {
   }
   webLastX = e.screenX;
 
-  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+  // 클릭 미세 흔들림 허용 임계치 (8px)
+  if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
     notifyHost({ type: "moveBy", dx, dy });
@@ -1995,10 +2021,16 @@ window.addEventListener("mouseup", () => {
 
 petWrap.addEventListener("click", () => {
   if (isNativeHost || webDidDrag) return;
+  if (isDrowsy) {
+    wakeUpFromSleep();
+  }
   setBubbleOpen(bubble.classList.contains("hidden"));
 });
 
 window.onPetClickFromHost = function() {
+  if (isDrowsy) {
+    wakeUpFromSleep();
+  }
   setBubbleOpen(bubble.classList.contains("hidden"));
 };
 
@@ -2142,7 +2174,7 @@ document.getElementById("fbNo").addEventListener("click", async () => {
 });
 
 refreshState();
-window._poll = setInterval(refreshState, 1500);
+window._poll = setInterval(refreshState, 450);
 </script>
 </body>
 </html>
