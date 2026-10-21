@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import ambient, ask, distill, learn, log, mapper, route, stats
+from . import ambient, ask, distill, learn, log, mapper, route, stats, tidy
 
 HOME = "~/.ro"
 
@@ -102,6 +102,25 @@ def _checks():
             return (learn.load_rules(h) == [] and not mem.exists() and len(sent) == 1
                     and "SECRETSUBJECT" not in sent[0][0] and not sent[0][1].get("write"))
 
+    def tidy_is_reversible():
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "D"
+            root.mkdir(parents=True)
+            (root / "a").write_text("x")
+            (root / "b").write_text("x")
+            os.utime(root / "a", (1, 1))
+            with mock.patch("pathlib.Path.home", return_value=t / "home"):
+                plan = tidy.scan(root, min_size=1)
+                tidy.save_plan(plan, t / "ro")
+                before = {p.name for p in root.iterdir()}
+                if len(plan["items"]) != 1 or {p.name for p in root.iterdir()} != before:
+                    return False  # scan은 읽기 전용
+                tidy.apply([plan["items"][0]["id"]], t / "ro", str(t / "log"))
+                tidy.undo(None, t / "ro", str(t / "log"))
+                return {p.name for p in root.iterdir()} == before
+
     def private_files():
         with tempfile.TemporaryDirectory() as h:
             log.append("t", "s", log_dir=h)
@@ -137,6 +156,7 @@ def _checks():
         ("Map은 비밀 파일 제외", map_skips_secrets),
         ("Learn은 승인 전 규칙 불변", learn_requires_approval),
         ("증류: 승인 전 기록 없음·원문 미전송·읽기 모드", distill_needs_approval_and_no_raw),
+        ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
