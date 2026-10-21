@@ -1,10 +1,12 @@
 """ro 터미널 CLI.  python -m ro map | show"""
 import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
-from . import ambient, harden, learn, log, mapper, route
+from . import ambient, ask, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -37,6 +39,12 @@ def main(argv=None):
     ic = asub.add_parser("ics", help="ICS 파일의 7일 내 일정을 로그로 기록")
     ic.add_argument("file")
     nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
+    q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
+    q.add_argument("question")
+    q.add_argument("--engine", choices=route.ENGINES)
+    q.add_argument("--project", help="프로젝트 이름 직접 지정")
+    q.add_argument("--no-context", action="store_true", help="컨텍스트 없이 질문만 전송")
+    q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -55,6 +63,27 @@ def main(argv=None):
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
+    elif args.cmd == "ask":
+        mapdata = ask.load_map()
+        if mapdata is None:
+            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
+            mapper.save_map(mapdata, DEFAULT_OUT)
+            print(f"지도가 없어 새로 만들었습니다 (프로젝트 {len(mapdata['projects'])}개)")
+        pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,
+                      engine=args.engine, rules=learn.load_rules(), project=args.project)
+        print(f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
+              f" / 컨텍스트 {len(pl['context'])}자")
+        if args.dry_run:
+            print("--- 전송될 프롬프트 ---")
+            print(pl["prompt"])
+            return
+        res = ask.execute(pl)
+        print(res["output"])
+        if sys.stdin.isatty():
+            ans = input("첫 답변을 그대로 받아들일 수 있나요? [y/n/Enter=건너뜀] ").strip().lower()
+            if ans in ("y", "n"):
+                ask.feedback(pl, ans == "y")
+        raise SystemExit(0 if res["ok"] else 1)
     elif args.cmd == "route":
         engine, category, reason = route.choose(args.task, learn.load_rules())
         if args.engine:
