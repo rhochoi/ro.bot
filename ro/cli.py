@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import fsutil, ambient, ask, bench, harden, learn, log, mapper, route
+from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -50,6 +50,8 @@ def main(argv=None):
     bg = bsub.add_parser("gen", help="현재 상태에서 정답을 뽑아 과제 파일 생성 (지도도 새로고침)")
     bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 rog.bot만")
     bg.add_argument("--out", default="~/.ro/bench.json")
+    bg.add_argument("--set", choices=["repo", "fixtures", "all"], default="all",
+                    help="repo=rog.bot 실제 상태, fixtures=합성 프로젝트(정확도 변별용), 기본 all")
     br = bsub.add_parser("run", help="과제 × 조건 실행(엔진 호출 발생)")
     br.add_argument("--tasks", default="~/.ro/bench.json")
     br.add_argument("--engine", choices=route.ENGINES, default="codex")
@@ -57,6 +59,7 @@ def main(argv=None):
     br.add_argument("--dry-run", action="store_true", help="실행 횟수·전송 내용만 출력")
     br.add_argument("--only", default="", help="과제 id 접두어(쉼표)만 실행")
     br.add_argument("--limit", type=int, default=0, help="앞에서 N개 과제만 실행")
+    br.add_argument("--repeat", type=int, default=1, help="전체를 N회 반복(모델 편차 확인)")
     bj = bsub.add_parser("judge", help="최근 결과를 익명으로 보고 직접 선호 선택")
     bj.add_argument("--file")
     bp = bsub.add_parser("report", help="결과 요약")
@@ -86,10 +89,15 @@ def main(argv=None):
             mapper.save_map(mapdata, DEFAULT_OUT)
             extra = [n for n in args.projects.split(",") if n]
             repo = Path(__file__).resolve().parent.parent
-            try:
-                tasks = bench.generate_tasks(mapdata, repo, extra)
-            except ValueError as e:
-                raise SystemExit(str(e))
+            tasks = []
+            if args.set in ("repo", "all"):
+                try:
+                    tasks += bench.generate_tasks(mapdata, repo, extra)
+                except ValueError as e:
+                    raise SystemExit(str(e))
+            if args.set in ("fixtures", "all"):
+                fixtures.build()
+                tasks += fixtures.tasks()
             fsutil.atomic_write(Path(args.out).expanduser(),
                                       json.dumps(tasks, ensure_ascii=False, indent=2))
             print(f"지도 새로고침 + 과제 {len(tasks)}개 생성 → {args.out}")
@@ -120,15 +128,19 @@ def main(argv=None):
             mapdata = ask.load_map()
             if mapdata is None:
                 raise SystemExit("지도가 없습니다. 먼저 `python -m ro map`을 실행하세요.")
-            n = len(tasks) * len(arms)
-            print(f"엔진 {args.engine} / 과제 {len(tasks)}개 × 조건 {len(arms)}개 = 호출 {n}회 (읽기 모드)")
+            if any(t.get("fixture") for t in tasks):
+                fixtures.build()  # 결정적 재생성(항상 같은 정답)
+                mapdata = {**mapdata, "projects": mapdata["projects"] + fixtures.mapdata()}
+            n = len(tasks) * len(arms) * args.repeat
+            print(f"엔진 {args.engine} / 과제 {len(tasks)}개 × 조건 {len(arms)}개 × 반복 {args.repeat} "
+                  f"= 호출 {n}회 (읽기 모드)")
             if args.dry_run:
                 for t in tasks:
                     for a in arms:
                         pl = bench.plan_arm(t, a, mapdata, args.engine, "<빈 폴더>")
                         print(f"- {t['id']}/{a}: cwd={pl['cwd']} 컨텍스트 {pl['context_chars']}자")
                 return
-            results = bench.run_matrix(tasks, arms, args.engine, mapdata)
+            results = bench.run_matrix(tasks, arms, args.engine, mapdata, repeat=args.repeat)
             path = bench.save(results)
             print(bench.report({"results": results}))
             print(f"저장: {path}  (직접 선호: `python -m ro bench judge`)")

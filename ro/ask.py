@@ -54,6 +54,8 @@ def select_projects(question, projects, cwd=None, limit=MAX_PROJECTS):
         if score:
             scored.append((score, p))
     scored.sort(key=lambda x: -x[0])
+    if scored and scored[0][0] >= 3:  # 이름으로 지목했으면 키워드만 겹친 후보는 혼선만 준다
+        scored = [x for x in scored if x[0] >= 2]
     return [p for _, p in scored[:limit]]
 
 

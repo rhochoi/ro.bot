@@ -143,6 +143,67 @@ class BenchTest(unittest.TestCase):
         self.assertIn("locate", text)
         self.assertIn("code-fact", text)
 
+    def test_forbid_zeroes_score(self):
+        self.assertEqual(bench.score("9191 그리고 8080", ["9191"], forbid=["8080"])[0], 0.0)
+        self.assertEqual(bench.score("9191", ["9191"], forbid=["8080"])[0], 1.0)
+
+    def test_repeat_and_average_report(self):
+        calls = []
+
+        def fake(engine, prompt, write=False, cwd=None, skip_git_check=False):
+            calls.append(1)
+            ok = len(calls) % 2 == 0
+            return {"ok": True, "code": 0, "duration": 1.0, "output": "a.py 수집" if ok else "모름"}
+
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as h:
+            from unittest import mock
+            import os
+            with mock.patch.dict(os.environ, {"HOME": h}):
+                res = bench.run_matrix([TASK], ["ctx"], "codex", mapdata(Path(d)), runner=fake, repeat=4)
+        self.assertEqual(len(res), 4)
+        self.assertEqual([r["rep"] for r in res], [0, 1, 2, 3])
+        self.assertIn("0.50", bench.report({"results": res}))
+
+
+class FixtureTest(unittest.TestCase):
+    def test_build_is_deterministic_and_answers_present(self):
+        from ro import fixtures
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            fixtures.build(d)
+            first = subprocess.run(["git", "-C", str(Path(d) / "acme-billing"), "rev-parse", "HEAD"],
+                                   capture_output=True, text=True).stdout
+            fixtures.build(d)
+            second = subprocess.run(["git", "-C", str(Path(d) / "acme-billing"), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True).stdout
+            self.assertEqual(first, second)
+            self.assertIn("9191", (Path(d) / "acme-billing" / "config.py").read_text())
+            self.assertIn("reports_v2", (Path(d) / "acme-billing" / "jobs" / "env.sh").read_text())
+            maps = {p["name"]: p for p in fixtures.mapdata(d)}
+            self.assertIn("8080", maps["acme-billing"]["summary"]["guide"])  # 낡은 주장이 컨텍스트에 들어감
+            self.assertNotIn("9191", maps["acme-billing"]["summary"]["guide"])
+
+    def test_tasks_select_only_the_right_project(self):
+        from ro import ask, fixtures
+        with tempfile.TemporaryDirectory() as d:
+            fixtures.build(d)
+            projects = fixtures.mapdata(d)
+            for t in fixtures.tasks():
+                picked = [p["name"] for p in ask.select_projects(t["question"], projects)]
+                self.assertEqual(picked, ["acme-billing"], t["id"])  # legacy가 섞이면 안 됨
+
+    def test_guide_task_not_satisfied_by_generic_advice(self):
+        from ro import fixtures
+        t = next(x for x in fixtures.tasks() if x["id"] == "fx-guide-commit")
+        generic = "일반적으로 type(scope): description 형식에 feat, fix, chore를 씁니다."
+        self.assertEqual(bench.score(generic, t["expect"])[0], 0.0)
+        self.assertEqual(bench.score("`<type>(<scope>): <요약>` 형식", t["expect"])[0], 1.0)
+
+    def test_fixture_task_kinds(self):
+        from ro import fixtures
+        self.assertEqual({t["kind"] for t in fixtures.tasks()},
+                         {"fx-disambig", "fx-trap", "fx-hop", "fx-guide", "fx-needle"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,14 @@ class AskTest(unittest.TestCase):
             "purpose": "application platform", "structure": [], "scripts": [], "guide": "", "recent": []})
         self.assertEqual(ask.select_projects("app form", [c]), [])
 
+    def test_named_project_excludes_keyword_only_neighbors(self):
+        a = proj(self.d / "alpha", "alpha-core", summary={
+            "purpose": "alpha core service", "structure": [], "scripts": [], "guide": "", "recent": []})
+        b = proj(self.d / "beta", "alpha-core-legacy", summary={
+            "purpose": "old alpha core service", "structure": [], "scripts": [], "guide": "", "recent": []})
+        got = ask.select_projects("alpha-core 설정 알려줘", [a, b])
+        self.assertEqual([p["name"] for p in got], ["alpha-core"])
+
     def test_context_uses_summary(self):
         a = proj(self.d / "alpha", "alpha", summary={
             "purpose": "장치 수집", "structure": ["ro/", "tests/"], "scripts": ["test"],

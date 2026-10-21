@@ -115,9 +115,11 @@ def load_tasks(path):
     return tasks
 
 
-def score(answer, expect):
-    """(점수 0~1, 충족한 항목 인덱스 목록)."""
+def score(answer, expect, forbid=()):
+    """(점수 0~1, 충족한 항목 인덱스 목록). forbid 문구가 하나라도 있으면 0점."""
     low = (answer or "").lower()
+    if any(f.lower() in low for f in forbid):
+        return 0.0, []
     hit = []
     for i, item in enumerate(expect):
         options = [item] if isinstance(item, str) else item
@@ -140,23 +142,25 @@ def plan_arm(task, arm, mapdata, engine, neutral_dir):
     raise ValueError(f"unknown arm: {arm}")
 
 
-def run_matrix(tasks, arms, engine, mapdata, runner=route.run, neutral_dir=None):
-    """모든 (과제, 조건)을 읽기 모드로 실행. 반환: 결과 목록."""
+def run_matrix(tasks, arms, engine, mapdata, runner=route.run, neutral_dir=None, repeat=1):
+    """모든 (반복, 과제, 조건)을 읽기 모드로 실행. 반환: 결과 목록."""
     neutral_dir = neutral_dir or tempfile.mkdtemp(prefix="ro-bench-")
     results = []
-    for t in tasks:
-        for arm in arms:
-            pl = plan_arm(t, arm, mapdata, engine, neutral_dir)
-            res = runner(engine, pl["prompt"], write=False, cwd=pl["cwd"], skip_git_check=True)
-            answer = log.redact(res["output"]) if res["ok"] else ""
-            s, hit = score(answer, t["expect"])
-            results.append({
-                "task": t["id"], "kind": t.get("kind", "-"), "arm": arm, "engine": engine, "ok": res["ok"],
-                "duration": res["duration"], "context_chars": pl["context_chars"],
-                "score": s, "hit": hit, "answer": answer, "error": "" if res["ok"] else res["output"][:200]})
-            log.append("bench", f"{t['id']}/{arm}", {
-                "task": t["id"], "arm": arm, "engine": engine, "ok": res["ok"],
-                "score": s, "duration": res["duration"]}, engine=engine)
+    for rep in range(repeat):
+        for t in tasks:
+            for arm in arms:
+                pl = plan_arm(t, arm, mapdata, engine, neutral_dir)
+                res = runner(engine, pl["prompt"], write=False, cwd=pl["cwd"], skip_git_check=True)
+                answer = log.redact(res["output"]) if res["ok"] else ""
+                s, hit = score(answer, t["expect"], t.get("forbid", ()))
+                results.append({
+                    "task": t["id"], "kind": t.get("kind", "-"), "arm": arm, "rep": rep,
+                    "engine": engine, "ok": res["ok"], "duration": res["duration"],
+                    "context_chars": pl["context_chars"], "score": s, "hit": hit, "answer": answer,
+                    "error": "" if res["ok"] else res["output"][:200]})
+                log.append("bench", f"{t['id']}/{arm}", {
+                    "task": t["id"], "arm": arm, "engine": engine, "ok": res["ok"],
+                    "score": s, "duration": res["duration"]}, engine=engine)
     return results
 
 
@@ -201,13 +205,13 @@ def report(data):
             n = len({r["task"] for r in results if r.get("kind", "-") == k})
             lines.append(f"  {k:<10} {' / '.join(cells)}  (과제 {n}개)")
         lines.append("")
-    by_task = defaultdict(dict)
+    by_task = defaultdict(lambda: defaultdict(list))
     for r in results:
-        by_task[r["task"]][r["arm"]] = r
+        by_task[r["task"]][r["arm"]].append(r["score"])
     w = t = l = 0
     for arms in by_task.values():
         if "ctx" in arms and "none" in arms:
-            d = arms["ctx"]["score"] - arms["none"]["score"]
+            d = sum(arms["ctx"]) / len(arms["ctx"]) - sum(arms["none"]) / len(arms["none"])
             w, t, l = w + (d > 0), t + (d == 0), l + (d < 0)
     if w + t + l:
         lines.append(f"ctx vs none: 승 {w} / 무 {t} / 패 {l}  (과제 {w + t + l}개)")
