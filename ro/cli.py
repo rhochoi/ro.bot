@@ -199,10 +199,14 @@ def main(argv=None):
                 raise SystemExit("후보 id가 필요합니다.")
             try:
                 c = getattr(learn, args.action)(args.id)
-            except KeyError as e:
+            except (KeyError, ValueError) as e:
                 raise SystemExit(str(e))
             log.append(f"learn_{args.action}", c["text"], {"id": c["id"], "kind": c["kind"]})
             print(f"{args.action}: [{c['id']}] {c['text']}")
+            if args.action == "approve" and c.get("kind") == "routing":
+                print("routing.toml을 수정함 — `git diff routing.toml` 확인 후 커밋하세요(자동 커밋 안 함)")
+            if args.action == "approve" and c.get("kind") == "memory":
+                print("memory/rog-model.md에 추가됨 — `git diff memory/` 확인 후 커밋하세요(자동 커밋 안 함)")
         elif args.action == "rules":
             for r in learn.load_rules():
                 print(f"[{r['id']}] {r['text']} ({r['evidence']})")
