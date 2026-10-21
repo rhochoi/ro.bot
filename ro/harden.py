@@ -7,9 +7,10 @@ import json
 import os
 import stat
 import tempfile
+import time
 from pathlib import Path
 
-from . import ambient, ask, learn, log, mapper, route
+from . import ambient, ask, distill, learn, log, mapper, route, stats
 
 HOME = "~/.ro"
 
@@ -84,6 +85,23 @@ def _checks():
             learn.propose(ev, h)
             return learn.load_rules(h) == []
 
+    def distill_needs_approval_and_no_raw():
+        with tempfile.TemporaryDirectory() as h:
+            ld = str(Path(h) / "log")
+            for i in range(4):
+                log.append("activity", "git status", {"source": "shell", "type": "command", "ref": "x"},
+                           log_dir=ld, at=time.time() - i * 86400)
+                log.append("activity", "SECRETSUBJECT", {"source": "git", "type": "commit", "ref": "/p/r", "id": str(i)},
+                           log_dir=ld, at=time.time() - i * 86400)
+            for d in stats.last_days(7):
+                stats.write(d, h, ld)
+            sent = []
+            fake = lambda e, prompt, **k: sent.append((prompt, k)) or {"ok": False, "output": ""}  # noqa: E731
+            new, _, _ = distill.run(7, "codex", home=h, runner=fake)
+            mem = Path(h) / "m.md"
+            return (learn.load_rules(h) == [] and not mem.exists() and len(sent) == 1
+                    and "SECRETSUBJECT" not in sent[0][0] and not sent[0][1].get("write"))
+
     def private_files():
         with tempfile.TemporaryDirectory() as h:
             log.append("t", "s", log_dir=h)
@@ -118,6 +136,7 @@ def _checks():
         ("쓰기는 명시 플래그에서만", write_needs_flag),
         ("Map은 비밀 파일 제외", map_skips_secrets),
         ("Learn은 승인 전 규칙 불변", learn_requires_approval),
+        ("증류: 승인 전 기록 없음·원문 미전송·읽기 모드", distill_needs_approval_and_no_raw),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
