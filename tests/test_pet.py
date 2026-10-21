@@ -171,18 +171,16 @@ class PetTest(unittest.TestCase):
                 srv.server_close()
 
     def test_choose_material_by_context(self):
-        # 감정별 자동 재질 매핑
-        self.assertEqual(pet.choose_material(mood="discovery", luminance=0.5, hour=14), "neon")
-        self.assertEqual(pet.choose_material(mood="focus", luminance=0.5, hour=14), "metal")
-        self.assertEqual(pet.choose_material(mood="anxious", luminance=0.5, hour=14), "metal")
-        self.assertEqual(pet.choose_material(mood="recording", luminance=0.5, hour=14), "paper")
+        self.assertEqual(pet.MATERIALS, ("clay", "glass", "jelly"))
+        # 감정별 자동 재질 매핑 (점토 / 리퀴드 글라스 / 젤리 3종)
+        self.assertEqual(pet.choose_material(mood="discovery", luminance=0.5, hour=14), "jelly")
         self.assertEqual(pet.choose_material(mood="resolved", luminance=0.5, hour=14), "jelly")
-        # 기본(idle) 상태에서는 배경 밝기·시간대에 따라 전환
+        self.assertEqual(pet.choose_material(mood="recording", luminance=0.5, hour=14), "glass")
+        self.assertEqual(pet.choose_material(mood="focus", luminance=0.5, hour=14), "glass")
+        self.assertEqual(pet.choose_material(mood="anxious", luminance=0.5, hour=14), "clay")
+        # 기본(idle) 상태에서는 밝은 배경일 때 리퀴드 글라스, 그 외에는 점토
         self.assertEqual(pet.choose_material(mood="idle", luminance=0.5, hour=14), "clay")
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.62, hour=14), "ceramic")
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.85, hour=14), "glass")
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.15, hour=14), "neon")
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.35, hour=23), "neon")
+        self.assertEqual(pet.choose_material(mood="idle", luminance=0.80, hour=14), "glass")
 
 
 if __name__ == "__main__":

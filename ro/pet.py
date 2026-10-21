@@ -49,16 +49,11 @@ MOOD_CAPTIONS = {
     "discovery": "눈이 커지고 머리가 들린다.",
     "resolved": "바닥이 길게 뻗는다.",
 }
-MATERIALS = ("clay", "ceramic", "glass", "jelly", "paper", "neon", "metal", "flat")
+MATERIALS = ("clay", "glass", "jelly")
 MATERIAL_LABELS = {
     "clay": "점토",
-    "ceramic": "세라믹",
     "glass": "리퀴드 글라스",
     "jelly": "젤리",
-    "paper": "종이",
-    "neon": "네온",
-    "metal": "메탈",
-    "flat": "평면",
 }
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
@@ -131,32 +126,17 @@ def choose_theme_for_luminance(luminance, current_chalk=False):
 
 
 def choose_material(mood="idle", luminance=0.5, hour=None):
-    """감정(mood)·배경 밝기(luminance)·시간대(hour)에 따라 재질 테마를 자동 선택한다.
-    - 발견(discovery) 또는 깊은 어둠(luminance < 0.24) 또는 심야(22시~05시) 어두운 배경: 네온(neon)
-    - 집중(focus) 또는 불안(anxious): 메탈(metal)
-    - 기록 중(recording): 종이(paper)
-    - 풀어냄(resolved): 젤리(jelly)
-    - 아주 밝은 배경(luminance > 0.72): 리퀴드 글라스(glass)
-    - 중간 밝은 배경(0.55 <= luminance <= 0.72): 세라믹(ceramic)
-    - 기본(idle): 점토(clay)
+    """감정(mood)·배경 밝기(luminance)에 따라 3가지 재질 테마(점토·리퀴드 글라스·젤리)를 자동 선택한다.
+    - 발견(discovery) 또는 풀어냄(resolved): 젤리(jelly)
+    - 기록 중(recording), 집중(focus), 또는 밝은 배경(luminance > 0.65): 리퀴드 글라스(glass)
+    - 기본(idle) 및 불안(anxious): 점토(clay)
     """
-    if hour is None:
-        hour = time.localtime().tm_hour
-    if mood == "discovery":
-        return "neon"
-    if mood in ("focus", "anxious"):
-        return "metal"
-    if mood == "recording":
-        return "paper"
-    if mood == "resolved":
+    if mood in ("discovery", "resolved"):
         return "jelly"
-    if luminance is not None:
-        if luminance < 0.24 or ((hour >= 22 or hour < 6) and luminance < 0.43):
-            return "neon"
-        if luminance > 0.72:
-            return "glass"
-        if luminance >= 0.55:
-            return "ceramic"
+    if mood in ("recording", "focus"):
+        return "glass"
+    if mood == "idle" and luminance is not None and luminance > 0.65:
+        return "glass"
     return "clay"
 
 
@@ -832,7 +812,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
 
   /* =========================================================
-     MATERIAL — 리퀴드 글라스(Liquid Glass), 네온(Neon), 메탈(Brushed)
+     MATERIAL — 점토(Clay), 리퀴드 글라스(Liquid Glass), 젤리(Jelly) 3종
      ========================================================= */
   /* 1. 리퀴드 글라스 (Liquid Glass): 은은하게 뒤가 비치는 반투명 밀키 리퀴드 글라스 + 양끝 프리즘 림 */
   body.material-glass .ro-bot {
@@ -868,114 +848,7 @@ PET_HTML = r"""<!DOCTYPE html>
     stroke: #1A1917;
   }
 
-  /* 2. 네온 (Neon): 매트한 웜 다크브라운 내부(#2B1E16) + 선명한 크림화이트 튜브 테두리 + 앰버 외부 광원 */
-  body.material-neon .ro-bot {
-    filter: drop-shadow(0 0 12px rgba(255, 140, 42, 0.62));
-  }
-  body.material-neon .pill {
-    background: #2B1E16;
-    border: 2.2px solid #FFF5E4;
-    box-shadow:
-      0 0 6px rgba(255, 196, 118, 0.95),
-      0 0 14px rgba(255, 132, 36, 0.68),
-      inset 0 0 5px rgba(255, 160, 68, 0.42);
-  }
-  body.material-neon .eye {
-    background: #FFF2DC;
-    box-shadow: 0 0 5px rgba(255, 196, 118, 0.92), 0 0 10px rgba(255, 136, 40, 0.65);
-  }
-  body.material-neon .resolved-arch {
-    stroke: #FFF2DC;
-    filter: drop-shadow(0 0 5px #FFB866);
-  }
-
-  /* 3. 메탈 · Brushed (밝은 실버 알루미늄 대각선 광택 + 초미세 브러시드 결 + 다크 그레이 베벨 림) */
-  body.material-metal .ro-bot {
-    filter: drop-shadow(0 8px 15px rgba(15, 14, 13, 0.24));
-  }
-  body.material-metal .pill {
-    background:
-      repeating-linear-gradient(
-        0deg,
-        rgba(255, 255, 255, 0.05) 0px,
-        rgba(255, 255, 255, 0.05) 0.7px,
-        rgba(0, 0, 0, 0.015) 0.7px,
-        rgba(0, 0, 0, 0.015) 1.4px
-      ),
-      linear-gradient(
-        112deg,
-        #F3F3F1 0%,
-        #DEDFDc 28%,
-        #C2C4C1 55%,
-        #D7D9D6 76%,
-        #AEB0AD 100%
-      );
-    border: 1.2px solid #828481;
-    box-shadow:
-      inset 0 2px 2.5px rgba(255, 255, 255, 0.95),
-      inset 0 -3px 4px rgba(62, 64, 62, 0.58),
-      0 4px 10px rgba(15, 14, 13, 0.20);
-  }
-  body.material-metal .eye {
-    background: #1A1917;
-    box-shadow:
-      inset 0 1px 2px rgba(0, 0, 0, 0.85),
-      0 1px 0 rgba(255, 255, 255, 0.65);
-  }
-  body.material-metal .resolved-arch {
-    stroke: #1A1917;
-  }
-
-  /* =========================================================
-     MATERIAL II — 세라믹(Glaze), 젤리(Jelly), 종이(Paper Cut)
-     ========================================================= */
-  /* 4. 세라믹 · Glaze (깊은 흑유 도자기 광택 + 날카로운 좌상단 유약 하이라이트 띠) */
-  body.material-ceramic .ro-bot {
-    filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.28));
-  }
-  body.material-ceramic .pill {
-    overflow: hidden;
-    background: radial-gradient(
-      115% 130% at 35% 24%,
-      #2E2D2B 0%,
-      #141413 52%,
-      #090908 100%
-    );
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow:
-      inset 0 2.2px 2.5px rgba(255, 255, 255, 0.48),
-      inset 0 -4px 6px rgba(0, 0, 0, 0.88),
-      0 4px 10px rgba(15, 14, 13, 0.26);
-  }
-  body.material-ceramic .pill::before {
-    content: "";
-    position: absolute;
-    top: 3.2px;
-    left: 8px;
-    width: 34%;
-    height: 2.2px;
-    border-radius: 999px;
-    background: linear-gradient(
-      90deg,
-      rgba(255, 255, 255, 0.92) 0%,
-      rgba(255, 255, 255, 0.35) 68%,
-      rgba(255, 255, 255, 0.0) 100%
-    );
-    filter: blur(0.3px);
-    pointer-events: none;
-  }
-  body.material-ceramic .eyes {
-    z-index: 2;
-  }
-  body.material-ceramic .eye {
-    background: #F4EFE6;
-    box-shadow: inset 0 1px 1.5px rgba(0, 0, 0, 0.35);
-  }
-  body.material-ceramic .resolved-arch {
-    stroke: #F4EFE6;
-  }
-
-  /* 5. 젤리 · Jelly (반투명 탄제린/코랄 구미 젤리 + 내부 서브서피스 산란광 + 매끈한 하이라이트) */
+  /* 2. 젤리 · Jelly (반투명 탄제린/코랄 구미 젤리 + 내부 서브서피스 산란광 + 매끈한 하이라이트) */
   body.material-jelly .ro-bot {
     filter: drop-shadow(0 8px 16px rgba(235, 92, 24, 0.26));
   }
@@ -1020,29 +893,6 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   body.material-jelly .resolved-arch {
     stroke: #1A1917;
-  }
-
-  /* 6. 종이 · Paper Cut (따뜻한 코튼지/한지 오려내기 + 정교한 컷아웃 단면 그림자) */
-  body.material-paper .ro-bot {
-    filter: drop-shadow(3.5px 6px 11px rgba(42, 34, 24, 0.17));
-  }
-  body.material-paper .pill {
-    background:
-      radial-gradient(circle at 22% 30%, rgba(255, 255, 255, 0.55) 0%, transparent 55%),
-      radial-gradient(circle at 78% 68%, rgba(165, 152, 132, 0.08) 0%, transparent 60%),
-      linear-gradient(180deg, #F7F4EC 0%, #EFECE2 100%);
-    border: 1px solid #DFD9CB;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.98),
-      inset 0 -1px 1px rgba(156, 146, 130, 0.22),
-      2px 3.5px 5px rgba(45, 36, 26, 0.15);
-  }
-  body.material-paper .eye {
-    background: #1D1B18;
-    box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.45);
-  }
-  body.material-paper .resolved-arch {
-    stroke: #1D1B18;
   }
 
   /* 눈 둘 — 머리 왼쪽 끝에서 정확히 9u 지점 시작, 눈 사이 간격 2u */
@@ -1184,7 +1034,7 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="toolbar">
         <button id="clearBtn" class="chip-btn" style="display:none;" title="알림/답변 닫기">초기화</button>
-        <button id="matBtn" class="chip-btn" title="상황별 자동 / 점토 / 유리 / 네온 / 메탈 / 평면 재질 전환">자동·점토</button>
+        <button id="matBtn" class="chip-btn" title="상황별 자동 / 점토 / 리퀴드 글라스 / 젤리 전환">자동·점토</button>
         <button id="themeBtn" class="chip-btn" title="배경 자동 감지 / 먹 고정 / 분필 고정 전환">자동·먹</button>
         <button id="closeBtn" class="chip-btn" title="대화창 닫기 (Esc)">닫기</button>
       </div>
@@ -1313,15 +1163,10 @@ let dragStart = null;
 let didDrag = false;
 const MAT_LABELS = {
   clay: "점토",
-  ceramic: "세라믹",
   glass: "리퀴드 글라스",
   jelly: "젤리",
-  paper: "종이",
-  neon: "네온",
-  metal: "메탈",
-  flat: "평면",
 };
-const MAT_CYCLE = ["auto", "clay", "ceramic", "glass", "jelly", "paper", "neon", "metal", "flat"];
+const MAT_CYCLE = ["auto", "clay", "glass", "jelly"];
 let materialMode = "auto";
 let activeMaterial = "clay";
 let backdropLuminance = 0.5;
@@ -1330,16 +1175,9 @@ let backdropIsDark = window.matchMedia && window.matchMedia("(prefers-color-sche
 let isChalk = false;
 
 function computeAutoMaterial(mood, lum) {
-  const hr = new Date().getHours();
-  if (mood === "discovery") return "neon";
-  if (mood === "focus" || mood === "anxious") return "metal";
-  if (mood === "recording") return "paper";
-  if (mood === "resolved") return "jelly";
-  if (typeof lum === "number") {
-    if (lum < 0.24 || ((hr >= 22 || hr < 6) && lum < 0.43)) return "neon";
-    if (lum > 0.72) return "glass";
-    if (lum >= 0.55) return "ceramic";
-  }
+  if (mood === "discovery" || mood === "resolved") return "jelly";
+  if (mood === "recording" || mood === "focus") return "glass";
+  if (mood === "idle" && typeof lum === "number" && lum > 0.65) return "glass";
   return "clay";
 }
 
@@ -1347,7 +1185,7 @@ function updateMaterialUI() {
   activeMaterial = (materialMode === "auto")
     ? computeAutoMaterial(currentMood, backdropLuminance)
     : materialMode;
-  for (const m of ["clay", "ceramic", "glass", "jelly", "paper", "neon", "metal", "flat"]) {
+  for (const m of ["clay", "glass", "jelly"]) {
     document.body.classList.toggle(`material-${m}`, activeMaterial === m);
   }
   const label = MAT_LABELS[activeMaterial] || "점토";
