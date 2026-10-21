@@ -9,7 +9,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from . import learn, log, mapper, route
+from . import ambient, learn, log, mapper, route
 
 HOME = "~/.ro"
 
@@ -91,6 +91,13 @@ def _checks():
             return learn.load_rules(h) == [] and any(
                 p.name.startswith("rules.json.corrupt") for p in Path(h).iterdir())
 
+    def ambient_untrusted():
+        with tempfile.TemporaryDirectory() as h:
+            e = ambient.ingest("serial", "x\x1b[31m" + "A" * 500 + " sk-abcdefghijklmnopqrstuv", h)
+            kinds = {x["kind"] for x in log.read(e["ts"][:10], h)}
+            return kinds == {"ambient"} and "\x1b" not in e["summary"] \
+                and "sk-" not in e["summary"] and len(e["summary"]) < 260
+
     return [
         ("비밀 마스킹", redaction),
         ("엔진 기본 모드는 읽기", read_mode_default),
@@ -99,6 +106,7 @@ def _checks():
         ("Learn은 승인 전 규칙 불변", learn_requires_approval),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
+        ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
     ]
 
 

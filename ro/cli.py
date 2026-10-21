@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from . import harden, learn, log, mapper, route
+from . import ambient, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -29,6 +29,14 @@ def main(argv=None):
     au = sub.add_parser("audit", help="~/.ro 권한·비밀·무결성 점검")
     au.add_argument("--fix", action="store_true", help="권한만 0700/0600으로 조정")
     sub.add_parser("eval", help="안전 불변식 회귀 체크리스트")
+    am = sub.add_parser("ambient", help="장치·일정·알림 입력 채널")
+    asub = am.add_subparsers(dest="amb_cmd", required=True)
+    sr = asub.add_parser("serial", help="시리얼 장치 출력을 로그로 기록")
+    sr.add_argument("-p", "--port")
+    sr.add_argument("-b", "--baud", type=int, default=115200)
+    ic = asub.add_parser("ics", help="ICS 파일의 7일 내 일정을 로그로 기록")
+    ic.add_argument("file")
+    nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -101,6 +109,19 @@ def main(argv=None):
         log.append("eval", f"{len(results) - len(failed)}/{len(results)} 통과",
                    {"failed": failed})
         raise SystemExit(1 if failed else 0)
+    elif args.cmd == "ambient":
+        if args.amb_cmd == "serial":
+            kept, dropped = ambient.pump(ambient.serial_lines(args.port, args.baud), "serial")
+            print(f"기록 {kept}건, 버림 {dropped}건")
+        elif args.amb_cmd == "ics":
+            events = ambient.parse_ics(Path(args.file).expanduser().read_text(errors="replace"))
+            for d, summary in events:
+                ambient.ingest("schedule", f"{d} {summary}")
+                print(f"{d} {summary}")
+            print(f"일정 {len(events)}건 기록")
+        else:
+            head = log.summarize(time.strftime("%Y-%m-%d")).splitlines()[0]
+            print("알림 전송됨" if ambient.notify("ro", head) else "알림 전송 실패")
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)
