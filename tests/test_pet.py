@@ -182,6 +182,55 @@ class PetTest(unittest.TestCase):
         self.assertEqual(pet.choose_material(mood="idle", luminance=0.5, hour=14), "clay")
         self.assertEqual(pet.choose_material(mood="idle", luminance=0.80, hour=14), "glass")
 
+    def test_motion_guide_actions_and_api(self):
+        # 모션 가이드 12종 + 대기 숨쉬기 상호작용 목록 및 라벨 검증
+        expected_actions = (
+            "breathe", "look_around", "walk", "thinking", "alert", "drowsy",
+            "gaze", "pet", "drag", "shake", "drop", "success", "failure"
+        )
+        self.assertEqual(pet.ACTIONS, expected_actions)
+        for act in expected_actions:
+            self.assertIn(act, pet.ACTION_LABELS)
+            self.assertIn(act, pet.ACTION_DESCS)
+
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            res = rt.trigger_action("pet", duration=3.0)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["action"], "pet")
+            self.assertEqual(res["label"], "쓰다듬기")
+
+            st = rt.snapshot()
+            self.assertEqual(st["action"], "pet")
+            self.assertEqual(st["action_label"], "쓰다듬기")
+
+            # 알 수 없는 상호작용 요청 시 거절
+            res_bad = rt.trigger_action("unknown_action")
+            self.assertFalse(res_bad["ok"])
+
+            # HTTP GET /api/action 및 POST /api/action 검증
+            srv = pet.start_server(rt, host="127.0.0.1", port=0)
+            port = srv.server_address[1]
+            try:
+                # GET /api/action?name=alert
+                with urlopen(f"http://127.0.0.1:{port}/api/action?name=alert&duration=2.5", timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    self.assertTrue(data["ok"])
+                    self.assertEqual(data["action"], "alert")
+
+                # POST /api/action with token
+                req = Request(f"http://127.0.0.1:{port}/api/action",
+                              data=json.dumps({"action": "drop", "duration": 1.5}).encode("utf-8"),
+                              headers={"Content-Type": "application/json", "X-Ro-Token": rt.token},
+                              method="POST")
+                with urlopen(req, timeout=3) as resp2:
+                    data2 = json.loads(resp2.read().decode("utf-8"))
+                    self.assertTrue(data2["ok"])
+                    self.assertEqual(data2["action"], "drop")
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

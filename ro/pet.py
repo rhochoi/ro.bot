@@ -55,6 +55,51 @@ MATERIAL_LABELS = {
     "glass": "리퀴드 글라스",
     "jelly": "젤리",
 }
+ACTIONS = (
+    "breathe",
+    "look_around",
+    "walk",
+    "thinking",
+    "alert",
+    "drowsy",
+    "gaze",
+    "pet",
+    "drag",
+    "shake",
+    "drop",
+    "success",
+    "failure",
+)
+ACTION_LABELS = {
+    "breathe": "대기 · 숨쉬기",
+    "look_around": "두리번",
+    "walk": "걷기",
+    "thinking": "생각",
+    "alert": "깜짝",
+    "drowsy": "졸음",
+    "gaze": "시선",
+    "pet": "쓰다듬기",
+    "drag": "잡기 · 끌기",
+    "shake": "흔들기",
+    "drop": "착지 바운스",
+    "success": "성공 · 해결",
+    "failure": "실패 · 에러",
+}
+ACTION_DESCS = {
+    "breathe": "3개 층 시차 숨쉬기 (3초 루프)",
+    "look_around": "눈이 먼저 가는 두리번",
+    "walk": "바닥-몸-머리 순차 이동",
+    "thinking": "머리 갸우뚱 & 엇박자 펄스",
+    "alert": "깜짝 솟구침 & 눈 커짐",
+    "drowsy": "머리 침하 & 실눈 & 깊은 호흡",
+    "gaze": "마우스 커서 시선 추적",
+    "pet": "폭신하게 눌림 & 눈웃음 (마우스 호버)",
+    "drag": "세로 늘어남 & 바닥 처짐 (드래그)",
+    "shake": "층 좌우 요동 (빠른 흔들기)",
+    "drop": "착지 스쿼시 & 스프링 탄성",
+    "success": "기쁨의 점프 & 웃는 눈 & 26u 확장",
+    "failure": "층 어긋남 & 떨림 & 작은 눈",
+}
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 
@@ -181,6 +226,24 @@ class PetRuntime:
         self.write_pending = None
         self._last_event_count = None
         self._dismissed_fail_ts = None
+        self.current_action = None
+        self.action_until = 0.0
+
+    def trigger_action(self, action, duration=4.0):
+        """12가지 모션 상호작용(숨쉬기, 두리번, 걷기, 생각, 깜짝, 졸음, 시선, 쓰다듬기, 잡기, 흔들기, 착지, 성공, 실패)을 즉시 발동한다."""
+        if action not in ACTIONS:
+            return {"ok": False, "error": f"지원하지 않는 상호작용: {action}"}
+        now = time.time()
+        with self._lock:
+            self.current_action = action
+            self.action_until = now + float(duration)
+        return {
+            "ok": True,
+            "action": action,
+            "duration": float(duration),
+            "label": ACTION_LABELS.get(action, action),
+            "desc": ACTION_DESCS.get(action, "")
+        }
 
     def mark_recording(self, now=None):
         now = now or time.time()
@@ -257,6 +320,7 @@ class PetRuntime:
             recording_until = self.recording_until
             last_answer = self.last_answer
             dismissed_ts = self._dismissed_fail_ts
+            active_action = self.current_action if now < self.action_until else None
 
         # 가장 마지막 이벤트가 실패한 route이고 아직 확인(닫기)하지 않았을 때만 실패 경고 표시
         last_route_failed = False
@@ -314,6 +378,9 @@ class PetRuntime:
             "mood": mood,
             "mood_label": MOOD_LABELS[mood],
             "mood_caption": MOOD_CAPTIONS[mood],
+            "action": active_action,
+            "action_label": ACTION_LABELS.get(active_action) if active_action else None,
+            "action_desc": ACTION_DESCS.get(active_action) if active_action else None,
             "material": material,
             "material_label": MATERIAL_LABELS[material],
             "status_line": log.redact(status_line),
@@ -942,9 +1009,15 @@ PET_HTML = r"""<!DOCTYPE html>
      EXPRESSIONS — 눈과 층으로만 (브랜드 시트 6가지 표정)
      ========================================================= */
 
-  /* 1. 기본 (idle) */
-  .mood-idle .ro-bot {
-    animation: idleFloat 3.4s infinite ease-in-out;
+  /* 1. 기본 (idle): 3개 층 독립 시차 호흡 */
+  .mood-idle .pill-head, .action-breathe .pill-head {
+    animation: breatheHead 3.0s infinite ease-in-out;
+  }
+  .mood-idle .pill-body, .action-breathe .pill-body {
+    animation: breatheBody 3.0s infinite ease-in-out;
+  }
+  .mood-idle .pill-base, .action-breathe .pill-base {
+    animation: breatheBase 3.0s infinite ease-in-out;
   }
 
   /* 2. 기록 중 (recording): 아래를 보며 바닥 층이 길어진다 */
@@ -990,10 +1063,314 @@ PET_HTML = r"""<!DOCTYPE html>
   .mood-resolved .pill-body { width: calc(13 * var(--u)) !important; }
   .mood-resolved .pill-base { width: calc(25.5 * var(--u)) !important; }
 
-  @keyframes idleFloat {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-2px); }
+  /* =========================================================
+     MOTIONS & INTERACTIONS — 브랜드 모션 가이드 12종
+     1. 몸은 따로 움직인다 (머리/몸/바닥 시차 분절)
+     2. 눈이 먼저 간다 (눈 리드 모션)
+     3. 원래 수에 남지 않는다 (스쿼시 앤 스트레치 탄성)
+     4. 몸짓, 느낌을 분절한다 (물리적 무게감)
+     ========================================================= */
+
+  /* A-1. 대기 · 숨쉬기 (breathe): 3.0s 주기, 3개 층 독립 시차 호흡 */
+  @keyframes breatheHead {
+    0%, 100% { transform: translateY(0) scaleX(1); }
+    22%      { transform: translateY(-2.2px) scaleX(0.985); }
+    55%      { transform: translateY(-1.0px) scaleX(1.025); }
+    80%      { transform: translateY(0.4px) scaleX(1); }
   }
+  @keyframes breatheBody {
+    0%, 100% { transform: translateY(0) scaleX(1); }
+    32%      { transform: translateY(-1.4px) scaleX(0.99); }
+    65%      { transform: translateY(-0.4px) scaleX(1.015); }
+    88%      { transform: translateY(0) scaleX(1); }
+  }
+  @keyframes breatheBase {
+    0%, 100% { transform: translateY(0) scaleX(1); }
+    40%      { transform: translateY(-0.6px) scaleX(1); }
+    70%      { transform: translateY(0) scaleX(1.012); }
+  }
+
+  /* A-2. 두리번 (look_around): 눈이 먼저 가고 머리가 1u 뒤따른다 */
+  .action-look-around .eyes {
+    animation: lookEyes 3.0s infinite cubic-bezier(.22,1,.36,1);
+  }
+  .action-look-around .pill-head {
+    animation: lookHead 3.0s infinite cubic-bezier(.22,1,.36,1);
+  }
+  .action-look-around .pill-body {
+    animation: lookBody 3.0s infinite cubic-bezier(.22,1,.36,1);
+  }
+  @keyframes lookEyes {
+    0%, 100% { transform: translate(0, -50%); }
+    15%, 38% { transform: translate(calc(-2.8 * var(--u)), -50%); }
+    48%, 78% { transform: translate(calc(2.4 * var(--u)), -50%); }
+    90%      { transform: translate(0, -50%); }
+  }
+  @keyframes lookHead {
+    0%, 100% { transform: translateX(0); }
+    22%, 38% { transform: translateX(calc(-1.0 * var(--u))); }
+    55%, 78% { transform: translateX(calc(1.0 * var(--u))); }
+    92%      { transform: translateX(0); }
+  }
+  @keyframes lookBody {
+    0%, 100% { transform: translateX(0); }
+    28%, 38% { transform: translateX(calc(-0.4 * var(--u))); }
+    60%, 78% { transform: translateX(calc(0.4 * var(--u))); }
+    94%      { transform: translateX(0); }
+  }
+
+  /* A-3. 걷기 / 이동 (walk): 바닥이 먼저 가고 몸-머리가 뒤따르는 분절 스텝 */
+  .action-walk .pill-base {
+    animation: walkBase 1.3s infinite ease-in-out;
+  }
+  .action-walk .pill-body {
+    animation: walkBody 1.3s infinite ease-in-out;
+  }
+  .action-walk .pill-head {
+    animation: walkHead 1.3s infinite ease-in-out;
+  }
+  @keyframes walkBase {
+    0%, 100% { transform: translateX(0); }
+    25%      { transform: translateX(calc(2.2 * var(--u))) scaleX(1.04); }
+    50%      { transform: translateX(0) scaleX(1); }
+    75%      { transform: translateX(calc(-2.2 * var(--u))) scaleX(1.04); }
+  }
+  @keyframes walkBody {
+    0%, 100% { transform: translateX(0); }
+    34%      { transform: translateX(calc(1.6 * var(--u))); }
+    50%      { transform: translateX(0); }
+    84%      { transform: translateX(calc(-1.6 * var(--u))); }
+  }
+  @keyframes walkHead {
+    0%, 100% { transform: translateX(0); }
+    42%      { transform: translateX(calc(1.1 * var(--u))); }
+    50%      { transform: translateX(0); }
+    92%      { transform: translateX(calc(-1.1 * var(--u))); }
+  }
+
+  /* A-4. 생각 / 계산 (thinking): 머리 갸우뚱 & 엇박자 펄스 & 시선 위 */
+  .action-thinking .pill-head {
+    animation: thinkHead 2.2s infinite ease-in-out;
+  }
+  .action-thinking .pill-body {
+    animation: thinkBody 2.2s infinite ease-in-out;
+  }
+  .action-thinking .pill-base {
+    animation: thinkBase 2.2s infinite ease-in-out;
+  }
+  .action-thinking .eyes {
+    transform: translate(calc(0.8 * var(--u)), calc(-50% - 2.8px)) !important;
+  }
+  @keyframes thinkHead {
+    0%, 100% { transform: rotate(-3.5deg) translateY(-2.2px); }
+    50%      { transform: rotate(-1.0deg) translateY(-3.2px); }
+  }
+  @keyframes thinkBody {
+    0%, 100% { transform: translateX(calc(0.7 * var(--u))); }
+    50%      { transform: translateX(calc(-0.5 * var(--u))); }
+  }
+  @keyframes thinkBase {
+    0%, 100% { transform: translateX(calc(-0.4 * var(--u))); }
+    50%      { transform: translateX(calc(0.6 * var(--u))); }
+  }
+
+  /* A-5. 깜짝 / 일어나기 (alert): 솟구침 & 눈 커짐 & 탄성 안착 */
+  .action-alert .pill-head {
+    animation: alertHead 1.5s cubic-bezier(.22,1,.36,1) forwards;
+  }
+  .action-alert .pill-body {
+    animation: alertBody 1.5s cubic-bezier(.22,1,.36,1) forwards;
+  }
+  .action-alert .eyes {
+    animation: alertEyes 1.5s cubic-bezier(.22,1,.36,1) forwards;
+  }
+  @keyframes alertHead {
+    0%   { transform: translateY(0); }
+    22%  { transform: translateY(-9px) scaleY(1.12) scaleX(0.95); }
+    45%  { transform: translateY(2px) scaleY(0.92) scaleX(1.05); }
+    70%  { transform: translateY(-1.8px) scaleY(1.02); }
+    100% { transform: translateY(0) scale(1); }
+  }
+  @keyframes alertBody {
+    0%   { transform: translateY(0); }
+    28%  { transform: translateY(-5px) scaleY(1.06); }
+    50%  { transform: translateY(1.2px) scaleY(0.95); }
+    100% { transform: translateY(0) scaleY(1); }
+  }
+  @keyframes alertEyes {
+    0%   { transform: translate(0, -50%) scale(1); }
+    24%  { transform: translate(0, -50%) scale(1.4); }
+    60%  { transform: translate(0, -50%) scale(1.18); }
+    100% { transform: translate(0, -50%) scale(1); }
+  }
+
+  /* A-6. 졸음 (drowsy): 머리 침하 & 실눈 & 느린 6초 심호흡 */
+  .action-drowsy .pill-head {
+    transform: translateY(calc(1.4 * var(--u)));
+    animation: drowsyHead 6.0s infinite ease-in-out !important;
+  }
+  .action-drowsy .pill-body {
+    transform: scaleY(0.92);
+    animation: drowsyBody 6.0s infinite ease-in-out !important;
+  }
+  .action-drowsy .eye {
+    height: 1.5px !important;
+    border-radius: 999px !important;
+    opacity: 0.85;
+  }
+  @keyframes drowsyHead {
+    0%, 100% { transform: translateY(calc(1.4 * var(--u))); }
+    50%      { transform: translateY(calc(0.6 * var(--u))); }
+  }
+  @keyframes drowsyBody {
+    0%, 100% { transform: scaleY(0.92); }
+    50%      { transform: scaleY(0.97); }
+  }
+
+  /* B-2. 쓰다듬기 (pet / hover): 폭신하게 눌림 & 기분 좋은 호 눈('⌒ ⌒') & 살랑임 */
+  .action-pet .ro-bot {
+    animation: petWiggle 0.7s infinite alternate ease-in-out;
+  }
+  .action-pet .pill-head {
+    transform: translateY(calc(0.9 * var(--u))) scaleY(0.91) scaleX(1.05);
+  }
+  .action-pet .pill-body {
+    transform: scaleY(0.93) scaleX(1.02);
+  }
+  .action-pet .eye { display: none !important; }
+  .action-pet .resolved-arch {
+    display: block !important;
+    transform: translateY(-0.8px);
+  }
+  @keyframes petWiggle {
+    0%   { transform: rotate(-1.8deg); }
+    100% { transform: rotate(1.8deg); }
+  }
+
+  /* B-3. 잡기 · 끌기 (drag): 세로로 늘어남 & 바닥이 무게로 처짐 */
+  .action-drag .ro-bot {
+    transform: scaleY(1.15) scaleX(0.92);
+  }
+  .action-drag .pill-head {
+    transform: translateY(-2.5px);
+  }
+  .action-drag .pill-base {
+    transform: translateY(3.5px) scaleX(0.96);
+    box-shadow: 0 10px 22px rgba(15, 14, 13, 0.35);
+  }
+  .action-drag .eyes {
+    top: 40%;
+  }
+
+  /* B-4. 흔들기 (shake): 층들이 좌우로 요동치고 작은 눈으로 어긋남 */
+  .action-shake .ro-bot {
+    animation: shakeJitter 0.11s infinite linear;
+  }
+  .action-shake .pill-head { transform: translateX(calc(-1.6 * var(--u))); }
+  .action-shake .pill-body { transform: translateX(calc(2.0 * var(--u))); }
+  .action-shake .pill-base { transform: translateX(calc(-0.9 * var(--u))); }
+  .action-shake .eye-l { width: calc(1.3 * var(--u)) !important; height: calc(1.4 * var(--u)) !important; }
+  .action-shake .eye-r { width: calc(1.1 * var(--u)) !important; height: calc(1.2 * var(--u)) !important; }
+  @keyframes shakeJitter {
+    0%   { transform: translate(-2.5px, 1.2px) rotate(-1.5deg); }
+    50%  { transform: translate(2.5px, -1.2px) rotate(1.5deg); }
+    100% { transform: translate(-1.2px, -2px) rotate(0deg); }
+  }
+
+  /* B-5. 놓기 · 착지 (drop): 착지 스쿼시 & 튀어오르는 스프링 바운스 */
+  .action-drop .ro-bot {
+    animation: dropImpact 0.62s cubic-bezier(.22,1,.36,1) forwards;
+  }
+  @keyframes dropImpact {
+    0%   { transform: scaleY(0.74) scaleX(1.26) translateY(4px); }
+    34%  { transform: scaleY(1.14) scaleX(0.92) translateY(-6px); }
+    64%  { transform: scaleY(0.95) scaleX(1.03) translateY(1.5px); }
+    84%  { transform: scaleY(1.02) scaleX(0.99) translateY(-0.8px); }
+    100% { transform: scale(1) translateY(0); }
+  }
+
+  /* C-1. 성공 / 해결 (success): 기쁨의 점프 & 웃는 눈 & 26u 만폭 */
+  .action-success .ro-bot {
+    animation: joyHop 0.78s cubic-bezier(.22,1,.36,1) infinite alternate;
+  }
+  .action-success .eye { display: none !important; }
+  .action-success .resolved-arch { display: block !important; }
+  .action-success .pill-body { width: calc(13 * var(--u)) !important; }
+  .action-success .pill-base { width: calc(25.5 * var(--u)) !important; }
+  @keyframes joyHop {
+    0%   { transform: translateY(0) scaleY(0.95) scaleX(1.04); }
+    45%  { transform: translateY(-11px) scaleY(1.08) scaleX(0.95); }
+    100% { transform: translateY(0) scaleY(1) scaleX(1); }
+  }
+
+  /* C-2. 실패 / 에러 (failure): 층 어긋남 & 덜덜 떠는 진동 & 불안 표정 */
+  .action-failure .ro-bot {
+    animation: failTremble 0.18s infinite ease-in-out;
+  }
+  .action-failure .pill-head { transform: translateX(calc(-1.5 * var(--u))); }
+  .action-failure .pill-body { transform: translateX(calc(2.0 * var(--u))); }
+  .action-failure .pill-base { transform: translateX(calc(0.4 * var(--u))); }
+  .action-failure .eye-l { width: calc(1.3 * var(--u)) !important; height: calc(1.5 * var(--u)) !important; }
+  .action-failure .eye-r { width: calc(1.0 * var(--u)) !important; height: calc(1.2 * var(--u)) !important; }
+  @keyframes failTremble {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(1.4px) rotate(-0.8deg); }
+  }
+
+  /* 상호작용 칩 팔레트 (말풍선 안) */
+  .act-palette {
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 14px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: opacity 0.16s ease, max-height 0.2s ease;
+  }
+  .act-palette.hidden {
+    display: none;
+  }
+  .act-palette-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--panel-fg);
+  }
+  .act-hint {
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--chalk-muted);
+  }
+  .act-chips-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .act-btn {
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 3px 7.5px;
+    font-size: 9.8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.14s, color 0.14s, transform 0.1s;
+  }
+  .act-btn:hover {
+    background: var(--bubble-fill);
+    color: var(--bubble-fg);
+    transform: translateY(-1px);
+  }
+  .act-btn.active {
+    background: var(--bubble-fill);
+    color: var(--bubble-fg);
+    box-shadow: 0 2px 6px rgba(15, 14, 13, 0.25);
+  }
+
   @keyframes baseGrow {
     0% { width: calc(19 * var(--u)); }
     100% { width: calc(25.5 * var(--u)); }
@@ -1034,9 +1411,33 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="toolbar">
         <button id="clearBtn" class="chip-btn" style="display:none;" title="알림/답변 닫기">초기화</button>
+        <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트 열기/닫기">상호작용 ▾</button>
         <button id="matBtn" class="chip-btn" title="상황별 자동 / 점토 / 리퀴드 글라스 / 젤리 전환">자동·점토</button>
         <button id="themeBtn" class="chip-btn" title="배경 자동 감지 / 먹 고정 / 분필 고정 전환">자동·먹</button>
         <button id="closeBtn" class="chip-btn" title="대화창 닫기 (Esc)">닫기</button>
+      </div>
+    </div>
+
+    <!-- 모션 가이드 12종 즉시 상호작용 팔레트 -->
+    <div id="actPalette" class="act-palette">
+      <div class="act-palette-title">
+        <span>상호작용 즉시 실행 (모션 12종)</span>
+        <span class="act-hint">마우스 쓰다듬기·드래그·흔들기로도 즉시 반응</span>
+      </div>
+      <div class="act-chips-grid">
+        <button class="act-btn" data-act="breathe" title="3개 층 시차 숨쉬기 (3초 루프)">숨쉬기</button>
+        <button class="act-btn" data-act="look_around" title="눈이 먼저 가는 두리번">두리번</button>
+        <button class="act-btn" data-act="walk" title="바닥-몸-머리 순차 이동">걷기</button>
+        <button class="act-btn" data-act="thinking" title="머리 갸우뚱 & 엇박자 펄스">생각</button>
+        <button class="act-btn" data-act="alert" title="깜짝 솟구침 & 눈 커짐">깜짝</button>
+        <button class="act-btn" data-act="drowsy" title="머리 침하 & 실눈 & 느린 호흡">졸음</button>
+        <button class="act-btn" data-act="gaze" title="마우스 커서 시선 추적">시선</button>
+        <button class="act-btn" data-act="pet" title="폭신하게 눌림 & 눈웃음 (마우스 호버)">쓰다듬기</button>
+        <button class="act-btn" data-act="drag" title="세로 늘어남 & 바닥 처짐 (드래그)">잡기</button>
+        <button class="act-btn" data-act="shake" title="층 좌우 요동 (빠른 흔들기)">흔들기</button>
+        <button class="act-btn" data-act="drop" title="착지 스쿼시 & 스프링 탄성">착지</button>
+        <button class="act-btn" data-act="success" title="기쁨의 점프 & 웃는 눈 & 26u 확장">성공</button>
+        <button class="act-btn" data-act="failure" title="층 어긋남 & 떨림 & 작은 눈">실패</button>
       </div>
     </div>
 
@@ -1127,9 +1528,28 @@ const MOOD_META = {
 };
 const MOOD_ORDER = ["idle", "recording", "focus", "anxious", "discovery", "resolved"];
 
+const ACTION_META = {
+  breathe:     { label: "대기 · 숨쉬기", desc: "3개 층 시차 숨쉬기 (3초 루프)" },
+  look_around: { label: "두리번",      desc: "눈이 먼저 가는 두리번" },
+  walk:        { label: "걷기",        desc: "바닥-몸-머리 순차 이동" },
+  thinking:    { label: "생각",        desc: "머리 갸우뚱 & 엇박자 펄스" },
+  alert:       { label: "깜짝",        desc: "깜짝 솟구침 & 눈 커짐" },
+  drowsy:      { label: "졸음",        desc: "머리 침하 & 실눈 & 느린 호흡" },
+  gaze:        { label: "시선",        desc: "마우스 커서 시선 추적" },
+  pet:         { label: "쓰다듬기",    desc: "폭신하게 눌림 & 눈웃음 (마우스 호버)" },
+  drag:        { label: "잡기 · 끌기", desc: "세로 늘어남 & 바닥 처짐" },
+  shake:       { label: "흔들기",      desc: "층 좌우 요동 (빠른 흔들기)" },
+  drop:        { label: "착지 바운스", desc: "착지 스쿼시 & 스프링 탄성" },
+  success:     { label: "성공 · 해결", desc: "기쁨의 점프 & 웃는 눈 & 26u 확장" },
+  failure:     { label: "실패 · 에러", desc: "층 어긋남 & 떨림 & 작은 눈" },
+};
+const ALL_ACTIONS = Object.keys(ACTION_META);
+
 const stage = document.getElementById("stage");
 const bubble = document.getElementById("bubble");
 const bubbleTop = document.getElementById("bubbleTop");
+const actPalette = document.getElementById("actPalette");
+const actToggleBtn = document.getElementById("actToggleBtn");
 const petWrap = document.getElementById("petWrap");
 const petCaption = document.getElementById("petCaption");
 const moodPill = document.getElementById("moodPill");
@@ -1332,27 +1752,132 @@ themeBtn.addEventListener("click", (e) => {
   updateThemeUI();
 });
 
+/* 상호작용 팔레트 토글 */
+actToggleBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  actPalette.classList.toggle("hidden");
+  actToggleBtn.textContent = actPalette.classList.contains("hidden") ? "상호작용 ▸" : "상호작용 ▾";
+});
+
+document.querySelectorAll(".act-btn").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const act = btn.dataset.act;
+    window.triggerAction(act, 4500);
+  });
+});
+
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") setBubbleOpen(false);
 });
 
-/* 마우스 시선 추적: 머리 오른쪽에 위치한 두 눈이 커서 방향을 살짝 따라간다 */
+/* =========================================================
+   상호작용 컨트롤러 — 12종 즉시 발동 & 상태 전이
+   ========================================================= */
+let currentAction = null;
+let actionTimer = null;
+
+window.triggerAction = function(name, durationMs) {
+  if (actionTimer) {
+    clearTimeout(actionTimer);
+    actionTimer = null;
+  }
+  for (const act of ALL_ACTIONS) {
+    petWrap.classList.remove(`action-${act.replace(/_/g, "-")}`);
+  }
+  currentAction = name;
+
+  if (!name) {
+    document.querySelectorAll(".act-btn").forEach(b => b.classList.remove("active"));
+    const meta = MOOD_META[currentMood] || MOOD_META.idle;
+    const matLabel = MAT_LABELS[activeMaterial] || "점토";
+    petCaption.textContent = `ro · ${meta.label} · ${matLabel}`;
+    subStatusText.textContent = meta.caption;
+    return { ok: true, cleared: true };
+  }
+
+  const cls = `action-${name.replace(/_/g, "-")}`;
+  petWrap.classList.add(cls);
+
+  document.querySelectorAll(".act-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.act === name);
+  });
+
+  const meta = ACTION_META[name];
+  if (meta) {
+    petCaption.textContent = `ro · ${meta.label}`;
+    subStatusText.textContent = meta.desc;
+  }
+
+  const dur = (durationMs !== undefined) ? durationMs : 4500;
+  if (dur > 0) {
+    actionTimer = setTimeout(() => {
+      window.triggerAction(null);
+    }, dur);
+  }
+  return { ok: true, action: name, duration: dur };
+};
+
+/* macOS 호스트 브리지 드래그·흔들기·착지 바운스 훅 */
+window.onHostDragStart = function(fromPet) {
+  if (fromPet) {
+    window.triggerAction("drag", 0);
+  }
+};
+
+window.onHostDragShake = function() {
+  window.triggerAction("shake", 1200);
+};
+
+window.onHostDragEnd = function(moved) {
+  if (moved) {
+    window.triggerAction("drop", 650);
+  } else {
+    window.triggerAction(null);
+  }
+};
+
+/* 마우스 쓰다듬기 (Hover) 상호작용: 머리가 폭신하게 눌리고 눈웃음 */
+let isPetHover = false;
+petWrap.addEventListener("mouseenter", () => {
+  if (currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
+  if (isDrowsy) {
+    wakeUpFromSleep();
+    return;
+  }
+  isPetHover = true;
+  window.triggerAction("pet", 0);
+});
+
+petWrap.addEventListener("mouseleave", () => {
+  if (isPetHover) {
+    isPetHover = false;
+    if (currentAction === "pet") {
+      window.triggerAction(null);
+    }
+  }
+});
+
+/* 마우스 시선 추적: 눈이 먼저 가고 머리가 살짝 뒤따른다 */
 window.addEventListener("mousemove", (e) => {
+  recordActivity();
   if (currentMood === "resolved" || currentMood === "recording" || currentMood === "focus") {
     eyesWrap.style.transform = "";
     return;
   }
+  if (currentAction && currentAction !== "gaze") return;
   const rect = layerHead.getBoundingClientRect();
   const cx = rect.left + rect.width * 0.68;
   const cy = rect.top + rect.height * 0.5;
-  const dx = Math.max(-2.5, Math.min(2.5, (e.clientX - cx) / 34));
-  const dy = Math.max(-1.6, Math.min(1.8, (e.clientY - cy) / 34));
+  const dx = Math.max(-3.0, Math.min(3.0, (e.clientX - cx) / 32));
+  const dy = Math.max(-1.8, Math.min(2.0, (e.clientY - cy) / 32));
   eyesWrap.style.transform = `translate(${dx}px, calc(-50% + ${dy}px))`;
+  layerHead.style.transform = `translate(${dx * 0.28}px, ${dy * 0.28}px)`;
 });
 
 /* 눈 깜빡임 */
 setInterval(() => {
-  if (currentMood === "resolved" || currentMood === "focus") return;
+  if (currentMood === "resolved" || currentMood === "focus" || currentAction === "pet" || currentAction === "drowsy") return;
   eyeL.classList.add("blink");
   eyeR.classList.add("blink");
   setTimeout(() => {
@@ -1361,8 +1886,49 @@ setInterval(() => {
   }, 130);
 }, 3800);
 
-/* 드래그 이동 (캐릭터 본체 및 말풍선 상단 바 모두 드래그 가능) */
+/* 졸음 및 활동 감지 */
+let lastUserActivity = Date.now();
+let isDrowsy = false;
+
+function recordActivity() {
+  lastUserActivity = Date.now();
+  if (isDrowsy) {
+    wakeUpFromSleep();
+  }
+}
+window.addEventListener("keydown", recordActivity);
+window.addEventListener("mousedown", recordActivity);
+
+function wakeUpFromSleep() {
+  isDrowsy = false;
+  window.triggerAction("alert", 2000);
+}
+
+// 40초 동안 마우스/키보드 입력이 없으면 졸음(drowsy) 진입
+setInterval(() => {
+  if (isPetHover || currentAction || currentMood !== "idle" || !bubble.classList.contains("hidden")) return;
+  if (!isDrowsy && (Date.now() - lastUserActivity > 40000)) {
+    isDrowsy = true;
+    window.triggerAction("drowsy", 0);
+  }
+}, 4000);
+
+// 조용한 대기 상태에서 가끔(16초마다) 스스로 두리번
+setInterval(() => {
+  if (isDrowsy || isPetHover || currentAction || currentMood !== "idle") return;
+  if (Math.random() < 0.40) {
+    window.triggerAction("look_around", 3200);
+  }
+}, 16000);
+
+/* 드래그 이동 (웹 브라우저 및 네이티브 호스트 공용) */
 const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost);
+let webDragStart = null;
+let webDidDrag = false;
+let webLastX = 0;
+let webLastDxSign = 0;
+let webShakeCount = 0;
+let webLastReversal = 0;
 
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
@@ -1371,27 +1937,64 @@ function beginDrag(e, fromPet) {
     notifyHost({ type: "dragStart", fromPet: !!fromPet });
     return;
   }
-  dragStart = { x: e.screenX, y: e.screenY };
-  didDrag = false;
+  webDragStart = { x: e.screenX, y: e.screenY };
+  webLastX = e.screenX;
+  webDidDrag = false;
+  webShakeCount = 0;
+  if (fromPet) {
+    window.triggerAction("drag", 0);
+  }
 }
 
 petWrap.addEventListener("mousedown", (e) => beginDrag(e, true));
 bubbleTop.addEventListener("mousedown", (e) => beginDrag(e, false));
 
 window.addEventListener("mousemove", (e) => {
-  if (isNativeHost || !dragStart) return;
-  const dx = e.screenX - dragStart.x;
-  const dy = e.screenY - dragStart.y;
+  if (isNativeHost || !webDragStart) return;
+  const dx = e.screenX - webDragStart.x;
+  const dy = e.screenY - webDragStart.y;
+  const stepDx = e.screenX - webLastX;
+  const now = Date.now();
+
+  // 웹 드래그 흔들기 감지
+  if (Math.abs(stepDx) > 8) {
+    const sign = stepDx > 0 ? 1 : -1;
+    if (sign !== webLastDxSign && webLastDxSign !== 0) {
+      if (now - webLastReversal < 320) {
+        webShakeCount++;
+        if (webShakeCount >= 3) {
+          window.triggerAction("shake", 1200);
+          webShakeCount = 0;
+        }
+      } else {
+        webShakeCount = 1;
+      }
+      webLastReversal = now;
+    }
+    webLastDxSign = sign;
+  }
+  webLastX = e.screenX;
+
   if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
-    didDrag = true;
-    dragStart = { x: e.screenX, y: e.screenY };
+    webDidDrag = true;
+    webDragStart = { x: e.screenX, y: e.screenY };
     notifyHost({ type: "moveBy", dx, dy });
   }
 });
-window.addEventListener("mouseup", () => { dragStart = null; });
+
+window.addEventListener("mouseup", () => {
+  if (!isNativeHost && webDragStart) {
+    if (webDidDrag) {
+      window.triggerAction("drop", 650);
+    } else if (currentAction === "drag") {
+      window.triggerAction(null);
+    }
+  }
+  webDragStart = null;
+});
 
 petWrap.addEventListener("click", () => {
-  if (isNativeHost || didDrag) return;
+  if (isNativeHost || webDidDrag) return;
   setBubbleOpen(bubble.classList.contains("hidden"));
 });
 
@@ -1416,12 +2019,28 @@ function applyState(st) {
       eyesWrap.style.transform = "";
     }
     petWrap.className = `pet-wrap mood-${st.mood}`;
+    if (currentAction) {
+      petWrap.classList.add(`action-${currentAction.replace(/_/g, "-")}`);
+    }
     moodPill.textContent = st.mood_label;
     const m = MOOD_META[st.mood] || MOOD_META.idle;
     layerHead.style.width = `calc(${m.headU} * var(--u))`;
     layerBody.style.width = `calc(${m.bodyU} * var(--u))`;
     layerBase.style.width = `calc(${m.baseU} * var(--u))`;
     updateMaterialUI();
+
+    // 서버가 명시적으로 상호작용 액션을 내려보냈거나 작업 상태에 따른 연동
+    if (st.action && st.action !== currentAction) {
+      window.triggerAction(st.action, 4500);
+    } else if (!currentAction) {
+      if (st.mood === "focus") {
+        window.triggerAction("thinking", 0);
+      } else if (st.mood === "resolved") {
+        window.triggerAction("success", 4000);
+      } else if (st.mood === "anxious") {
+        window.triggerAction("failure", 0);
+      }
+    }
   }
 
   const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
@@ -1560,6 +2179,12 @@ def make_handler(runtime):
                 self.wfile.write(body)
             elif parsed.path == "/api/state":
                 self._send_json(200, runtime.snapshot())
+            elif parsed.path == "/api/action":
+                from urllib.parse import parse_qs
+                qs = parse_qs(parsed.query)
+                act = qs.get("name", [""])[0] or qs.get("action", [""])[0]
+                dur = float(qs.get("duration", ["4.0"])[0])
+                self._send_json(200, runtime.trigger_action(act, dur))
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -1589,6 +2214,10 @@ def make_handler(runtime):
                 self._send_json(200, runtime.resolve_write_approval(bool(data.get("approve"))))
             elif parsed.path == "/api/clear":
                 self._send_json(200, runtime.clear_notice())
+            elif parsed.path == "/api/action":
+                act = data.get("action") or data.get("name", "")
+                dur = float(data.get("duration", 4.0))
+                self._send_json(200, runtime.trigger_action(act, dur))
             else:
                 self._send_json(404, {"ok": False, "error": "not found"})
 

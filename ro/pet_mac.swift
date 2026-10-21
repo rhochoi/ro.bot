@@ -215,7 +215,18 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let startMouse = NSEvent.mouseLocation
         let startOrigin = panel.frame.origin
         var moved = false
+        var prevMouse = startMouse
+        var lastDxSign = 0
+        var shakeCount = 0
+        var lastReversalTime = Date().timeIntervalSince1970
         isDragging = true
+
+        if fromPet {
+            webView.evaluateJavaScript(
+                "window.onHostDragStart && window.onHostDragStart(true);",
+                completionHandler: nil
+            )
+        }
 
         dragTimer = Timer.scheduledTimer(withTimeInterval: 0.008, repeats: true) { [weak self] timer in
             guard let self = self else {
@@ -225,6 +236,31 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let curMouse = NSEvent.mouseLocation
             let dx = curMouse.x - startMouse.x
             let dy = curMouse.y - startMouse.y
+            let stepDx = curMouse.x - prevMouse.x
+            let now = Date().timeIntervalSince1970
+
+            // 흔들기(shake) 감지: 0.35초 내에 좌우 방향 전환이 3회 이상 발생하면 shake 트리거
+            if abs(stepDx) > 6.0 {
+                let sign = stepDx > 0 ? 1 : -1
+                if sign != lastDxSign && lastDxSign != 0 {
+                    if (now - lastReversalTime) < 0.35 {
+                        shakeCount += 1
+                        if shakeCount >= 3 {
+                            self.webView.evaluateJavaScript(
+                                "window.onHostDragShake && window.onHostDragShake();",
+                                completionHandler: nil
+                            )
+                            shakeCount = 0
+                        }
+                    } else {
+                        shakeCount = 1
+                    }
+                    lastReversalTime = now
+                }
+                lastDxSign = sign
+            }
+            prevMouse = curMouse
+
             if hypot(dx, dy) > 3.5 {
                 moved = true
             }
@@ -239,6 +275,12 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 self.dragTimer = nil
                 self.isDragging = false
                 self.updateBackdropTheme(force: true)
+                if fromPet {
+                    self.webView.evaluateJavaScript(
+                        "window.onHostDragEnd && window.onHostDragEnd(\(moved));",
+                        completionHandler: nil
+                    )
+                }
                 if !moved && fromPet {
                     self.webView.evaluateJavaScript(
                         "window.onPetClickFromHost && window.onPetClickFromHost();",
@@ -305,6 +347,32 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let moodRoot = NSMenuItem(title: "표정 미리보기 (6종)", action: nil, keyEquivalent: "")
         moodRoot.submenu = moodMenu
         menu.addItem(moodRoot)
+
+        let actMenu = NSMenu()
+        let actions: [(String, String)] = [
+            ("대기 · 숨쉬기 (Breathing)", "breathe"),
+            ("두리번 (Look around)", "look_around"),
+            ("걷기 · 이동 (Walk)", "walk"),
+            ("생각 · 계산 (Thinking)", "thinking"),
+            ("깜짝 · 깨어나기 (Alert)", "alert"),
+            ("졸음 · 수면 (Drowsy)", "drowsy"),
+            ("시선 추적 (Gaze)", "gaze"),
+            ("쓰다듬기 (Pet)", "pet"),
+            ("잡기 · 끌기 (Drag)", "drag"),
+            ("흔들기 (Shake)", "shake"),
+            ("놓기 · 착지 바운스 (Drop)", "drop"),
+            ("성공 · 해결 (Success)", "success"),
+            ("실패 · 불안 (Failure)", "failure")
+        ]
+        for (title, code) in actions {
+            let item = NSMenuItem(title: title, action: #selector(triggerActionFromMenu(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = code
+            actMenu.addItem(item)
+        }
+        let actRoot = NSMenuItem(title: "상호작용 바로 실행 (모션 12종)", action: nil, keyEquivalent: "")
+        actRoot.submenu = actMenu
+        menu.addItem(actRoot)
 
         let matMenu = NSMenu()
         let materials: [(String, String)] = [
@@ -415,6 +483,12 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         guard let code = sender.representedObject as? String else { return }
         panel.orderFrontRegardless()
         webView.evaluateJavaScript("window.setMoodPreview && window.setMoodPreview('\(code)', 10000);", completionHandler: nil)
+    }
+
+    @objc private func triggerActionFromMenu(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String else { return }
+        panel.orderFrontRegardless()
+        webView.evaluateJavaScript("window.triggerAction && window.triggerAction('\(code)', 4500);", completionHandler: nil)
     }
 
     @objc private func selectMaterial(_ sender: NSMenuItem) {
