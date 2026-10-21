@@ -1594,6 +1594,8 @@ const themeBtn = document.getElementById("themeBtn");
 
 let currentRuleId = null;
 let currentMood = "idle";
+let currentAction = null;
+let actionTimer = null;
 let previewLockUntil = 0;
 let dragStart = null;
 let didDrag = false;
@@ -1794,9 +1796,6 @@ window.addEventListener("keydown", (e) => {
 /* =========================================================
    상호작용 컨트롤러 — 12종 즉시 발동 & 상태 전이
    ========================================================= */
-let currentAction = null;
-let actionTimer = null;
-
 window.triggerAction = function(name, durationMs) {
   if (actionTimer) {
     clearTimeout(actionTimer);
