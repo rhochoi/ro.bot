@@ -18,6 +18,10 @@ SECRET_VALUE = re.compile(
     r"|xox[abp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
 MASK = "[REDACTED]"
+# 자유 문장 속 비밀: "password=..." "token: ..." "Bearer ..." (키 이름은 남기고 값만 가린다)
+SECRET_ASSIGN = re.compile(
+    r"\b(pass(?:word|wd)?|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)(?!\[REDACTED\])\S+", re.I)
+BEARER = re.compile(r"\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/-]+=*", re.I)
 
 
 def redact(obj):
@@ -26,7 +30,9 @@ def redact(obj):
     if isinstance(obj, list):
         return [redact(v) for v in obj]
     if isinstance(obj, str):
-        return SECRET_VALUE.sub(MASK, obj)
+        obj = SECRET_VALUE.sub(MASK, obj)
+        obj = BEARER.sub("Bearer " + MASK, obj)
+        return SECRET_ASSIGN.sub(lambda m: m[1] + m[2] + MASK, obj)
     return obj
 
 

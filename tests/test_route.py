@@ -44,6 +44,16 @@ class RouteTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": ""}):
             self.assertFalse(route.run("codex", "x")["ok"])
 
+    def test_keywords_need_word_boundary(self):
+        # 회귀: 부분 문자열 매칭으로 "guide"/"quick"이 ui, "latest"가 implement로 갔다
+        self.assertEqual(route.categorize("build the guide"), "general")
+        self.assertEqual(route.categorize("quick question"), "general")
+        self.assertEqual(route.categorize("what's the latest status"), "general")
+        self.assertEqual(route.categorize("prefix handling"), "general")
+        self.assertEqual(route.categorize("run the testing suite"), "implement")
+        self.assertEqual(route.categorize("UI 색 바꿔"), "ui")
+        self.assertEqual(route.categorize("재설계해줘"), "design")
+
 
 if __name__ == "__main__":
     unittest.main()

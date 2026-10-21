@@ -3,8 +3,9 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from ro import harden, learn, log
+from ro import ambient, harden, learn, log
 
 
 class HardenTest(unittest.TestCase):
@@ -50,6 +51,17 @@ class HardenTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as h:
             log.append("t", "s", log_dir=Path(h) / ".ro" / "log")
             self.assertEqual(harden.audit(Path(h) / ".ro")[0], [])
+
+    def test_eval_fails_when_protection_removed(self):
+        # 회귀: 보호 장치를 꺼도 PASS가 나오던 공허한 검사
+        def failed(name):
+            return dict(harden.evaluate())[name] is False
+
+        with mock.patch("ro.mapper.is_secret", return_value=False):
+            self.assertTrue(failed("Map은 비밀 파일 제외"))
+        old = lambda text, max_len=ambient.MAX_LEN: ambient._CTRL.sub("", text).strip()[:max_len]
+        with mock.patch("ro.ambient.sanitize", old):
+            self.assertTrue(failed("외부 입력은 정리·마스킹 후 기록만"))
 
 
 if __name__ == "__main__":

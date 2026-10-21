@@ -40,6 +40,10 @@ class AskTest(unittest.TestCase):
         got = ask.select_projects("시리얼 장치 연결이 안 돼", [a, b])
         self.assertEqual([p["name"] for p in got], ["alpha"])
         self.assertEqual(ask.select_projects("시리얼 말고 다른 얘기", [a, b]), [])
+        # 회귀: 키워드도 부분 문자열로 세면 "app"·"form"이 "application"·"platform"에 걸린다
+        c = proj(self.d / "beta", "gamma", summary={
+            "purpose": "application platform", "structure": [], "scripts": [], "guide": "", "recent": []})
+        self.assertEqual(ask.select_projects("app form", [c]), [])
 
     def test_context_uses_summary(self):
         a = proj(self.d / "alpha", "alpha", summary={
@@ -66,7 +70,7 @@ class AskTest(unittest.TestCase):
         pl = ask.plan("alpha 리뷰해줘", self.map, use_context=True)
         self.assertEqual(pl["engine"], "claude")
         self.assertEqual(pl["projects"], ["alpha"])
-        self.assertEqual(pl["cwd"], str(self.d / "alpha"))
+        self.assertIsNone(pl["cwd"])  # 이름이 걸린 프로젝트 폴더에서 엔진을 돌리지 않는다
         self.assertIn("[질문]\nalpha 리뷰해줘", pl["prompt"])
         self.assertEqual(ask.plan("alpha 리뷰", self.map, use_context=False)["context"], "")
 
@@ -89,6 +93,18 @@ class AskTest(unittest.TestCase):
         self.assertEqual(events[0]["data"]["projects"], ["alpha"])
         self.assertTrue(events[1]["data"]["accepted"])
         self.assertEqual(stat.S_IMODE((home / ".ro").stat().st_mode), 0o700)
+
+    def test_project_name_needs_word_boundary(self):
+        # 회귀: "ro"가 "error"에, "app"이 "application"에 걸렸다
+        ps = [proj(self.d / "alpha", "ro"), proj(self.d / "beta", "app")]
+        self.assertEqual(ask.select_projects("why this error in my application", ps), [])
+        self.assertEqual([p["name"] for p in ask.select_projects("ro에서 app 구조", ps)], ["ro", "app"])
+
+    def test_engine_cwd_only_where_user_is_or_chose(self):
+        # 회귀: 질문에 이름만 걸려도 그 프로젝트 폴더(훅·설정 적용)에서 엔진을 실행했다
+        self.assertEqual(ask.plan("alpha 리뷰", self.map, cwd="/here")["cwd"], "/here")
+        self.assertEqual(ask.plan("리뷰", self.map, cwd="/here", project="beta")["cwd"],
+                         str(self.d / "beta"))
 
 
 if __name__ == "__main__":

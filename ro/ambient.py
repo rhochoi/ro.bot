@@ -16,7 +16,8 @@ _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def sanitize(text, max_len=MAX_LEN):
-    text = _CTRL.sub("", text).strip()
+    """제어문자 제거 → 마스킹 → 자르기. 자른 뒤 마스킹하면 잘린 비밀 조각이 패턴을 피한다."""
+    text = log.redact(_CTRL.sub("", text).strip())
     return text[:max_len]
 
 

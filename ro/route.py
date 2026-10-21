@@ -2,6 +2,7 @@
 
 기본은 읽기 모드(계획/read-only). 쓰기 모드는 호출자가 명시적으로 허용해야 한다.
 """
+import re
 import shutil
 import subprocess
 import time
@@ -17,10 +18,17 @@ RULES = [
 ]
 
 
+def contains_word(text, word, prefix=False):
+    """영숫자 경계로 매칭("ui"≠"guide", "ro"≠"error"). 한글 조사("ro에서")는 허용.
+    prefix=True면 뒤쪽 경계는 보지 않는다("test"→"testing")."""
+    tail = "" if prefix else r"(?![a-z0-9_])"
+    return re.search(rf"(?<![a-z0-9_]){re.escape(word)}{tail}", text) is not None
+
+
 def categorize(task):
     low = task.lower()
     for category, words, _ in RULES:
-        if any(w in low for w in words):
+        if any(contains_word(low, w, prefix=True) for w in words):
             return category
     return "general"
 

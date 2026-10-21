@@ -61,6 +61,12 @@ class AmbientTest(unittest.TestCase):
             self.assertEqual(cmd[-1], "body")
             self.assertNotIn("do shell script", " ".join(cmd[:-2]))
 
+    def test_secret_cut_at_truncation_boundary_is_masked(self):
+        # 회귀: 자른 뒤 마스킹하면 경계에 걸린 키 앞부분(sk-ABCDEFGHIJK)이 기록됐다
+        with tempfile.TemporaryDirectory() as d:
+            e = ambient.ingest("serial", "x" * (ambient.MAX_LEN - 14) + "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ", d)
+            self.assertNotIn("ABCDEFGH", e["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

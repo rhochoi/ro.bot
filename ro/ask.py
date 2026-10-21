@@ -33,7 +33,7 @@ def _project_text(p):
 def _keyword_hits(question, p):
     tokens = {t for t in re.findall(r"\w{2,}", question.lower()) if t not in STOPWORDS}
     text = _project_text(p)
-    return sum(1 for t in tokens if t in text)
+    return sum(1 for t in tokens if route.contains_word(text, t))
 
 
 def select_projects(question, projects, cwd=None, limit=MAX_PROJECTS):
@@ -43,7 +43,7 @@ def select_projects(question, projects, cwd=None, limit=MAX_PROJECTS):
     for p in projects:
         score = 0
         name = p["name"].lower()
-        if len(name) >= 2 and re.search(re.escape(name), q):
+        if len(name) >= 2 and route.contains_word(q, name):
             score += 3
         root = str(Path(p["path"]).resolve())  # 심볼릭 링크(/var→/private/var) 차이 흡수
         if cwd and (cwd == root or cwd.startswith(root + "/")):
@@ -112,10 +112,12 @@ def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), p
     eng, category, reason = route.choose(question, rules)
     if engine:
         eng, reason = engine, "수동 지정"
+    # 엔진은 프로젝트 폴더의 훅·설정(.claude/, AGENTS.md)을 따른다. 이름이 질문에 걸렸다는
+    # 이유만으로 남의 폴더(~/Downloads 등)에서 실행하지 않는다: 사용자가 있는 곳 또는 --project로 지정한 곳만.
     return {"engine": eng, "category": category, "reason": reason,
             "projects": [p["name"] for p in picked], "context": context,
             "prompt": build_prompt(question, context),
-            "cwd": picked[0]["path"] if picked else cwd}
+            "cwd": picked[0]["path"] if project and picked else cwd}
 
 
 def execute(p):

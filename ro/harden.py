@@ -9,7 +9,7 @@ import stat
 import tempfile
 from pathlib import Path
 
-from . import ambient, learn, log, mapper, route
+from . import ambient, ask, learn, log, mapper, route
 
 HOME = "~/.ro"
 
@@ -65,12 +65,17 @@ def _checks():
                    for c in w)
 
     def map_skips_secrets():
+        # Map은 원래 내용을 읽지 않으므로 내용 검사로는 아무것도 증명하지 못한다.
+        # 비밀 후보 파일이 언어 집계에 들어가지 않는지로 필터 자체를 검증한다.
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "app"
             p.mkdir()
             (p / "package.json").write_text("{}")
-            (p / ".env").write_text("K=hunter2")
-            return "hunter2" not in json.dumps(mapper.build_map([d]))
+            (p / "token.py").write_text("K = 'hunter2'")
+            (p / "secret_config.py").write_text("")
+            data = mapper.build_map([d])
+            return "python" not in data["projects"][0]["languages"] \
+                and "hunter2" not in json.dumps(data)
 
     def learn_requires_approval():
         with tempfile.TemporaryDirectory() as h:
@@ -92,14 +97,23 @@ def _checks():
                 p.name.startswith("rules.json.corrupt") for p in Path(h).iterdir())
 
     def ambient_untrusted():
+        # 비밀은 자르기 경계(MAX_LEN) 안쪽과 경계에 걸친 위치 둘 다에 둔다. 경계 밖이면 마스킹 없이도 통과한다.
+        key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         with tempfile.TemporaryDirectory() as h:
-            e = ambient.ingest("serial", "x\x1b[31m" + "A" * 500 + " sk-abcdefghijklmnopqrstuv", h)
+            e = ambient.ingest("serial", "x\x1b[31m " + key + " " + "A" * 500, h)
+            cut = ambient.ingest("serial", "x" * (ambient.MAX_LEN - 14) + key, h)
             kinds = {x["kind"] for x in log.read(e["ts"][:10], h)}
             return kinds == {"ambient"} and "\x1b" not in e["summary"] \
-                and "sk-" not in e["summary"] and len(e["summary"]) < 260
+                and log.MASK in e["summary"] and len(e["summary"]) < 260 \
+                and all("ABCDEFGH" not in x["summary"] for x in (e, cut))
+
+    def ask_stays_in_user_cwd():
+        m = {"projects": [{"name": "evil", "path": "/tmp/evil", "languages": {}}]}
+        return ask.plan("evil 설명", m, cwd="/home/me", use_context=False)["cwd"] == "/home/me"
 
     return [
         ("비밀 마스킹", redaction),
+        ("ask는 지목된 남의 폴더에서 엔진을 실행하지 않음", ask_stays_in_user_cwd),
         ("엔진 기본 모드는 읽기", read_mode_default),
         ("쓰기는 명시 플래그에서만", write_needs_flag),
         ("Map은 비밀 파일 제외", map_skips_secrets),
