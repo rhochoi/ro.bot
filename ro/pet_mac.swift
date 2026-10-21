@@ -310,7 +310,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let materials: [(String, String)] = [
             ("자동 — 감정·배경·시간에 따라 전환", "auto"),
             ("점토 · Clay (기본)", "clay"),
-            ("리퀴드 글라스 · Liquid Glass (기록 중 · 풀어냄 · 밝은 배경)", "glass"),
+            ("세라믹 · Glaze (유약 도자기 · 밝은 배경)", "ceramic"),
+            ("리퀴드 글라스 · Liquid Glass (아주 밝은 배경)", "glass"),
+            ("젤리 · Jelly (풀어냄)", "jelly"),
+            ("종이 · Paper Cut (기록 중)", "paper"),
             ("네온 · Neon (발견 · 심야 · 어두운 배경)", "neon"),
             ("메탈 · Brushed (집중 · 불안)", "metal"),
             ("평면 · Flat (단색)", "flat")
@@ -321,7 +324,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             item.representedObject = code
             matMenu.addItem(item)
         }
-        let matRoot = NSMenuItem(title: "재질 테마 (자동 / 점토 / 유리 / 네온 / 메탈)", action: nil, keyEquivalent: "")
+        let matRoot = NSMenuItem(title: "재질 테마 (8종 + 자동)", action: nil, keyEquivalent: "")
         matRoot.submenu = matMenu
         menu.addItem(matRoot)
 
