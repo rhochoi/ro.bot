@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from . import learn, log, mapper, route
+from . import harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -26,6 +26,9 @@ def main(argv=None):
     ln = sub.add_parser("learn", help="로그에서 규칙 후보 제안 → 승인/거절")
     ln.add_argument("action", nargs="?", choices=["approve", "reject", "rules"])
     ln.add_argument("id", nargs="?")
+    au = sub.add_parser("audit", help="~/.ro 권한·비밀·무결성 점검")
+    au.add_argument("--fix", action="store_true", help="권한만 0700/0600으로 조정")
+    sub.add_parser("eval", help="안전 불변식 회귀 체크리스트")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -81,6 +84,23 @@ def main(argv=None):
                 print(f"[{c['id']}] {c['text']} — {c['evidence']}")
             if cands:
                 print("승인: ro learn approve ID / 거절: ro learn reject ID")
+    elif args.cmd == "audit":
+        findings, fixed = harden.audit(fix=args.fix)
+        for f in findings:
+            print(f"- {f}")
+        if fixed:
+            print(f"권한 조정 {len(fixed)}건")
+        print("이상 없음" if not findings else f"발견 {len(findings)}건")
+        log.append("audit", f"발견 {len(findings)}건, 조정 {len(fixed)}건")
+        raise SystemExit(1 if [f for f in findings if "권한" not in f or not args.fix] else 0)
+    elif args.cmd == "eval":
+        results = harden.evaluate()
+        for name, ok in results:
+            print(f"{'PASS' if ok else 'FAIL'}  {name}")
+        failed = [n for n, ok in results if not ok]
+        log.append("eval", f"{len(results) - len(failed)}/{len(results)} 통과",
+                   {"failed": failed})
+        raise SystemExit(1 if failed else 0)
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)

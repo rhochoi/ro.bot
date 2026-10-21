@@ -11,6 +11,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from . import fsutil
+
 DEFAULT_ROOTS = ["~/Claude", "~/Downloads", "~/Developer", "~/Documents"]
 MAX_DEPTH = 3
 
@@ -110,6 +112,5 @@ def build_map(roots):
 
 def save_map(data, out):
     out = Path(out).expanduser()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    fsutil.atomic_write(out, json.dumps(data, ensure_ascii=False, indent=2))
     return out

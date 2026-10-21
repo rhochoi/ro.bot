@@ -9,6 +9,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from . import fsutil
+
 LOG_DIR = "~/.ro/log"
 SECRET_KEY = re.compile(r"pass(word)?|secret|token|api[_-]?key|credential|private[_-]?key", re.I)
 SECRET_VALUE = re.compile(
@@ -40,7 +42,7 @@ def append(kind, summary, data=None, engine=None, log_dir=LOG_DIR):
         "kind": kind, "engine": engine, "summary": summary, "data": data or {},
     })
     path = _file(time.strftime("%Y-%m-%d", time.localtime(now)), log_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    fsutil.ensure_dir(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")

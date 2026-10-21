@@ -5,10 +5,12 @@
 """
 import hashlib
 import json
+import sys
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from . import log, route
+from . import fsutil, log, route
 
 HOME = "~/.ro"
 MIN_SAMPLES = 3
@@ -18,13 +20,20 @@ MIN_REPEAT = 3
 
 def _load(name, home, default):
     path = Path(home).expanduser() / name
-    return json.loads(path.read_text()) if path.exists() else default
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        backup = path.with_name(f"{name}.corrupt-{int(time.time())}")
+        path.rename(backup)  # 원본 보존, 빈 상태로 복구
+        print(f"경고: {name} 손상 → {backup} 로 보존하고 초기화", file=sys.stderr)
+        return default
 
 
 def _save(name, home, data):
-    path = Path(home).expanduser() / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    fsutil.atomic_write(Path(home).expanduser() / name,
+                        json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def load_rules(home=HOME):
