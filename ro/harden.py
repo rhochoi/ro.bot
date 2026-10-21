@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import ambient, ask, distill, learn, log, mapper, route, stats, tidy
+from . import ambient, ask, distill, learn, log, mapper, revise, route, stats, tidy
 
 HOME = "~/.ro"
 
@@ -121,6 +121,23 @@ def _checks():
                 tidy.undo(None, t / "ro", str(t / "log"))
                 return {p.name for p in root.iterdir()} == before
 
+    def revise_needs_approval():
+        import datetime
+        import shutil
+        with tempfile.TemporaryDirectory() as h:
+            toml = Path(h) / "routing.toml"
+            shutil.copy(route.ROUTING_PATH, toml)
+            before = toml.read_text()
+            base = datetime.datetime.now() - datetime.timedelta(hours=40)
+            evs = []
+            for i in range(6):
+                for eng, ok in (("codex", False), ("claude", True)):
+                    t = (base + datetime.timedelta(hours=i * 2)).isoformat()
+                    evs.append({"ts": t, "kind": "route", "summary": f"{eng}{i}", "engine": eng,
+                                "data": {"engine": eng, "category": "implement", "ok": ok, "duration": 5.0}})
+            new, _, _ = revise.run(30, home=h, events=evs, routing=route.load_routing(toml))
+            return len(new) == 1 and toml.read_text() == before and learn.load_rules(h) == []
+
     def private_files():
         with tempfile.TemporaryDirectory() as h:
             log.append("t", "s", log_dir=h)
@@ -156,6 +173,7 @@ def _checks():
         ("Map은 비밀 파일 제외", map_skips_secrets),
         ("Learn은 승인 전 규칙 불변", learn_requires_approval),
         ("증류: 승인 전 기록 없음·원문 미전송·읽기 모드", distill_needs_approval_and_no_raw),
+        ("라우팅 개정안: 승인 전 routing.toml 불변", revise_needs_approval),
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),

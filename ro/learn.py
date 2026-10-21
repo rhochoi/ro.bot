@@ -79,7 +79,7 @@ def propose(events, home=HOME):
                 "id": _cid("repeat", summary), "kind": "note",
                 "text": f"반복 작업: {summary}", "evidence": f"{n}회 요청"})
     cands = [c for c in cands if c["id"] not in done]
-    kept = [c for c in _load("pending.json", home, []) if c.get("kind") == "memory" and c["id"] not in done]
+    kept = [c for c in _load("pending.json", home, []) if c.get("kind") in ("memory", "routing") and c["id"] not in done]
     _save("pending.json", home, cands + kept)  # 증류 후보(memory)는 재계산 대상이 아니므로 보존
     return cands + kept
 
@@ -107,7 +107,12 @@ def _pop(cid, home):
     return match[0]
 
 
-def approve(cid, home=HOME, memory_path=MEMORY_PATH):
+def approve(cid, home=HOME, memory_path=MEMORY_PATH, routing_path=None):
+    peek = next((c for c in pending(home) if c["id"] == cid), None)
+    if peek and peek.get("kind") == "routing":
+        from . import revise  # 지연 임포트(순환 방지)
+        # routing.toml 적용이 검증을 통과해야만 대기열에서 빼고 규칙으로 기록한다
+        revise.apply_to_toml(peek, routing_path or route.ROUTING_PATH)
     cand = _pop(cid, home)
     rules = load_rules(home)
     rules.append(log.redact(cand))
