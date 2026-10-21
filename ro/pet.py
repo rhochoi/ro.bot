@@ -834,28 +834,28 @@ PET_HTML = r"""<!DOCTYPE html>
   /* =========================================================
      MATERIAL — 리퀴드 글라스(Liquid Glass), 네온(Neon), 메탈(Brushed)
      ========================================================= */
-  /* 1. 리퀴드 글라스 (Liquid Glass): 내부 가로줄 없이 맑고 매끈한 화이트 캡슐 + 양끝 프리즘 림 + 소프트 드롭섀도 */
+  /* 1. 리퀴드 글라스 (Liquid Glass): 은은하게 뒤가 비치는 반투명 밀키 리퀴드 글라스 + 양끝 프리즘 림 */
   body.material-glass .ro-bot {
-    filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.14));
+    filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.16));
   }
   body.material-glass .pill {
     z-index: 1;
     overflow: hidden;
     background: linear-gradient(
       180deg,
-      rgba(255, 255, 255, 0.99) 0%,
-      rgba(252, 251, 248, 0.94) 55%,
-      rgba(244, 241, 235, 0.90) 100%
+      rgba(255, 255, 255, 0.72) 0%,
+      rgba(252, 251, 248, 0.54) 52%,
+      rgba(244, 241, 235, 0.64) 100%
     );
-    backdrop-filter: blur(22px) saturate(180%);
-    -webkit-backdrop-filter: blur(22px) saturate(180%);
-    border: 1px solid rgba(255, 255, 255, 0.98);
+    backdrop-filter: blur(18px) saturate(190%);
+    -webkit-backdrop-filter: blur(18px) saturate(190%);
+    border: 1.2px solid rgba(255, 255, 255, 0.88);
     box-shadow:
-      inset 0 3px 4px rgba(255, 255, 255, 1.0),
-      inset 3.5px 0 6px rgba(255, 210, 160, 0.36),
-      inset -3.5px 0 6px rgba(175, 214, 255, 0.36),
-      inset 0 -3px 6px rgba(196, 190, 180, 0.42),
-      0 4px 10px rgba(15, 14, 13, 0.11);
+      inset 0 2.5px 4px rgba(255, 255, 255, 0.92),
+      inset 3.5px 0 6px rgba(255, 210, 160, 0.38),
+      inset -3.5px 0 6px rgba(175, 214, 255, 0.38),
+      inset 0 -3px 6px rgba(196, 190, 180, 0.34),
+      0 4px 10px rgba(15, 14, 13, 0.12);
   }
   body.material-glass .eyes {
     z-index: 2;
