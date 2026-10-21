@@ -40,9 +40,9 @@ def _file(day, log_dir):
     return Path(log_dir).expanduser() / f"{day}.jsonl"
 
 
-def append(kind, summary, data=None, engine=None, log_dir=LOG_DIR):
-    """이벤트 한 줄 추가. 반환: 기록된 이벤트."""
-    now = time.time()
+def append(kind, summary, data=None, engine=None, log_dir=LOG_DIR, at=None):
+    """이벤트 한 줄 추가. at(epoch 초)을 주면 그 시각의 이벤트로 기록한다(수집기용). 반환: 기록된 이벤트."""
+    now = at if at is not None else time.time()
     event = redact({
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
         "kind": kind, "engine": engine, "summary": summary, "data": data or {},
