@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import ambient, ask, harden, learn, log, mapper, route
+from . import ambient, ask, bench, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -45,6 +45,17 @@ def main(argv=None):
     q.add_argument("--project", help="프로젝트 이름 직접 지정")
     q.add_argument("--no-context", action="store_true", help="컨텍스트 없이 질문만 전송")
     q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
+    bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
+    bsub = bn.add_subparsers(dest="bench_cmd", required=True)
+    br = bsub.add_parser("run", help="과제 × 조건 실행(엔진 호출 발생)")
+    br.add_argument("--tasks", default="~/.ro/bench.json")
+    br.add_argument("--engine", choices=route.ENGINES, default="codex")
+    br.add_argument("--arms", default=",".join(bench.ARMS))
+    br.add_argument("--dry-run", action="store_true", help="실행 횟수·전송 내용만 출력")
+    bj = bsub.add_parser("judge", help="최근 결과를 익명으로 보고 직접 선호 선택")
+    bj.add_argument("--file")
+    bp = bsub.add_parser("report", help="결과 요약")
+    bp.add_argument("--file")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -63,6 +74,45 @@ def main(argv=None):
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
+    elif args.cmd == "bench":
+        home = Path("~/.ro").expanduser()
+        if args.bench_cmd == "run":
+            tpath = Path(args.tasks).expanduser()
+            if not tpath.exists():
+                tpath = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
+                print(f"과제 파일이 없어 예시를 사용합니다: {tpath}")
+            tasks = bench.load_tasks(tpath)
+            arms = [a for a in args.arms.split(",") if a]
+            bad = [a for a in arms if a not in bench.ARMS]
+            if bad:
+                raise SystemExit(f"알 수 없는 조건: {bad}")
+            mapdata = ask.load_map()
+            if mapdata is None:
+                raise SystemExit("지도가 없습니다. 먼저 `python -m ro map`을 실행하세요.")
+            n = len(tasks) * len(arms)
+            print(f"엔진 {args.engine} / 과제 {len(tasks)}개 × 조건 {len(arms)}개 = 호출 {n}회 (읽기 모드)")
+            if args.dry_run:
+                for t in tasks:
+                    for a in arms:
+                        pl = bench.plan_arm(t, a, mapdata, args.engine, "<빈 폴더>")
+                        print(f"- {t['id']}/{a}: cwd={pl['cwd']} 컨텍스트 {pl['context_chars']}자")
+                return
+            results = bench.run_matrix(tasks, arms, args.engine, mapdata)
+            path = bench.save(results)
+            print(bench.report({"results": results}))
+            print(f"저장: {path}  (직접 선호: `python -m ro bench judge`)")
+        else:
+            path = Path(args.file) if args.file else bench.latest()
+            if not path or not Path(path).exists():
+                raise SystemExit("결과 파일이 없습니다. 먼저 `ro bench run`을 실행하세요.")
+            data = bench.load(path)
+            if args.bench_cmd == "judge":
+                if not sys.stdin.isatty():
+                    raise SystemExit("judge는 터미널에서 직접 실행해야 합니다.")
+                n = bench.judge(data)
+                bench.save_back(path, data)
+                print(f"판정 {n}건 저장")
+            print(bench.report(data))
     elif args.cmd == "ask":
         mapdata = ask.load_map()
         if mapdata is None:

@@ -41,26 +41,28 @@ def choose(task, rules=()):
     return default_engine(category), category, "초기 규칙"
 
 
-def build_command(engine, task, write=False, cwd=None):
+def build_command(engine, task, write=False, cwd=None, skip_git_check=False):
     if engine == "claude":
         return ["claude", "-p", task, "--permission-mode", "acceptEdits" if write else "plan"]
     if engine == "codex":
         cmd = ["codex", "exec", "-s", "workspace-write" if write else "read-only"]
         if cwd:
             cmd += ["-C", cwd]
+        if skip_git_check:
+            cmd.append("--skip-git-repo-check")
         return cmd + [task]
     if engine == "agy":
         return ["agy", "-p", task, "--mode", "accept-edits" if write else "plan"]
     raise ValueError(f"unknown engine: {engine}")
 
 
-def run(engine, task, write=False, cwd=None):
+def run(engine, task, write=False, cwd=None, skip_git_check=False):
     """엔진 실행. 반환: dict(ok, code, duration, output)."""
     if not shutil.which(engine):
         return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치"}
     start = time.time()
     try:
-        r = subprocess.run(build_command(engine, task, write, cwd), capture_output=True,
+        r = subprocess.run(build_command(engine, task, write, cwd, skip_git_check), capture_output=True,
                            text=True, timeout=TIMEOUT, cwd=cwd)
         return {"ok": r.returncode == 0, "code": r.returncode,
                 "duration": round(time.time() - start, 1), "output": r.stdout or r.stderr}
