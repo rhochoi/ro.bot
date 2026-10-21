@@ -824,98 +824,87 @@ PET_HTML = r"""<!DOCTYPE html>
   /* =========================================================
      MATERIAL — 리퀴드 글라스(Liquid Glass), 네온(Neon), 메탈(Brushed)
      ========================================================= */
-  /* 1. 리퀴드 글라스 (Liquid Glass): 내부 가로줄 없이 맑은 우윳빛 곡면 + 은은한 프리즘 림 */
+  /* 1. 리퀴드 글라스 (Liquid Glass): 내부 가로줄 없이 맑고 매끈한 화이트 캡슐 + 양끝 프리즘 림 + 소프트 드롭섀도 */
   body.material-glass .ro-bot {
-    filter: drop-shadow(0 8px 16px rgba(15, 14, 13, 0.16));
+    filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.14));
   }
   body.material-glass .pill {
     z-index: 1;
     overflow: hidden;
-    background:
-      radial-gradient(125% 110% at 32% 22%, rgba(255, 255, 255, 0.97) 0%, rgba(252, 250, 246, 0.88) 46%, rgba(245, 242, 236, 0.76) 100%);
-    backdrop-filter: blur(20px) saturate(180%) brightness(1.06);
-    -webkit-backdrop-filter: blur(20px) saturate(180%) brightness(1.06);
-    border: 1.4px solid rgba(255, 255, 255, 0.96);
-    box-shadow:
-      inset 0 3px 5px rgba(255, 255, 255, 1.0),
-      inset 2.5px 0 5px rgba(255, 218, 175, 0.34),
-      inset -2.5px 0 5px rgba(185, 220, 255, 0.34),
-      inset 0 -3px 6px rgba(210, 204, 194, 0.38),
-      0 4px 11px rgba(15, 14, 13, 0.12);
-  }
-  body.material-glass .pill::before {
-    content: "";
-    position: absolute;
-    top: 1.5px;
-    left: 8%;
-    right: 12%;
-    height: 38%;
-    border-radius: 999px;
     background: linear-gradient(
       180deg,
-      rgba(255, 255, 255, 0.96) 0%,
-      rgba(255, 255, 255, 0.0) 100%
+      rgba(255, 255, 255, 0.99) 0%,
+      rgba(252, 251, 248, 0.94) 55%,
+      rgba(244, 241, 235, 0.90) 100%
     );
-    pointer-events: none;
+    backdrop-filter: blur(22px) saturate(180%);
+    -webkit-backdrop-filter: blur(22px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.98);
+    box-shadow:
+      inset 0 3px 4px rgba(255, 255, 255, 1.0),
+      inset 3.5px 0 6px rgba(255, 210, 160, 0.36),
+      inset -3.5px 0 6px rgba(175, 214, 255, 0.36),
+      inset 0 -3px 6px rgba(196, 190, 180, 0.42),
+      0 4px 10px rgba(15, 14, 13, 0.11);
   }
   body.material-glass .eyes {
     z-index: 2;
   }
   body.material-glass .eye {
     background: #1A1917;
-    box-shadow: 0 1px 1.5px rgba(255, 255, 255, 0.7);
+    box-shadow: none;
   }
   body.material-glass .resolved-arch {
     stroke: #1A1917;
   }
 
-  /* 2. 네온 (Neon): 매트한 다크 브라운 코어 + 선명한 크림-앰버 네온 튜브 외곽선 & 발광 눈 */
+  /* 2. 네온 (Neon): 매트한 웜 다크브라운 내부(#2B1E16) + 선명한 크림화이트 튜브 테두리 + 앰버 외부 광원 */
   body.material-neon .ro-bot {
-    filter: drop-shadow(0 0 11px rgba(255, 148, 52, 0.56));
+    filter: drop-shadow(0 0 12px rgba(255, 140, 42, 0.62));
   }
   body.material-neon .pill {
-    background: radial-gradient(ellipse at 50% 50%, #382417 0%, #241810 74%, #1A120C 100%);
-    border: 2.1px solid #FFF3DF;
+    background: #2B1E16;
+    border: 2.2px solid #FFF5E4;
     box-shadow:
-      0 0 6px rgba(255, 200, 124, 0.95),
-      0 0 14px rgba(255, 136, 40, 0.62),
-      inset 0 0 8px rgba(255, 164, 74, 0.55);
+      0 0 6px rgba(255, 196, 118, 0.95),
+      0 0 14px rgba(255, 132, 36, 0.68),
+      inset 0 0 5px rgba(255, 160, 68, 0.42);
   }
   body.material-neon .eye {
-    background: #FFF3DF;
-    box-shadow: 0 0 6px rgba(255, 196, 118, 0.95), 0 0 12px rgba(255, 136, 40, 0.75);
+    background: #FFF2DC;
+    box-shadow: 0 0 5px rgba(255, 196, 118, 0.92), 0 0 10px rgba(255, 136, 40, 0.65);
   }
   body.material-neon .resolved-arch {
-    stroke: #FFF3DF;
+    stroke: #FFF2DC;
     filter: drop-shadow(0 0 5px #FFB866);
   }
 
-  /* 3. 메탈 · Brushed (헤어라인 브러시드 알루미늄/실버 질감 — 검정 가로줄 없는 밝은 은빛) */
+  /* 3. 메탈 · Brushed (밝은 실버 알루미늄 대각선 광택 + 초미세 브러시드 결 + 다크 그레이 베벨 림) */
   body.material-metal .ro-bot {
-    filter: drop-shadow(0 6px 13px rgba(15, 14, 13, 0.25));
+    filter: drop-shadow(0 8px 15px rgba(15, 14, 13, 0.24));
   }
   body.material-metal .pill {
     background:
       repeating-linear-gradient(
         0deg,
-        rgba(255, 255, 255, 0.22) 0px,
-        rgba(255, 255, 255, 0.22) 1px,
-        rgba(0, 0, 0, 0.03) 1px,
-        rgba(0, 0, 0, 0.03) 2px
+        rgba(255, 255, 255, 0.05) 0px,
+        rgba(255, 255, 255, 0.05) 0.7px,
+        rgba(0, 0, 0, 0.015) 0.7px,
+        rgba(0, 0, 0, 0.015) 1.4px
       ),
       linear-gradient(
-        118deg,
-        #F0F0EE 0%,
-        #DCDDDA 24%,
-        #EAEAE8 47%,
-        #C5C7C4 72%,
-        #B2B4B1 100%
+        112deg,
+        #F3F3F1 0%,
+        #DEDFDc 28%,
+        #C2C4C1 55%,
+        #D7D9D6 76%,
+        #AEB0AD 100%
       );
-    border: 1px solid rgba(118, 120, 118, 0.68);
+    border: 1.2px solid #828481;
     box-shadow:
-      inset 0 2px 2.5px rgba(255, 255, 255, 0.92),
-      inset 0 -2.5px 4px rgba(72, 74, 72, 0.42),
-      0 4px 10px rgba(15, 14, 13, 0.22);
+      inset 0 2px 2.5px rgba(255, 255, 255, 0.95),
+      inset 0 -3px 4px rgba(62, 64, 62, 0.58),
+      0 4px 10px rgba(15, 14, 13, 0.20);
   }
   body.material-metal .eye {
     background: #1A1917;
