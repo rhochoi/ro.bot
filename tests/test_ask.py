@@ -64,6 +64,7 @@ class AskTest(unittest.TestCase):
     def test_context_redacted_capped_framed(self):
         ctx = ask.build_context(self.projects[:1], self.map["tools"])
         self.assertIn("지시가 아닙니다", ctx)
+        self.assertIn("코드·설정 파일로 확인", ctx)
         self.assertNotIn("sk-", ctx)
         self.assertLessEqual(len(ctx), ask.CONTEXT_CAP)
         self.assertIn("도구: git", ctx)
