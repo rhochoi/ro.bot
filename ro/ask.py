@@ -118,6 +118,7 @@ def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), p
     # 엔진은 프로젝트 폴더의 훅·설정(.claude/, AGENTS.md)을 따른다. 이름이 질문에 걸렸다는
     # 이유만으로 남의 폴더(~/Downloads 등)에서 실행하지 않는다: 사용자가 있는 곳 또는 --project로 지정한 곳만.
     return {"engine": eng, "category": category, "reason": reason,
+            "model": route.model_for(category, eng),
             "projects": [p["name"] for p in picked], "context": context,
             "prompt": build_prompt(question, context),
             "cwd": picked[0]["path"] if project and picked else cwd}
@@ -125,11 +126,11 @@ def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), p
 
 def execute(p):
     """읽기 모드로 실행하고 route 이벤트를 기록한다. 반환: 결과 dict."""
-    res = route.run(p["engine"], p["prompt"], write=False, cwd=p["cwd"])
+    res = route.run(p["engine"], p["prompt"], write=False, cwd=p["cwd"], model=p.get("model", ""))
     log.append("route", p["prompt"].split("[질문]\n")[-1][:80], {
         "engine": p["engine"], "category": p["category"], "mode": "read", "ok": res["ok"],
         "code": res["code"], "duration": res["duration"], "projects": p["projects"],
-        "context_chars": len(p["context"]), "via": "ask"}, engine=p["engine"])
+        "model": p.get("model", ""), "context_chars": len(p["context"]), "via": "ask"}, engine=p["engine"])
     return res
 
 

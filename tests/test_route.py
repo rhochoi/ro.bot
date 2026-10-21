@@ -40,6 +40,15 @@ class RouteTest(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertEqual(res["output"].strip(), "fake-out")
 
+    def test_engine_does_not_inherit_stdin(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = os.path.join(d, "claude")
+            open(exe, "w").write("#!/bin/sh\ncat\necho 끝\n")  # stdin을 읽으려는 엔진
+            os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
+            with mock.patch.dict(os.environ, {"PATH": d}):
+                res = route.run("claude", "hi")  # stdin이 열려 있으면 여기서 멈춘다
+            self.assertEqual(res["output"].strip(), "끝")
+
     def test_missing_engine(self):
         with mock.patch.dict(os.environ, {"PATH": ""}):
             self.assertFalse(route.run("codex", "x")["ok"])
