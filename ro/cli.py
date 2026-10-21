@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from . import log, mapper
+from . import log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -17,6 +17,12 @@ def main(argv=None):
     m.add_argument("--out", default=DEFAULT_OUT)
     s = sub.add_parser("show", help="저장된 지도 요약")
     s.add_argument("--map", default=DEFAULT_OUT)
+    r = sub.add_parser("route", help="엔진 선택 후 작업 실행")
+    r.add_argument("task")
+    r.add_argument("--engine", choices=route.ENGINES, help="수동 지정(기본: 자동 추천)")
+    r.add_argument("--write", action="store_true", help="쓰기 허용(실행 전 확인)")
+    r.add_argument("--cwd")
+    r.add_argument("--dry-run", action="store_true", help="추천만 출력")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -35,6 +41,22 @@ def main(argv=None):
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
+    elif args.cmd == "route":
+        engine, category, reason = route.choose(args.task, log.read_all())
+        if args.engine:
+            engine, reason = args.engine, "수동 지정"
+        mode = "write" if args.write else "read"
+        print(f"엔진: {engine} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
+        if args.dry_run:
+            return
+        if args.write and input("쓰기 모드로 실행합니다. 계속? [y/N] ").strip().lower() != "y":
+            raise SystemExit("취소됨")
+        res = route.run(engine, args.task, args.write, args.cwd)
+        log.append("route", args.task[:80], {
+            "engine": engine, "category": category, "mode": mode, "ok": res["ok"],
+            "code": res["code"], "duration": res["duration"]}, engine=engine)
+        print(res["output"])
+        raise SystemExit(0 if res["ok"] else 1)
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)

@@ -73,3 +73,10 @@ def summarize(day, log_dir=LOG_DIR):
     lines.append("")
     lines += [f"- {e['ts'][11:19]} [{e['kind']}] {e['summary']}" for e in events[-10:]]
     return "\n".join(lines)
+
+
+def read_all(log_dir=LOG_DIR):
+    events = []
+    for path in sorted(Path(log_dir).expanduser().glob("*.jsonl")):
+        events += read(path.stem, log_dir)
+    return events
