@@ -71,7 +71,7 @@ ACTIONS = (
     "failure",
 )
 ACTION_LABELS = {
-    "breathe": "대기 · 숨쉬기",
+    "breathe": "숨쉬기",
     "look_around": "두리번",
     "walk": "걷기",
     "thinking": "생각",
@@ -79,11 +79,11 @@ ACTION_LABELS = {
     "drowsy": "졸음",
     "gaze": "시선",
     "pet": "쓰다듬기",
-    "drag": "잡기 · 끌기",
+    "drag": "끌기",
     "shake": "흔들기",
-    "drop": "착지 바운스",
-    "success": "성공 · 해결",
-    "failure": "실패 · 에러",
+    "drop": "착지",
+    "success": "성공",
+    "failure": "실패",
 }
 ACTION_DESCS = {
     "breathe": "3개 층 시차 숨쉬기 (3초 루프)",
@@ -1389,26 +1389,31 @@ PET_HTML = r"""<!DOCTYPE html>
 
   .pet-label {
     margin-top: 5px;
-    background: var(--ink);
-    color: var(--chalk);
-    padding: 2px 9px;
+    background: rgba(22, 22, 26, 0.78);
+    color: #f5f4ef;
+    padding: 1.5px 7px;
     border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 9px;
+    font-weight: 600;
     letter-spacing: -0.01em;
+    line-height: 14px;
+    white-space: nowrap;
     opacity: 0;
     transform: translateY(-2px);
     transition: opacity 0.16s ease, transform 0.16s ease;
     pointer-events: none;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.2);
   }
   .pet-wrap:hover .pet-label {
-    opacity: 0.94;
+    opacity: 0.92;
     transform: translateY(0);
   }
   body.theme-chalk .pet-label {
-    background: var(--chalk);
-    color: var(--ink);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    background: rgba(245, 244, 239, 0.86);
+    color: #16161a;
+    box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.16);
   }
 </style>
 </head>
@@ -1523,7 +1528,7 @@ PET_HTML = r"""<!DOCTYPE html>
       <div id="layerBody" class="pill pill-body"></div>
       <div id="layerBase" class="pill pill-base"></div>
     </div>
-    <div id="petCaption" class="pet-label">ro · 기본</div>
+    <div id="petCaption" class="pet-label">기본</div>
   </div>
 </div>
 
@@ -1540,7 +1545,7 @@ const MOOD_META = {
 const MOOD_ORDER = ["idle", "recording", "focus", "anxious", "discovery", "resolved"];
 
 const ACTION_META = {
-  breathe:     { label: "대기 · 숨쉬기", desc: "3개 층 시차 숨쉬기 (3초 루프)" },
+  breathe:     { label: "숨쉬기",      desc: "3개 층 시차 숨쉬기 (3초 루프)" },
   look_around: { label: "두리번",      desc: "눈이 먼저 가는 두리번" },
   walk:        { label: "걷기",        desc: "바닥-몸-머리 순차 이동" },
   thinking:    { label: "생각",        desc: "머리 갸우뚱 & 엇박자 펄스" },
@@ -1548,11 +1553,11 @@ const ACTION_META = {
   drowsy:      { label: "졸음",        desc: "머리 침하 & 실눈 & 느린 호흡" },
   gaze:        { label: "시선",        desc: "마우스 커서 시선 추적" },
   pet:         { label: "쓰다듬기",    desc: "폭신하게 눌림 & 눈웃음 (마우스 호버)" },
-  drag:        { label: "잡기 · 끌기", desc: "세로 늘어남 & 바닥 처짐" },
+  drag:        { label: "끌기",        desc: "세로 늘어남 & 바닥 처짐" },
   shake:       { label: "흔들기",      desc: "층 좌우 요동 (빠른 흔들기)" },
-  drop:        { label: "착지 바운스", desc: "착지 스쿼시 & 스프링 탄성" },
-  success:     { label: "성공 · 해결", desc: "기쁨의 점프 & 웃는 눈 & 26u 확장" },
-  failure:     { label: "실패 · 에러", desc: "층 어긋남 & 떨림 & 작은 눈" },
+  drop:        { label: "착지",        desc: "착지 스쿼시 & 스프링 탄성" },
+  success:     { label: "성공",        desc: "기쁨의 점프 & 웃는 눈 & 26u 확장" },
+  failure:     { label: "실패",        desc: "층 어긋남 & 떨림 & 작은 눈" },
 };
 const ALL_ACTIONS = Object.keys(ACTION_META);
 
@@ -1623,7 +1628,7 @@ function updateMaterialUI() {
   matBtn.textContent = label;
   matBtn.title = (materialMode === "auto") ? `자동 감지 (${label}) — 클릭하여 전환` : `${label} 고정 — 클릭하여 전환`;
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
-  petCaption.textContent = `ro · ${moodMeta.label} · ${label}`;
+  petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
 }
 
 function updateThemeUI() {
@@ -1816,19 +1821,20 @@ window.triggerAction = function(name, durationMs) {
   });
 
   if (!name) {
+    currentAction = null;
     const meta = MOOD_META[currentMood] || MOOD_META.idle;
-    const matLabel = MAT_LABELS[activeMaterial] || "점토";
-    petCaption.textContent = `ro · ${meta.label} · ${matLabel}`;
+    petCaption.textContent = meta.label;
     subStatusText.textContent = meta.caption;
     return { ok: true, cleared: true };
   }
 
+  currentAction = name;
   const cls = `action-${name.replace(/_/g, "-")}`;
   petWrap.classList.add(cls);
 
   const meta = ACTION_META[name];
   if (meta) {
-    petCaption.textContent = `ro · ${meta.label}`;
+    petCaption.textContent = meta.label;
     subStatusText.textContent = meta.desc;
   }
 
