@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, route
+from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, pet, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -74,6 +74,12 @@ def main(argv=None):
     t.add_argument("-n", type=int, default=10)
     sm = lsub.add_parser("summary", help="일일 요약")
     sm.add_argument("--date", default=time.strftime("%Y-%m-%d"))
+    pt = sub.add_parser("pet", help="코덱스 펫 스타일 데스크톱 오버레이 + 메뉴바 비서")
+    pt.add_argument("--port", type=int, default=0, help="로컬 서버 포트 (기본: 자동 할당)")
+    pt.add_argument("--browser", action="store_true", help="데스크톱 오버레이 대신 브라우저로 열기")
+    pt.add_argument("--no-wander", action="store_true", help="자동 산책 이동 끄기")
+    pt.add_argument("--status", action="store_true", help="현재 펫 표정·층 상태를 JSON으로 출력 후 종료")
+    pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)
 
     if args.cmd == "map":
@@ -253,6 +259,17 @@ def main(argv=None):
                 print(f"{e['ts']} [{e['kind']}] {e['summary']}")
         else:
             print(log.summarize(args.date))
+    elif args.cmd == "pet":
+        if args.status:
+            st = pet.PetRuntime().snapshot()
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+            return
+        if args.build:
+            out = pet.launch(build_only=True)
+            print(f"macOS 오버레이 빌드 완료: {out}")
+            return
+        pet.launch(port=args.port, mode="browser" if args.browser else "overlay",
+                   wander=not args.no_wander)
     else:
         path = Path(args.map).expanduser()
         if not path.exists():
