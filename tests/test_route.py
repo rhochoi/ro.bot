@@ -7,10 +7,6 @@ from unittest import mock
 from ro import route
 
 
-def ev(engine, ok, category="implement"):
-    return {"kind": "route", "data": {"engine": engine, "category": category, "ok": ok}}
-
-
 class RouteTest(unittest.TestCase):
     def test_rules(self):
         self.assertEqual(route.choose("이 코드 리뷰해줘")[0], "claude")
@@ -18,14 +14,15 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(route.choose("브라우저 화면 확인")[0], "agy")
         self.assertEqual(route.choose("안녕")[0], "claude")
 
-    def test_learned_overrides_rule(self):
-        events = [ev("agy", True)] * 3 + [ev("codex", False)] * 3
-        engine, _, reason = route.choose("버그 수정", events)
+    def test_approved_rule_overrides_default(self):
+        rules = [{"id": "ab12", "kind": "route", "category": "implement", "engine": "agy"}]
+        engine, _, reason = route.choose("버그 수정", rules)
         self.assertEqual(engine, "agy")
-        self.assertIn("로그", reason)
+        self.assertIn("ab12", reason)
 
-    def test_too_few_samples_keeps_rule(self):
-        self.assertEqual(route.choose("버그 수정", [ev("agy", True)] * 2)[0], "codex")
+    def test_unrelated_rule_ignored(self):
+        rules = [{"id": "x", "kind": "route", "category": "ui", "engine": "claude"}]
+        self.assertEqual(route.choose("버그 수정", rules)[0], "codex")
 
     def test_read_mode_is_default_and_write_is_explicit(self):
         self.assertIn("plan", route.build_command("claude", "x"))

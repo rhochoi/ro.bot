@@ -4,7 +4,7 @@ import json
 import time
 from pathlib import Path
 
-from . import log, mapper, route
+from . import learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -23,6 +23,9 @@ def main(argv=None):
     r.add_argument("--write", action="store_true", help="쓰기 허용(실행 전 확인)")
     r.add_argument("--cwd")
     r.add_argument("--dry-run", action="store_true", help="추천만 출력")
+    ln = sub.add_parser("learn", help="로그에서 규칙 후보 제안 → 승인/거절")
+    ln.add_argument("action", nargs="?", choices=["approve", "reject", "rules"])
+    ln.add_argument("id", nargs="?")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
     lsub = lg.add_subparsers(dest="log_cmd", required=True)
     a = lsub.add_parser("add", help="이벤트 기록")
@@ -42,7 +45,7 @@ def main(argv=None):
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
     elif args.cmd == "route":
-        engine, category, reason = route.choose(args.task, log.read_all())
+        engine, category, reason = route.choose(args.task, learn.load_rules())
         if args.engine:
             engine, reason = args.engine, "수동 지정"
         mode = "write" if args.write else "read"
@@ -57,6 +60,27 @@ def main(argv=None):
             "code": res["code"], "duration": res["duration"]}, engine=engine)
         print(res["output"])
         raise SystemExit(0 if res["ok"] else 1)
+    elif args.cmd == "learn":
+        if args.action in ("approve", "reject"):
+            if not args.id:
+                raise SystemExit("후보 id가 필요합니다.")
+            try:
+                c = getattr(learn, args.action)(args.id)
+            except KeyError as e:
+                raise SystemExit(str(e))
+            log.append(f"learn_{args.action}", c["text"], {"id": c["id"], "kind": c["kind"]})
+            print(f"{args.action}: [{c['id']}] {c['text']}")
+        elif args.action == "rules":
+            for r in learn.load_rules():
+                print(f"[{r['id']}] {r['text']} ({r['evidence']})")
+        else:
+            cands = learn.propose(log.read_all())
+            if not cands:
+                print("새 후보 없음")
+            for c in cands:
+                print(f"[{c['id']}] {c['text']} — {c['evidence']}")
+            if cands:
+                print("승인: ro learn approve ID / 거절: ro learn reject ID")
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)

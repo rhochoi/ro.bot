@@ -1,14 +1,12 @@
-"""Route 단계: 엔진 어댑터(claude/codex/agy) + 로그 기반 라우팅 추천.
+"""Route 단계: 엔진 어댑터(claude/codex/agy) + 승인된 규칙 기반 라우팅.
 
 기본은 읽기 모드(계획/read-only). 쓰기 모드는 호출자가 명시적으로 허용해야 한다.
 """
 import shutil
 import subprocess
 import time
-from collections import defaultdict
 
 ENGINES = ("claude", "codex", "agy")
-MIN_SAMPLES = 3  # 카테고리·엔진별 이 횟수 이상이어야 학습 결과를 신뢰
 TIMEOUT = 600
 
 # 초기 가설: (카테고리, 키워드, 엔진)
@@ -27,27 +25,20 @@ def categorize(task):
     return "general"
 
 
-def _default_engine(category):
+def default_engine(category):
     for c, _, engine in RULES:
         if c == category:
             return engine
     return "claude"
 
 
-def choose(task, events=()):
-    """(engine, category, reason). 학습 데이터가 충분하면 성공률 최고 엔진, 아니면 규칙."""
+def choose(task, rules=()):
+    """(engine, category, reason). 승인된 규칙이 있으면 우선, 없으면 초기 키워드 규칙."""
     category = categorize(task)
-    stats = defaultdict(lambda: [0, 0])  # engine -> [ok, total]
-    for e in events:
-        d = e.get("data") or {}
-        if e.get("kind") == "route" and d.get("category") == category and d.get("engine") in ENGINES:
-            stats[d["engine"]][1] += 1
-            stats[d["engine"]][0] += bool(d.get("ok"))
-    trusted = {k: ok / n for k, (ok, n) in stats.items() if n >= MIN_SAMPLES}
-    if trusted:
-        best = max(trusted, key=trusted.get)
-        return best, category, f"로그 성공률 {trusted[best]:.0%} ({stats[best][1]}회)"
-    return _default_engine(category), category, "초기 규칙"
+    for r in rules:
+        if r.get("kind") == "route" and r.get("category") == category and r.get("engine") in ENGINES:
+            return r["engine"], category, f"승인된 규칙 {r['id']}"
+    return default_engine(category), category, "초기 규칙"
 
 
 def build_command(engine, task, write=False, cwd=None):
