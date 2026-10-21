@@ -10,6 +10,8 @@ arms
 """
 import json
 import random
+import re
+import subprocess
 import tempfile
 import time
 from collections import defaultdict
@@ -20,6 +22,89 @@ from . import ask, fsutil, log, route
 ARMS = ("ctx", "none", "explore")
 HOME = "~/.ro"
 RUN_DIR = "bench"
+
+
+def _percent(raw):
+    """'0.8' → 여러 표기 중 하나면 정답(오탐을 줄이려 숫자 단독 '8'은 쓰지 않는다)."""
+    pct = round(float(raw) * 100)
+    return [[f"{pct}%", f"{pct}퍼센트", f"{pct} 퍼센트", f"{pct} %", raw]]
+
+
+# 코드에 박힌 상수에서 정답을 뽑는 과제: (id, 질문, 파일, 정규식, expect 변환). 정답은 생성 시점 코드에서 읽는다.
+CODE_FACTS = [
+    ("fact-rate-limit", "rog.bot의 ambient 입력은 분당 최대 몇 건까지 기록해?", "ro/ambient.py",
+     r"MAX_PER_MIN = (\d+)", lambda v: [v]),
+    ("fact-context-cap", "rog.bot의 ask 컨텍스트는 최대 몇 글자로 자르게 돼 있어?", "ro/ask.py",
+     r"CONTEXT_CAP = (\d+)", lambda v: [v]),
+    ("fact-min-rate", "rog.bot의 Learn은 성공률이 몇 퍼센트 이상일 때 라우팅 규칙 후보를 제안해?",
+     "ro/learn.py", r"MIN_RATE = (0\.\d+)", _percent),
+]
+STALE_SECONDS = 3600
+
+
+def _git(path, *args):
+    r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=10)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def project_facts_tasks(project, now=None):
+    """프로젝트 1개에서 변별력 있는 과제를 만든다. 정답은 생성 시점의 실제 상태(git, 파일시스템)."""
+    path, name = Path(project["path"]), project["name"]
+    asof = now or time.strftime("%Y-%m-%dT%H:%M:%S")
+    base = {"project": name, "asof": asof}
+    tasks = [{**base, "id": f"{name}-path", "kind": "locate",
+              "question": f"내 Mac에서 {name} 프로젝트의 절대 경로는?", "expect": [str(path)]}]
+    branch = _git(path, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch and branch != "HEAD" and (len(branch) >= 5 or "/" in branch):  # 흔한 짧은 단어는 오탐
+        tasks.append({**base, "id": f"{name}-branch", "kind": "live-git",
+                      "question": f"{name} 프로젝트의 현재 git 브랜치는?", "expect": [branch]})
+    subject = _git(path, "log", "-1", "--format=%s")
+    if len(subject) >= 10:
+        tasks.append({**base, "id": f"{name}-lastcommit", "kind": "live-git",
+                      "question": f"{name} 프로젝트의 마지막 커밋 메시지는?", "expect": [subject[:30]]})
+    dirs = sorted(e.name for e in path.iterdir()
+                  if e.is_dir() and not e.name.startswith(".") and e.name not in {"node_modules", "__pycache__"})[:3]
+    if len(dirs) >= 2:
+        tasks.append({**base, "id": f"{name}-dirs", "kind": "structure",
+                      "question": f"{name} 프로젝트 최상위에 있는 폴더 이름을 알려줘", "expect": dirs})
+    return tasks
+
+
+def code_fact_tasks(repo_path, project="rog.bot", now=None):
+    asof = now or time.strftime("%Y-%m-%dT%H:%M:%S")
+    tasks = []
+    for tid, question, rel, pattern, to_expect in CODE_FACTS:
+        f = Path(repo_path) / rel
+        m = re.search(pattern, f.read_text(encoding="utf-8")) if f.is_file() else None
+        if m:
+            tasks.append({"id": tid, "kind": "code-fact", "project": project, "asof": asof,
+                          "question": question, "expect": to_expect(m.group(1))})
+    return tasks
+
+
+def generate_tasks(mapdata, repo_path, extra_projects=()):
+    """기본은 rog.bot만. 다른 프로젝트는 사용자가 이름을 명시했을 때만 포함한다."""
+    by_name = {p["name"]: p for p in mapdata["projects"]}
+    names = ["rog.bot", *extra_projects]
+    missing = [n for n in names if n not in by_name]
+    if missing:
+        raise ValueError(f"지도에 없는 프로젝트: {missing}")
+    tasks = []
+    for n in names:
+        tasks += project_facts_tasks(by_name[n])
+    return tasks + code_fact_tasks(repo_path)
+
+
+def stale_tasks(tasks, now=None):
+    """생성 후 1시간이 지난 동적 과제 id 목록(git 상태가 바뀌었을 수 있다)."""
+    now = now or time.time()
+    out = []
+    for t in tasks:
+        if t.get("kind") in ("live-git", "locate", "structure") and t.get("asof"):
+            age = now - time.mktime(time.strptime(t["asof"], "%Y-%m-%dT%H:%M:%S"))
+            if age > STALE_SECONDS:
+                out.append(t["id"])
+    return out
 
 
 def load_tasks(path):
@@ -66,7 +151,7 @@ def run_matrix(tasks, arms, engine, mapdata, runner=route.run, neutral_dir=None)
             answer = log.redact(res["output"]) if res["ok"] else ""
             s, hit = score(answer, t["expect"])
             results.append({
-                "task": t["id"], "arm": arm, "engine": engine, "ok": res["ok"],
+                "task": t["id"], "kind": t.get("kind", "-"), "arm": arm, "engine": engine, "ok": res["ok"],
                 "duration": res["duration"], "context_chars": pl["context_chars"],
                 "score": s, "hit": hit, "answer": answer, "error": "" if res["ok"] else res["output"][:200]})
             log.append("bench", f"{t['id']}/{arm}", {
@@ -105,6 +190,17 @@ def report(data):
             lines.append(f"{arm:<8} {sum(r['score'] for r in rs) / len(rs):.2f}  "
                          f"{sum(r['duration'] for r in rs) / len(rs):6.1f}  "
                          f"{sum(r['ok'] for r in rs):>2}/{len(rs)}  {len(rs)}")
+    kinds = sorted({r.get("kind", "-") for r in results})
+    if len(kinds) > 1:
+        lines += ["", "종류별 평균 점수 (ctx / none / explore)"]
+        for k in kinds:
+            cells = []
+            for arm in ARMS:
+                rs = [r["score"] for r in results if r.get("kind", "-") == k and r["arm"] == arm]
+                cells.append(f"{sum(rs) / len(rs):.2f}" if rs else " - ")
+            n = len({r["task"] for r in results if r.get("kind", "-") == k})
+            lines.append(f"  {k:<10} {' / '.join(cells)}  (과제 {n}개)")
+        lines.append("")
     by_task = defaultdict(dict)
     for r in results:
         by_task[r["task"]][r["arm"]] = r

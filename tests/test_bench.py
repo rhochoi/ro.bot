@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -83,6 +84,64 @@ class BenchTest(unittest.TestCase):
     def test_example_tasks_valid(self):
         p = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
         self.assertEqual(len(bench.load_tasks(p)), 4)
+
+    def _repo(self, d, branch="feature/measure", subject="측정 도구 추가 커밋 메시지"):
+        import subprocess
+        repo = Path(d) / "proj"
+        (repo / "src").mkdir(parents=True)
+        (repo / "docs").mkdir()
+        (repo / "a.py").write_text("x")
+        env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t", "PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+        for cmd in (["init", "-q", "-b", branch], ["add", "."], ["commit", "-q", "-m", subject]):
+            subprocess.run(["git", "-C", str(repo), *cmd], check=True, env=env, capture_output=True)
+        return repo
+
+    def test_project_facts_from_live_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d)
+            tasks = {t["id"]: t for t in bench.project_facts_tasks({"name": "proj", "path": str(repo)})}
+            self.assertEqual(tasks["proj-path"]["expect"], [str(repo)])
+            self.assertEqual(tasks["proj-branch"]["expect"], ["feature/measure"])
+            self.assertEqual(tasks["proj-lastcommit"]["expect"], ["측정 도구 추가 커밋 메시지"])
+            self.assertEqual(tasks["proj-dirs"]["expect"], ["docs", "src"])
+            self.assertEqual({t["kind"] for t in tasks.values()}, {"locate", "live-git", "structure"})
+
+    def test_short_branch_name_skipped_as_false_positive_prone(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = self._repo(d, branch="main")
+            ids = [t["id"] for t in bench.project_facts_tasks({"name": "proj", "path": str(repo)})]
+            self.assertNotIn("proj-branch", ids)
+
+    def test_code_facts_read_from_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "ro").mkdir()
+            (Path(d) / "ro" / "ambient.py").write_text("MAX_PER_MIN = 42\n")
+            (Path(d) / "ro" / "learn.py").write_text("MIN_RATE = 0.8\n")
+            got = {t["id"]: t["expect"] for t in bench.code_fact_tasks(d)}
+            self.assertEqual(set(got), {"fact-rate-limit", "fact-min-rate"})  # ask.py 없으면 제외
+            self.assertEqual(got["fact-rate-limit"], ["42"])
+            self.assertEqual(bench.score("80%입니다", got["fact-min-rate"])[0], 1.0)
+            self.assertEqual(bench.score("28건 정도", got["fact-min-rate"])[0], 0.0)  # 숫자 단독 오탐 방지
+
+    def test_generate_requires_explicit_extra_projects_and_validates(self):
+        m = {"projects": [{"name": "rog.bot", "path": "/nonexistent"}]}
+        with self.assertRaises(ValueError):
+            bench.generate_tasks(m, "/x", ["secret-project"])
+
+    def test_stale_tasks(self):
+        old = {"id": "a", "kind": "live-git", "asof": "2020-01-01T00:00:00"}
+        fresh = {"id": "b", "kind": "live-git", "asof": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        code = {"id": "c", "kind": "code-fact", "asof": "2020-01-01T00:00:00"}
+        self.assertEqual(bench.stale_tasks([old, fresh, code]), ["a"])
+
+    def test_report_breaks_down_by_kind(self):
+        rs = [{"task": "t", "kind": k, "arm": a, "ok": True, "score": sc, "duration": 1.0}
+              for k, a, sc in [("locate", "ctx", 1.0), ("locate", "none", 0.0),
+                               ("code-fact", "ctx", 0.0), ("code-fact", "explore", 1.0)]]
+        text = bench.report({"results": rs})
+        self.assertIn("locate", text)
+        self.assertIn("code-fact", text)
 
 
 if __name__ == "__main__":

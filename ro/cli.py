@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import ambient, ask, bench, harden, learn, log, mapper, route
+from . import fsutil, ambient, ask, bench, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -47,11 +47,16 @@ def main(argv=None):
     q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
     bsub = bn.add_subparsers(dest="bench_cmd", required=True)
+    bg = bsub.add_parser("gen", help="현재 상태에서 정답을 뽑아 과제 파일 생성 (지도도 새로고침)")
+    bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 rog.bot만")
+    bg.add_argument("--out", default="~/.ro/bench.json")
     br = bsub.add_parser("run", help="과제 × 조건 실행(엔진 호출 발생)")
     br.add_argument("--tasks", default="~/.ro/bench.json")
     br.add_argument("--engine", choices=route.ENGINES, default="codex")
     br.add_argument("--arms", default=",".join(bench.ARMS))
     br.add_argument("--dry-run", action="store_true", help="실행 횟수·전송 내용만 출력")
+    br.add_argument("--only", default="", help="과제 id 접두어(쉼표)만 실행")
+    br.add_argument("--limit", type=int, default=0, help="앞에서 N개 과제만 실행")
     bj = bsub.add_parser("judge", help="최근 결과를 익명으로 보고 직접 선호 선택")
     bj.add_argument("--file")
     bp = bsub.add_parser("report", help="결과 요약")
@@ -76,12 +81,38 @@ def main(argv=None):
                    {"roots": data["roots"], "out": str(out)})
     elif args.cmd == "bench":
         home = Path("~/.ro").expanduser()
-        if args.bench_cmd == "run":
+        if args.bench_cmd == "gen":
+            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
+            mapper.save_map(mapdata, DEFAULT_OUT)
+            extra = [n for n in args.projects.split(",") if n]
+            repo = Path(__file__).resolve().parent.parent
+            try:
+                tasks = bench.generate_tasks(mapdata, repo, extra)
+            except ValueError as e:
+                raise SystemExit(str(e))
+            fsutil.atomic_write(Path(args.out).expanduser(),
+                                      json.dumps(tasks, ensure_ascii=False, indent=2))
+            print(f"지도 새로고침 + 과제 {len(tasks)}개 생성 → {args.out}")
+            for t in tasks:
+                print(f"- [{t['kind']}] {t['id']}: 정답 {t['expect']}")
+            print("정답은 지금 상태 기준입니다. 커밋·브랜치가 바뀌면 다시 gen 하세요.")
+        elif args.bench_cmd == "run":
             tpath = Path(args.tasks).expanduser()
             if not tpath.exists():
                 tpath = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
                 print(f"과제 파일이 없어 예시를 사용합니다: {tpath}")
             tasks = bench.load_tasks(tpath)
+            only = [x for x in args.only.split(",") if x]
+            if only:
+                tasks = [t for t in tasks if any(t["id"].startswith(x) for x in only)]
+            if args.limit:
+                tasks = tasks[:args.limit]
+            if not tasks:
+                raise SystemExit("실행할 과제가 없습니다.")
+            stale = bench.stale_tasks(tasks)
+            if stale:
+                print(f"경고: 생성 후 1시간 이상 지난 동적 과제 {len(stale)}개 — 정답이 바뀌었을 수 있습니다. "
+                      "`ro bench gen`으로 다시 만드세요.")
             arms = [a for a in args.arms.split(",") if a]
             bad = [a for a in arms if a not in bench.ARMS]
             if bad:
