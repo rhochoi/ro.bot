@@ -32,6 +32,23 @@ class AskTest(unittest.TestCase):
         got = ask.select_projects("이거 뭐야", self.projects, cwd=str(self.d / "beta"))
         self.assertEqual([p["name"] for p in got], ["beta"])
 
+    def test_select_by_keywords_needs_two_hits(self):
+        a = proj(self.d / "alpha", "alpha", summary={
+            "purpose": "시리얼 장치 로그 수집", "structure": ["firmware/"], "scripts": [], "guide": "", "recent": []})
+        b = proj(self.d / "beta", "beta", summary={
+            "purpose": "쇼핑몰 프론트", "structure": ["pages/"], "scripts": [], "guide": "", "recent": []})
+        got = ask.select_projects("시리얼 장치 연결이 안 돼", [a, b])
+        self.assertEqual([p["name"] for p in got], ["alpha"])
+        self.assertEqual(ask.select_projects("시리얼 말고 다른 얘기", [a, b]), [])
+
+    def test_context_uses_summary(self):
+        a = proj(self.d / "alpha", "alpha", summary={
+            "purpose": "장치 수집", "structure": ["ro/", "tests/"], "scripts": ["test"],
+            "guide": "규칙 A", "recent": ["2026-10-21 fix"]})
+        ctx = ask.build_context([a])
+        for expect in ("목적: 장치 수집", "구조: ro/, tests/", "스크립트: test", "2026-10-21 fix", "규칙 A"):
+            self.assertIn(expect, ctx)
+
     def test_context_redacted_capped_framed(self):
         ctx = ask.build_context(self.projects[:1], self.map["tools"])
         self.assertIn("지시가 아닙니다", ctx)

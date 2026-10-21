@@ -171,6 +171,9 @@ def main(argv=None):
             git = p.get("git") or {}
             langs = ",".join(p["languages"]) or "-"
             print(f"- {p['name']}  [{langs}]  {git.get('branch') or ''}  {p['path']}")
+            purpose = (p.get("summary") or {}).get("purpose")
+            if purpose:
+                print(f"    {purpose}")
 
 
 if __name__ == "__main__":
