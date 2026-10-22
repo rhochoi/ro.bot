@@ -5,9 +5,9 @@
 #
 # 하는 일: 저장소가 공개면 로그인 없이 진행, 아니면 gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정
 #          → uv 설치(없을 때, 확인 후)
-#          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor.
-# 다시 실행하면 최신 버전으로 재설치한다. 기억·로그(~/.ro)는 건드리지 않는다.
-# 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략)
+#          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor → (macOS) 펫 띄우기.
+# 다시 실행하면 최신 버전으로 재설치하고 펫을 새로 띄운다. 기억·로그(~/.ro)는 건드리지 않는다.
+# 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략), RO_PET=0(펫 자동 실행 끄기)
 set -euo pipefail
 
 REPO="rhochoi/ro.bot"
@@ -26,6 +26,19 @@ confirm() {
   printf '%s [Y/n] ' "$1" >/dev/tty
   read -r ans </dev/tty || return 1  # 읽기 실패는 거절로 본다
   case "$ans" in ""|y|Y|yes|예|네) return 0 ;; *) return 1 ;; esac
+}
+
+# 설치가 끝나면 펫을 띄운다. 터미널을 닫아도 남도록 분리해서 실행하고, 이전 펫은 ro pet이 스스로 정리한다.
+launch_pet() {
+  if [ "${RO_PET:-1}" = 0 ]; then
+    say "펫 자동 실행을 건너뜁니다(RO_PET=0). 띄우려면: ro pet"
+    return 0
+  fi
+  [ "$(uname -s)" = Darwin ] || return 0
+  (umask 077; mkdir -p "$HOME/.ro"; PYTHONUNBUFFERED=1 nohup ro pet >"$HOME/.ro/pet.log" 2>&1 </dev/null &)
+  say "펫을 띄웠습니다. 화면 오른쪽 아래와 메뉴바 아이콘을 보세요(처음에는 수십 초 걸릴 수 있습니다)."
+  command -v swiftc >/dev/null \
+    || warn "swiftc가 없어 브라우저 창으로 열립니다. 데스크톱 펫을 쓰려면: xcode-select --install"
 }
 
 main() {
@@ -79,13 +92,14 @@ main() {
 
   say "설치 완료: $(ro --version 2>/dev/null || echo ro)"
   ro doctor || warn "엔진이 하나도 없습니다. claude·codex·agy 중 쓰는 것을 설치하세요."
+  launch_pet
   cat <<'EOF'
 
 다음 단계:
   ro map                         내 프로젝트 지도 만들기(~/.ro에만 저장)
   ro organize scan               다운로드 폴더 정리안 보기(승인한 것만 옮김)
   ro ask "이 프로젝트 구조 설명해줘"
-  ro pet                         데스크톱 펫 + 메뉴바 비서
+  ro pet                         펫 다시 띄우기(끄기: 메뉴바 아이콘 → 종료)
   ro update                      나중에 업데이트
 EOF
 }

@@ -1,8 +1,10 @@
 """install.sh: gh·uv·curl·pipx를 가짜 명령으로 바꿔 흐름만 검증한다(네트워크·실제 설치 없음)."""
 import os
 import re
+import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -66,6 +68,34 @@ class InstallScriptTest(unittest.TestCase):
                            stdin=subprocess.DEVNULL)
         log = self.log.read_text().splitlines() if self.log.exists() else []
         return r, log
+
+    def wait_log(self, line, timeout=3.0):
+        """펫은 배경에서 뜨므로 기록이 조금 늦을 수 있다."""
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.log.exists() and line in self.log.read_text().splitlines():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_launches_pet_in_background(self):
+        self.stub("gh", GH)
+        self.stub("uv", UV)
+        r, _ = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.wait_log("ro pet"))
+        self.assertIn("펫을 띄웠습니다", r.stdout)
+        ro_dir = self.home / ".ro"
+        self.assertEqual(stat.S_IMODE(ro_dir.stat().st_mode), 0o700)  # ~/.ro 비공개 권한 유지
+        self.assertEqual(stat.S_IMODE((ro_dir / "pet.log").stat().st_mode), 0o600)
+
+    def test_pet_launch_can_be_skipped(self):
+        self.stub("gh", GH)
+        self.stub("uv", UV)
+        r, _ = self.run_script(RO_PET="0")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("RO_PET=0", r.stdout)
+        self.assertFalse(self.wait_log("ro pet", timeout=0.5))
 
     def test_syntax(self):
         self.assertEqual(subprocess.run(["bash", "-n", str(SCRIPT)]).returncode, 0)

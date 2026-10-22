@@ -4,7 +4,7 @@ ro — 로컬 전용 비서. 이 Mac의 프로젝트를 읽기 전용으로 파�
 
 ## 설치
 
-아래 한 줄이면 uv 설치(없을 때, 확인 후) → Python과 ro 설치 → `ro doctor`까지 끝납니다. Python·Homebrew는 따로 필요 없습니다.
+아래 한 줄을 터미널에 붙여 넣으면 uv 설치(없을 때, 확인 후) → Python과 ro 설치 → `ro doctor` → **데스크톱 펫 실행**까지 끝납니다. Python·Homebrew는 따로 필요 없습니다. 펫을 띄우지 않으려면 `bash` 앞에 `RO_PET=0 `을 붙이세요.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rhochoi/ro.bot/main/install.sh | bash
