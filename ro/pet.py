@@ -103,6 +103,7 @@ ACTION_DESCS = {
 }
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
+AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
@@ -227,6 +228,7 @@ class PetRuntime:
         self.write_pending = None
         self._last_event_count = None
         self._dismissed_fail_ts = None
+        self._disk_cache = None
         self.current_action = None
         self.action_until = 0.0
         self.organize_root = organize.ROOT
@@ -380,14 +382,42 @@ class PetRuntime:
             self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
         return {"ok": True, "approved": True, "batch": batch, "output": output}
 
+    def _disk_signature(self):
+        """로그·학습 파일의 (이름, 크기, mtime, ctime). 바뀌지 않았으면 다시 읽을 필요가 없다."""
+        sig = []
+        for folder, pattern in ((self.log_dir, "*.jsonl"), (self.home, "*.json")):
+            for p in sorted(Path(folder).expanduser().glob(pattern)):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                sig.append((str(p), st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        return tuple(sig)
+
+    def _disk_state(self, day):
+        """450ms 폴링마다 전체 로그 파싱·pending.json 쓰기·감사를 반복하지 않도록 파일이 바뀔 때만 다시 계산한다."""
+        sig = self._disk_signature()
+        cached = self._disk_cache
+        mono = time.monotonic()
+        if cached and cached[0] == (day, sig) and mono - cached[1] < AUDIT_TTL_SEC:
+            return cached[2]
+        today_events = log.read(day, self.log_dir)
+        if cached and cached[0] == (day, sig):
+            cands = cached[2][1]  # 로그·학습 파일이 그대로면 감사만 TTL마다 다시 돈다
+        else:
+            all_events = log.read_all(self.log_dir)
+            cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
+        findings, _ = harden.audit(self.home, fix=False)
+        state = (today_events, cands, findings)
+        # propose가 pending.json을 다시 쓰므로 서명은 계산이 끝난 뒤에 잡는다
+        self._disk_cache = ((day, self._disk_signature()), mono, state)
+        return state
+
     def snapshot(self, now=None):
         """현재 ~/.ro 로그·학습 후보·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
         now = now or time.time()
         day = time.strftime("%Y-%m-%d", time.localtime(now))
-        today_events = log.read(day, self.log_dir)
-        all_events = log.read_all(self.log_dir)
-        cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
-        findings, _ = harden.audit(self.home, fix=False)
+        today_events, cands, findings = self._disk_state(day)
         mapdata = ask.load_map(self.map_path)
         projects = (mapdata or {}).get("projects", [])
 
@@ -496,6 +526,8 @@ class PetRuntime:
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
                       engine=engine, rules=rules, project=project)
         with self._lock:
+            if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
+                return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
             self.busy = True
             self.busy_task = log.redact(question[:60])
         try:
@@ -2264,7 +2296,7 @@ function applyState(st) {
 
 async function refreshState() {
   try {
-    const res = await fetch("/api/state");
+    const res = await fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } });
     const st = await res.json();
     applyState(st);
   } catch (err) {}
@@ -2407,7 +2439,23 @@ def make_handler(runtime):
             self.end_headers()
             self.wfile.write(body)
 
+        def _host_ok(self):
+            # DNS 리바인딩 차단: 다른 도메인 이름으로 들어온 요청은 토큰이 박힌 페이지조차 내주지 않는다
+            port = self.server.server_address[1]
+            if self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}"):
+                return True
+            self._send_json(403, {"ok": False, "error": "invalid host"})
+            return False
+
+        def _token_ok(self):
+            if hmac.compare_digest(self.headers.get("X-Ro-Token", ""), runtime.token):
+                return True
+            self._send_json(403, {"ok": False, "error": "invalid token"})
+            return False
+
         def do_GET(self):
+            if not self._host_ok():
+                return
             parsed = urlparse(self.path)
             if parsed.path == "/":
                 body = render_html(runtime.token).encode("utf-8")
@@ -2418,20 +2466,13 @@ def make_handler(runtime):
                 self.end_headers()
                 self.wfile.write(body)
             elif parsed.path == "/api/state":
-                self._send_json(200, runtime.snapshot())
-            elif parsed.path == "/api/action":
-                from urllib.parse import parse_qs
-                qs = parse_qs(parsed.query)
-                act = qs.get("name", [""])[0] or qs.get("action", [""])[0]
-                dur = float(qs.get("duration", ["4.0"])[0])
-                self._send_json(200, runtime.trigger_action(act, dur))
+                if self._token_ok():
+                    self._send_json(200, runtime.snapshot())
             else:
                 self._send_json(404, {"error": "not found"})
 
         def do_POST(self):
-            given = self.headers.get("X-Ro-Token", "")
-            if not hmac.compare_digest(given, runtime.token):
-                self._send_json(403, {"ok": False, "error": "invalid token"})
+            if not (self._host_ok() and self._token_ok()):
                 return
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(min(length, 32768)).decode("utf-8", errors="replace")
@@ -2502,6 +2543,16 @@ def ensure_mac_binary(force_build=False):
     return bin_path
 
 
+def _is_pet_process(pid, key):
+    """PID가 재사용됐을 수 있으니 명령줄이 실제 ro pet / ro-pet-host일 때만 참."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    cmd = r.stdout.strip()
+    if key == "host_pid":
+        return "ro-pet-host" in cmd
+    args = [Path(a).name for a in cmd.split()]
+    return "ro" in args and "pet" in args  # `ro pet …` 또는 `python -m ro pet …`
+
+
 def stop_existing_pets(home=learn.HOME):
     """이미 실행 중인 이전 ro pet / ro-pet-host 프로세스를 모두 정리해 중복 실행(2마리 현상)을 막는다."""
     pid_file = Path(home).expanduser() / "pet.pid"
@@ -2511,7 +2562,8 @@ def stop_existing_pets(home=learn.HOME):
             info = json.loads(pid_file.read_text(encoding="utf-8"))
             for key in ("host_pid", "py_pid"):
                 old_pid = info.get(key)
-                if isinstance(old_pid, int) and old_pid > 1 and old_pid != my_pid:
+                if (isinstance(old_pid, int) and old_pid > 1 and old_pid != my_pid
+                        and _is_pet_process(old_pid, key)):
                     try:
                         os.kill(old_pid, signal.SIGTERM)
                     except OSError:

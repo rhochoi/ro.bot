@@ -64,8 +64,10 @@ class InstallScriptTest(unittest.TestCase):
         e = {"PATH": f"{self.stubs}:/usr/bin:/bin", "HOME": str(self.home), "LOG": str(self.log),
              "LANG": "ko_KR.UTF-8", "LC_ALL": "ko_KR.UTF-8",
              "FAKE_BIN": str(self.fake_bin), "STUBS": str(self.stubs), "RO_YES": "1", **env}
+        # 새 세션으로 제어 터미널을 떼어 낸다: install.sh는 /dev/tty를 직접 열어 묻기 때문에
+        # 터미널에서 테스트를 돌리면 사용자 입력을 기다리며 멈춘다
         r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True, timeout=30,
-                           stdin=subprocess.DEVNULL)
+                           stdin=subprocess.DEVNULL, start_new_session=True)
         log = self.log.read_text().splitlines() if self.log.exists() else []
         return r, log
 
