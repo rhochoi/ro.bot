@@ -58,6 +58,11 @@ class CliTidyTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("usage: ro tidy", r.stderr)
 
+    def test_apply_without_plan_points_to_ro_tidy_scan(self):
+        r = self.ro("tidy", "apply", "deadbeef")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("`ro tidy scan --root DIR`", r.stderr)
+
     def test_listed_in_ro_help(self):
         r = self.ro("--help")
         self.assertIn("tidy", r.stdout)
