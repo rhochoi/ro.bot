@@ -20,7 +20,7 @@ class ReviseTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = self.tmp.name
         self.toml = Path(self.home) / "routing.toml"
-        shutil.copy(route.DEFAULT_ROUTING, self.toml)
+        shutil.copy(route.ROUTING_PATH, self.toml)
         self.routing = route.load_routing(self.toml)
 
     def tearDown(self):

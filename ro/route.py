@@ -13,8 +13,16 @@ from pathlib import Path
 ENGINES = ("claude", "codex", "agy")
 TIMEOUT = 600
 
-DEFAULT_ROUTING = Path(__file__).resolve().parent / "routing.toml"  # 패키지에 포함된 기본 라우팅표
-ROUTING_PATH = Path("~/.ro/routing.toml").expanduser()  # 사용자별 사본(승인된 개정만 여기에 쓴다)
+ROUTING_PATH = Path(__file__).resolve().parent.parent / "routing.toml"  # 저장소 체크아웃
+PACKAGED_ROUTING = Path(__file__).resolve().parent / "_data" / "routing.toml"  # 설치본(wheel)에 포함
+USER_ROUTING = Path("~/.ro/routing.toml")  # 개인 덮어쓰기: 있으면 최우선
+
+
+def routing_path():
+    for p in (USER_ROUTING.expanduser(), ROUTING_PATH, PACKAGED_ROUTING):
+        if p.is_file():
+            return p
+    return ROUTING_PATH
 
 # routing.toml을 읽지 못할 때의 기본값: (카테고리, 키워드, 엔진)
 BUILTIN_RULES = [
@@ -26,11 +34,9 @@ BUILTIN_RULES = [
 
 def load_routing(path=None):
     """routing.toml → {"rules": [(카테고리, 키워드, 엔진, 모델)], "fallback": (엔진, 모델)}.
-    path가 없으면 ~/.ro/routing.toml, 그것도 없으면 패키지 기본값을 읽는다.
     파일이 없거나 형식이 틀리면 경고 후 내장 기본값을 쓴다(엔진 호출이 막히지 않게)."""
-    path = path or (ROUTING_PATH if ROUTING_PATH.exists() else DEFAULT_ROUTING)
     try:
-        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        data = tomllib.loads(Path(path or routing_path()).read_text(encoding="utf-8"))
         rules = []
         for name, r in data["routes"].items():
             if r["engine"] not in ENGINES or not r["keywords"]:

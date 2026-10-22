@@ -1,24 +1,31 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
 
 [project]
-name = "ro"
+name = "rog-bot"
 dynamic = ["version"]
-description = "ro — 개인 로컬 전용 비서"
+description = "ro — 로컬 전용 개인 비서 CLI"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pyserial"]
+dependencies = []
+
+[project.optional-dependencies]
+serial = ["pyserial"]
 
 [project.scripts]
 ro = "ro.cli:main"
 
-[tool.setuptools]
+[tool.hatch.build.targets.wheel]
 packages = ["ro"]
 
-[tool.setuptools.package-data]
-ro = ["pet_mac.swift", "routing.toml", "ro-model.template.md", "bench_tasks.example.json"]
+[tool.hatch.build.targets.wheel.force-include]
+"routing.toml" = "ro/_data/routing.toml"
+"bench/tasks.example.json" = "ro/_data/tasks.example.json"
 
-# 버전은 git 태그에서 자동 계산한다. 태그 커밋은 그 버전, 이후 커밋은 2026.10.22.post1.devN 형태.
-[tool.setuptools_scm]
-version_scheme = "no-guess-dev"
-fallback_version = "0.0.0"
+# 버전은 git 태그(vYYYY.M.D, .github/workflows/release.yml이 main 머지 때 붙인다)에서 자동 계산한다.
+# 태그 이후 커밋은 2026.10.22.post1.devN 형태라 업그레이드가 항상 새 버전으로 인식된다.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+raw-options = { version_scheme = "no-guess-dev" }
