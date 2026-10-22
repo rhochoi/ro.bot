@@ -295,15 +295,14 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let size = NSSize(width: 16, height: 16)
         let img = NSImage(size: size, flipped: true) { _ in
             let ink = NSColor(calibratedRed: 0x1A/255.0, green: 0x19/255.0, blue: 0x17/255.0, alpha: 1.0)
-            let chalk = NSColor(calibratedRed: 0xF3/255.0, green: 0xEF/255.0, blue: 0xE6/255.0, alpha: 1.0)
 
             let head = NSBezierPath(roundedRect: NSRect(x: 1, y: 0.8, width: 11.5, height: 5.0), xRadius: 2.5, yRadius: 2.5)
             ink.setFill()
             head.fill()
 
-            chalk.setFill()
-            NSRect(x: 6.5, y: 2.0, width: 1.3, height: 2.5).fill()
-            NSRect(x: 9.0, y: 2.2, width: 1.2, height: 2.1).fill()
+            // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다
+            NSRect(x: 6.5, y: 2.0, width: 1.3, height: 2.5).fill(using: .clear)
+            NSRect(x: 9.0, y: 2.2, width: 1.2, height: 2.1).fill(using: .clear)
 
             let body = NSBezierPath(roundedRect: NSRect(x: 1, y: 6.6, width: 9.1, height: 3.8), xRadius: 1.9, yRadius: 1.9)
             ink.setFill()
@@ -314,7 +313,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             base.fill()
             return true
         }
-        img.isTemplate = false
+        img.isTemplate = true  // 다크 메뉴바에서는 시스템이 흰색으로 바꿔 그린다
         return img
     }
 
@@ -400,12 +399,26 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         resetItem.target = self
         menu.addItem(resetItem)
 
+        // 화면 기록 권한이 없으면 배경 밝기 자동 전환이 조용히 꺼지므로 메뉴에서 알린다
+        if !CGPreflightScreenCaptureAccess() {
+            let permItem = NSMenuItem(title: "배경 밝기 자동 전환 꺼짐 — 화면 기록 권한 설정 열기…",
+                                      action: #selector(openScreenCaptureSettings), keyEquivalent: "")
+            permItem.target = self
+            menu.addItem(permItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "ro 펫 종료", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    @objc private func openScreenCaptureSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func setupFloatingPanel() {
