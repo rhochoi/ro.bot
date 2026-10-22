@@ -580,6 +580,18 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
     return batch, done, skipped
 
 
+KIND_LABELS = {"duplicate": "중복", "extracted": "풀린 압축", "version": "옛 버전", "stale": "오래됨", "manual": "직접 지정"}
+
+
+def trash_size(home=HOME):
+    """격리 폴더에 지금 있는 (파일 수, 바이트). 비우기 전에는 디스크 공간이 줄지 않는다."""
+    n = size = 0
+    for p in (_cleanup_dir(home) / "trash").rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            n, size = n + 1, size + p.stat().st_size
+    return n, size
+
+
 def _check_restorable(e, home):
     """기록 하나를 되돌려도 되는지(원본 위치·격리/정리 위치·내용). 실패하면 ValueError."""
     src, dst = Path(e["src"]), Path(e["dst"])
