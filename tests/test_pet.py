@@ -10,7 +10,7 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import learn, log, pet
+from ro import learn, log, pet, organize
 
 
 class PetTest(unittest.TestCase):
@@ -156,6 +156,8 @@ class PetTest(unittest.TestCase):
             org = rt.snapshot()["organize"]
             self.assertEqual(org["counts"], [["이미지", 1]])  # 풀린 압축 원본(치울 후보)은 이동 버튼에 안 들어간다
             self.assertFalse(rt.queue_organize_apply("압축·설치")["ok"])
+            organize.apply(kind="extracted", home=str(ro), log_dir=str(ro / "log"))  # 격리도 되돌리기 대상이다
+            self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
 
     def test_organize_goes_through_write_gate(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):

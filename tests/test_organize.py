@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -241,20 +242,92 @@ class OrganizeTest(unittest.TestCase):
         got = {Path(i["path"]).name: i["action"] for i in plan["items"]}
         self.assertEqual(got, {"옛자료.pdf": "quarantine", "옛 경비.pdf": "move"})
 
-    def test_apply_moves_only_move_items(self):
+    # --- 정리 통합 C3: 격리 먼저 + 공용 기록 + 예전 배치 되돌리기 ---
+
+    def ids(self, items, *names):
+        return [items[n]["id"] for n in names]
+
+    def test_apply_quarantines_first_then_undo_restores_both(self):
+        a = self.w("a.pdf", "dup", OLD - 100)  # 남길 쪽이면서 이동 제안도 받는다
+        b = self.w("b.pdf", "dup")
+        os.chmod(b, 0o644)
+        items = self.scan()
+        batch, done, skipped = organize.apply(self.ids(items, "a.pdf", "b.pdf"), home=self.ro, log_dir=self.log)
+        self.assertEqual((len(done), skipped), (2, []))  # a를 먼저 적었어도 b 격리가 먼저라 둘 다 성공
+        trashed = self.ro / "cleanup" / "trash" / batch / f"{items['b.pdf']['id']}-b.pdf"
+        self.assertTrue(trashed.exists())
+        self.assertFalse(a.exists() or b.exists())
+        ops = [e["op"] for e in organize.read_journal(self.ro)]
+        self.assertEqual(ops, ["quarantine", "move"])
+        _, back, _ = organize.undo(home=self.ro, log_dir=self.log)
+        self.assertEqual(len(back), 2)
+        self.assertEqual((a.read_text(), b.read_text()), ("dup", "dup"))
+        self.assertEqual(stat.S_IMODE(b.stat().st_mode), 0o644)
+        self.assertFalse((self.ro / "cleanup" / "trash" / batch).exists())  # 빈 배치 폴더 정리
+
+    def test_quarantine_refused_when_kept_side_moved_earlier(self):
+        self.w("a.pdf", "dup", OLD - 100)
+        b = self.w("b.pdf", "dup")
+        items = self.scan()
+        organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+        _, done, skipped = organize.apply(self.ids(items, "b.pdf"), home=self.ro, log_dir=self.log)
+        self.assertEqual(done, [])
+        self.assertIn("남겨 둔 쪽", skipped[0][1])
+        self.assertTrue(b.exists())
+
+    def test_kind_selects_quarantine_and_category_does_not(self):
         self.w("pic.png", "IMG")
         z = self.zip_of("pic.zip", {"pic.png": "IMG"})
-        items = self.scan()
-        _, done, skipped = organize.apply([items["pic.zip"]["id"]], home=self.ro, log_dir=self.log)
-        self.assertEqual(done, [])
-        self.assertIn("치울 후보", skipped[0][1])
-        with self.assertRaises(ValueError):  # 카테고리 일괄 선택에도 치울 후보는 들어가지 않는다
+        self.scan()
+        with self.assertRaises(ValueError):  # 카테고리 일괄(펫 이동 버튼)에는 치울 후보가 들어가지 않는다
             organize.apply(category="압축·설치", home=self.ro, log_dir=self.log)
-        self.assertTrue(z.exists())
-        it = organize.edit(items["pic.zip"]["id"], category="압축·설치", home=self.ro, log_dir=self.log)
-        self.assertEqual(it["action"], "move")  # 위치를 정하면 이동 항목이 된다
-        _, done, _ = organize.apply([it["id"]], home=self.ro, log_dir=self.log)
+        _, done, _ = organize.apply(kind="extracted", home=self.ro, log_dir=self.log)
         self.assertEqual(len(done), 1)
+        self.assertFalse(z.exists())
+
+    def test_review_and_keep_are_not_applied(self):
+        self.w("3월 영수증.pdf", "same", OLD - 100)
+        dup = self.w("3월 영수증 (1).pdf", "same")
+        self.w("KCC 경비 내역 .xlsx", "old")
+        self.w("KCC 경비 내역  (1).xlsx", "new", OLD + 60)
+        items = self.scan()
+        _, done, skipped = organize.apply(self.ids(items, "3월 영수증 (1).pdf", "KCC 경비 내역 .xlsx"),
+                                          home=self.ro, log_dir=self.log)
+        self.assertEqual(done, [])
+        self.assertEqual(len(skipped), 2)
+        self.assertTrue(dup.exists())
+
+    def test_edit_turns_quarantine_into_move(self):
+        self.w("pic.png", "IMG")
+        self.zip_of("pic.zip", {"pic.png": "IMG"})
+        items = self.scan()
+        it = organize.edit(items["pic.zip"]["id"], category="압축·설치", home=self.ro, log_dir=self.log)
+        self.assertEqual(it["action"], "move")
+        _, done, _ = organize.apply([it["id"]], home=self.ro, log_dir=self.log)
+        self.assertTrue(done[0]["dest"].startswith(str(self.dest)))
+
+    def test_undo_legacy_organize_and_tidy_batches(self):
+        from ro import tidy
+        f = self.w("data.xlsx", "d")
+        items = self.scan()
+        batch, _, _ = organize.apply(self.ids(items, "data.xlsx"), home=self.ro, log_dir=self.log)
+        legacy = self.ro / "organize" / "journal.jsonl"  # 예전 위치의 기록인 척 옮긴다
+        (self.ro / "cleanup" / "journal.jsonl").rename(legacy)
+        _, back, _ = organize.undo(batch, home=self.ro, log_dir=self.log)
+        self.assertEqual(len(back), 1)
+        self.assertTrue(f.exists())
+        self.assertIn('"op": "restore"', legacy.read_text())  # 복원 표시는 원래 기록 쪽에
+
+        old = self.w("sub/old.bin", "x" * 5000, time.time() - 400 * 86400)
+        plan = tidy.scan(self.root)
+        tidy.save_plan(plan, self.ro)
+        tbatch, tdone, _ = tidy.apply([plan["items"][0]["id"]], self.ro, self.log)
+        self.assertFalse(old.exists())
+        self.assertEqual(organize.pending(self.ro)[-1]["source"], "tidy")
+        _, back, _ = organize.undo(home=self.ro, log_dir=self.log)  # 가장 최근 배치 = tidy 배치
+        self.assertEqual(len(back), 1)
+        self.assertTrue(old.exists())
+        self.assertIn("restore", [e["op"] for e in tidy.read_journal(self.ro)])  # tidy status도 일관
 
     def test_legacy_plan_without_action_still_applies(self):
         self.w("data.xlsx", "d")

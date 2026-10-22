@@ -1,6 +1,6 @@
 # 정리 통합 설계안 — `ro tidy` + `ro organize` → 하나의 흐름
 
-작성: 2026-10-22 · 상태: **설계 확정, C1·C2 구현됨**(결정 ①~④ 확정, §9 · 공용 탐지기 `ro/detect.py` · 구현 메모 §11). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
+작성: 2026-10-22 · 상태: **설계 확정, C1~C3 구현됨**(결정 ①~④ 확정, §9 · 공용 탐지기 `ro/detect.py` · 구현 메모 §11). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
 
 ## 1. 목표와 완료 조건
 
@@ -104,7 +104,7 @@ ro tidy …                                                         # 별칭: �
 |---|---|---|
 | C1 ✅ | tidy 탐지기(중복·풀린 압축·옛 버전, 남길 쪽 재확인)를 공용 모듈 `ro/detect.py`로 분리. 동작 변화 없음 | 기존 테스트 전부 통과 + 실데이터 scan 결과 동일 |
 | C2 ✅ | organize scan이 탐지기를 호출해 `action`·`kind`·`keep` 기록, 중요 카테고리 보호, 오래됨 태그화, 남길 쪽 규칙(§3-5) | 같은 파일 이중 제안 0건 테스트, `KCC 경비 내역`형 사례 = keep |
-| C3 | 통합 apply/undo + 공용 journal, 옛 tidy·organize 기록 읽기 | 이동·격리 섞인 배치 apply→undo 원상복구, 옛 배치 undo |
+| C3 ✅ | 통합 apply/undo + 공용 journal, 옛 tidy·organize 기록 읽기 | 이동·격리 섞인 배치 apply→undo 원상복구, 옛 배치 undo |
 | C4 | show/edit 확장, `ro tidy` 별칭, README·install 안내 한 줄화, `ro eval` 통합 항목 | CLI 테스트, 별칭 안내 문구 |
 | C5 | 펫: 치울 후보 묶음·확보 용량 표시, 승인 게이트에 `kind` | 펫 단위 테스트 + 브라우저 렌더 확인 |
 | C6 | `trash` 용량 보기 / 비우기(N일 경과 배치만, 터미널 `yes` 확인, `purge` 기록) | 최근 배치 보존·비대화 실행 거부·확인 전 무변경·purge 후 undo 거부 테스트 |
@@ -139,4 +139,15 @@ ro tidy …                                                         # 별칭: �
 - **C3에서 처리할 것:** 남길 쪽이 최상위 파일이면 그 파일도 move 제안을 받는다. 같은 배치에서 먼저 옮겨지면 `kept_ok`가 원래 경로를 못 찾아
   치울 후보가 건너뛰어진다 → C3 apply는 남길 쪽의 새 위치를 journal로 따라가거나, move를 quarantine 뒤에 실행해야 한다.
 - 실데이터(읽기 전용, 2026-10-22 `~/Downloads`): 47건 → 이동 44 · 치울 후보 2(풀린 압축) · 보관 1(`KCC 경비 내역 .xlsx`) · 오래됨 태그 16, 경로 중복 0.
+
+**C3 (2026-10-22)**
+- `apply`는 치울 후보를 먼저 `~/.ro/cleanup/trash/<batch>/<id>-<이름>`로 격리(0600, 원래 권한 기록)하고 그다음 이동한다.
+  C2에서 넘긴 "남길 쪽이 같은 배치에서 먼저 옮겨짐" 문제는 이 순서로 해결. 이전 배치에서 이미 옮겨졌다면 재확인이 막고 다시 scan을 안내한다.
+- 선택: `apply ID...` · `--category`(이동 항목만, 펫 이동 버튼) · `--kind duplicate|extracted|version|stale`(치울 후보, 검토 필요 제외).
+  `keep`·`review` 항목은 적용하지 않는다(재무·계약 중복의 확정 수단은 C4의 `edit --action`).
+- 새 기록은 `~/.ro/cleanup/journal.jsonl`(`move`·`quarantine`·`restore`). `read_journal`·`pending`·`undo`·`status`는 예전
+  `organize/journal.jsonl`·`tidy/journal.jsonl`도 읽고, 복원 표시는 **원래 기록 쪽에** 남긴다 → `ro tidy status`·`ro tidy undo`도 일관.
+- `undo`(배치 생략)는 출처와 관계없이 가장 최근 배치. 펫의 되돌리기는 cleanup·organize 기록만 본다(tidy 배치는 CLI로).
+- 계획 파일은 아직 `~/.ro/organize/plan.json`(펫·CLI 호환). §5의 `cleanup/plan.json` 이전은 C4에서 별칭 작업과 함께.
+- 실데이터 확인(읽기 전용): 오늘 기록 organize 이동 93건(2배치)·tidy 격리 11건(1배치)을 새 리더가 모두 읽고 3배치를 되돌릴 수 있는 것으로 표시.
 
