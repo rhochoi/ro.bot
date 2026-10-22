@@ -57,7 +57,7 @@ class DistillTest(unittest.TestCase):
         new, _, _ = distill.run(7, home=self.home)
         learn.propose([], self.home)  # 재계산해도 증류 후보 보존
         self.assertEqual({c["id"] for c in learn.pending(self.home)}, {c["id"] for c in new})
-        mem = Path(self.home) / "rog-model.md"
+        mem = Path(self.home) / "ro-model.md"
         mem.write_text("# x\n\n```\n- <사실> · 출처\n```\n\n(아직 승인된 항목 없음)\n")
         learn.approve(new[0]["id"], self.home, mem)
         text = mem.read_text()

@@ -17,7 +17,7 @@ HOME = "~/.ro"
 MIN_SAMPLES = 3
 MIN_RATE = 0.8
 MIN_REPEAT = 3
-MEMORY_PATH = Path(__file__).resolve().parent.parent / "memory" / "rog-model.md"
+MEMORY_PATH = Path(__file__).resolve().parent.parent / "memory" / "ro-model.md"
 MEMORY_MAX = 160
 MEMORY_TTL_DAYS = 90
 
@@ -123,7 +123,7 @@ def approve(cid, home=HOME, memory_path=MEMORY_PATH, routing_path=None):
 
 
 def append_memory(cand, path=MEMORY_PATH, today=None):
-    """승인된 기억 후보를 memory/rog-model.md에 한 줄로 추가한다(출처·확인일·유효기간·신뢰 포함).
+    """승인된 기억 후보를 memory/ro-model.md에 한 줄로 추가한다(출처·확인일·유효기간·신뢰 포함).
     파일만 수정한다 — 커밋은 사용자가 diff를 보고 직접 한다."""
     today = today or datetime.date.today()
     text = ambient.sanitize(" ".join(str(cand["text"]).split()), MEMORY_MAX)

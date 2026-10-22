@@ -215,7 +215,7 @@ def main(argv=None):
             if args.action == "approve" and c.get("kind") == "routing":
                 print("routing.toml을 수정함 — `git diff routing.toml` 확인 후 커밋하세요(자동 커밋 안 함)")
             if args.action == "approve" and c.get("kind") == "memory":
-                print("memory/rog-model.md에 추가됨 — `git diff memory/` 확인 후 커밋하세요(자동 커밋 안 함)")
+                print("memory/ro-model.md에 추가됨 — `git diff memory/` 확인 후 커밋하세요(자동 커밋 안 함)")
         elif args.action == "rules":
             for r in learn.load_rules():
                 print(f"[{r['id']}] {r['text']} ({r['evidence']})")
