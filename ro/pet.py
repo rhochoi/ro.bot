@@ -24,11 +24,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, fsutil, harden, learn, log, mapper, route
+from . import ask, fsutil, harden, learn, log, mapper, organize, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -228,6 +229,8 @@ class PetRuntime:
         self._dismissed_fail_ts = None
         self.current_action = None
         self.action_until = 0.0
+        self.organize_root = organize.ROOT
+        self.organize_dest = organize.DEST_ROOT
 
     def trigger_action(self, action, duration=4.0):
         """12가지 모션 상호작용(숨쉬기, 두리번, 걷기, 생각, 깜짝, 졸음, 시선, 쓰다듬기, 잡기, 흔들기, 착지, 성공, 실패)을 즉시 발동한다."""
@@ -288,6 +291,8 @@ class PetRuntime:
             log.append("write_gate", f"쓰기 거절: {item['task']}", {"engine": item["engine"]},
                        engine=item["engine"], log_dir=self.log_dir)
             return {"ok": True, "approved": False, "output": "쓰기 작업을 취소했습니다."}
+        if item.get("kind") in ("organize_apply", "organize_undo"):
+            return self._run_organize(item)
         res = route.run(item["engine"], item["task"], write=True, cwd=item["cwd"])
         log.append("route", item["task"][:80], {
             "engine": item["engine"], "category": item["category"], "mode": "write",
@@ -297,6 +302,83 @@ class PetRuntime:
             if res["ok"]:
                 self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
         return {"ok": res["ok"], "approved": True, "output": log.redact(res["output"])}
+
+    # ---------- 파일 정리(organize): scan은 바로, 이동·되돌리기는 쓰기 승인 게이트를 거친다 ----------
+    def organize_summary(self):
+        """현재 정리안의 카테고리별 건수(검토 필요 제외)와 되돌릴 수 있는 마지막 배치. 정리안이 없으면 None."""
+        try:
+            plan = organize.load_plan(self.home)
+        except ValueError:
+            return None
+        entries = organize.read_journal(self.home)
+        restored = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
+        moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored]
+        moved = {e["id"] for e in moves}  # 이미 옮긴(되돌리지 않은) 항목은 다시 세지 않는다
+        ready = Counter(i["category"] for i in plan["items"] if not i["review"] and i["id"] not in moved)
+        last = moves[-1]["batch"] if moves else None
+        return {
+            "created": plan["created"],
+            "dest_root": plan["dest_root"].replace(str(Path.home()), "~", 1),
+            "counts": [[c, ready[c]] for c in organize.CATEGORIES if ready[c]],
+            "review": sum(i["review"] for i in plan["items"]),
+            "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves)} if last else None,
+        }
+
+    def organize_scan(self):
+        """읽기 전용 스캔으로 정리안을 새로 만든다. 파일은 옮기지 않는다."""
+        try:
+            plan = organize.scan(self.organize_root, self.organize_dest)
+        except (OSError, ValueError) as e:
+            return {"ok": False, "output": str(e)}
+        organize.save_plan(plan, self.home)
+        log.append("organize_scan", f"계획 {len(plan['items'])}건", {
+            "count": len(plan["items"]), "review": sum(i["review"] for i in plan["items"]), "via": "pet"},
+            log_dir=self.log_dir)
+        return {"ok": True, "organize": self.organize_summary()}
+
+    def _queue(self, item):
+        item = {"id": secrets.token_hex(4), "engine": "ro organize", "cwd": None, **item}
+        with self._lock:
+            self.write_pending = item
+        return {"ok": True, "pending": item}
+
+    def queue_organize_apply(self, category):
+        """카테고리 이동을 바로 하지 않고 쓰기 승인 대기열에 올린다."""
+        summary = self.organize_summary()
+        n = dict(map(tuple, summary["counts"])).get(category, 0) if summary else 0
+        if not n:
+            return {"ok": False, "output": "이 카테고리에 옮길 항목이 없습니다. 정리안을 먼저 만드세요."}
+        return self._queue({"kind": "organize_apply", "category": category, "count": n,
+                            "plan_created": summary["created"],
+                            "task": f"파일 정리: {category} {n}건을 {summary['dest_root']}/{category}로 이동"})
+
+    def queue_organize_undo(self):
+        summary = self.organize_summary()
+        undo = summary and summary["undo"]
+        if not undo:
+            return {"ok": False, "output": "되돌릴 정리 기록이 없습니다."}
+        return self._queue({"kind": "organize_undo", "batch": undo["batch"], "count": undo["count"],
+                            "task": f"정리 되돌리기: {undo['count']}건을 원래 이름·위치로 (batch {undo['batch']})"})
+
+    def _run_organize(self, item):
+        try:
+            if item["kind"] == "organize_apply":
+                plan = organize.load_plan(self.home)
+                if plan["created"] != item["plan_created"]:
+                    raise ValueError("승인 요청 뒤에 정리안이 바뀌었습니다. 다시 요청하세요.")
+                batch, done, skipped = organize.apply(category=item["category"], home=self.home,
+                                                      log_dir=self.log_dir)
+                output = f"{item['category']} {len(done)}건 이동 (되돌리기 가능)"
+            else:
+                batch, done, skipped = organize.undo(item["batch"], self.home, self.log_dir)
+                output = f"{len(done)}건을 원래 자리로 되돌림"
+        except (OSError, ValueError) as e:
+            return {"ok": False, "approved": True, "output": str(e)}
+        if skipped:
+            output += f", 건너뜀 {len(skipped)}건"
+        with self._lock:
+            self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
+        return {"ok": True, "approved": True, "batch": batch, "output": output}
 
     def snapshot(self, now=None):
         """현재 ~/.ro 로그·학습 후보·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
@@ -394,6 +476,7 @@ class PetRuntime:
             },
             "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
+            "organize": self.organize_summary(),
             "audit_findings": [log.redact(f) for f in findings[:3]],
             "recent_logs": recent_logs,
             "last_answer": safe_answer,
@@ -754,6 +837,11 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid currentColor;
   }
   .pill-btn:hover { opacity: 0.88; }
+
+  .org-card.hidden { display: none; }
+  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
+  .org-msg { font-size: 10.5px; opacity: 0.72; min-height: 0; }
+  .org-msg:empty { display: none; }
 
   /* 최근 기록 3줄 리스트 (줄 잘림 방지) */
   .logs {
@@ -1427,6 +1515,7 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="toolbar">
         <button id="clearBtn" class="chip-btn" style="display:none;" title="알림/답변 닫기">초기화</button>
+        <button id="orgToggleBtn" class="chip-btn" title="다운로드 폴더 분류·이름 정리">정리 ▸</button>
         <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트">상호작용 ▾</button>
         <button id="matBtn" class="chip-btn" title="재질 전환 (점토 / 리퀴드 글라스 / 젤리)">점토</button>
         <button id="themeBtn" class="chip-btn" title="색상 전환 (먹 / 분필)">먹</button>
@@ -1485,6 +1574,18 @@ PET_HTML = r"""<!DOCTYPE html>
           <button id="fbNo" class="chip-btn" title="아쉬움">거절</button>
         </span>
       </div>
+    </div>
+
+    <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 아래 승인 카드에서 실행 -->
+    <div id="orgCard" class="gate-card org-card hidden">
+      <div class="gate-title">파일 정리 (승인 전에는 옮기지 않음)</div>
+      <div id="orgSummary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
+      <div id="orgCats" class="org-cats"></div>
+      <div class="gate-actions">
+        <button id="orgScanBtn" class="pill-btn ghost">정리안 만들기</button>
+        <button id="orgUndoBtn" class="pill-btn ghost" style="display:none;">되돌리기</button>
+      </div>
+      <div id="orgMsg" class="org-msg"></div>
     </div>
 
     <div id="writeCard" class="gate-card" style="display:none;">
@@ -1583,6 +1684,13 @@ const eyeR = document.getElementById("eyeR");
 const ruleCard = document.getElementById("ruleCard");
 const ruleText = document.getElementById("ruleText");
 const writeCard = document.getElementById("writeCard");
+const orgCard = document.getElementById("orgCard");
+const orgToggleBtn = document.getElementById("orgToggleBtn");
+const orgSummary = document.getElementById("orgSummary");
+const orgCats = document.getElementById("orgCats");
+const orgScanBtn = document.getElementById("orgScanBtn");
+const orgUndoBtn = document.getElementById("orgUndoBtn");
+const orgMsg = document.getElementById("orgMsg");
 const writeText = document.getElementById("writeText");
 const feedbackBtns = document.getElementById("feedbackBtns");
 const logsBox = document.getElementById("logsBox");
@@ -1593,6 +1701,8 @@ const matBtn = document.getElementById("matBtn");
 const themeBtn = document.getElementById("themeBtn");
 
 let currentRuleId = null;
+let orgKey = "";
+let pendingKind = null;
 let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
@@ -2097,6 +2207,9 @@ function applyState(st) {
     feedbackBtns.style.display = "none";
   }
 
+  renderOrganize(st.organize);
+  pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
+
   if (st.write_pending) {
     writeCard.style.display = "flex";
     writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
@@ -2162,11 +2275,72 @@ document.getElementById("ruleRejectBtn").addEventListener("click", async () => {
   await refreshState();
 });
 document.getElementById("writeApproveBtn").addEventListener("click", async () => {
-  await apiPost("/api/write_gate", { approve: true });
+  const kind = pendingKind;
+  const r = await apiPost("/api/write_gate", { approve: true });
+  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
   await refreshState();
 });
 document.getElementById("writeRejectBtn").addEventListener("click", async () => {
-  await apiPost("/api/write_gate", { approve: false });
+  const kind = pendingKind;
+  const r = await apiPost("/api/write_gate", { approve: false });
+  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
+  await refreshState();
+});
+
+/* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
+function renderOrganize(o) {
+  const key = JSON.stringify(o || null);
+  if (key === orgKey) return;
+  orgKey = key;
+  orgCats.innerHTML = "";
+  if (!o) {
+    orgSummary.textContent = "정리안이 없습니다. 먼저 정리안을 만드세요.";
+    orgUndoBtn.style.display = "none";
+    return;
+  }
+  const total = o.counts.reduce((a, c) => a + c[1], 0);
+  orgSummary.textContent = total
+    ? `옮길 수 있는 ${total}건 · 검토 필요 ${o.review}건. 카테고리를 누르면 승인 요청이 올라갑니다.`
+    : `옮길 항목이 없습니다 (검토 필요 ${o.review}건은 터미널 ro organize edit로 확정).`;
+  o.counts.forEach(([cat, n]) => {
+    const b = document.createElement("button");
+    b.className = "chip-btn";
+    b.textContent = `${cat} ${n}`;
+    b.title = `${cat} ${n}건 이동 승인 요청`;
+    b.addEventListener("click", async () => {
+      const r = await apiPost("/api/organize/apply", { category: cat });
+      orgMsg.textContent = r.ok ? "아래에서 승인하면 옮깁니다." : (r.output || "");
+      await refreshState();
+    });
+    orgCats.appendChild(b);
+  });
+  if (o.undo) {
+    orgUndoBtn.style.display = "inline-block";
+    orgUndoBtn.textContent = `되돌리기 (${o.undo.count}건)`;
+  } else {
+    orgUndoBtn.style.display = "none";
+  }
+}
+
+orgToggleBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  orgCard.classList.toggle("hidden");
+  orgToggleBtn.textContent = orgCard.classList.contains("hidden") ? "정리 ▸" : "정리 ▾";
+});
+orgScanBtn.addEventListener("click", async () => {
+  orgScanBtn.disabled = true;
+  orgMsg.textContent = "정리안을 만드는 중... (파일은 옮기지 않습니다)";
+  try {
+    const r = await apiPost("/api/organize/scan", {});
+    orgMsg.textContent = r.ok ? "정리안을 새로 만들었습니다." : (r.output || "실패");
+  } finally {
+    orgScanBtn.disabled = false;
+    await refreshState();
+  }
+});
+orgUndoBtn.addEventListener("click", async () => {
+  const r = await apiPost("/api/organize/undo", {});
+  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
   await refreshState();
 });
 document.getElementById("fbYes").addEventListener("click", async () => {
@@ -2249,6 +2423,12 @@ def make_handler(runtime):
                 self._send_json(200, runtime.decide_rule(data.get("action"), data.get("id")))
             elif parsed.path == "/api/write_gate":
                 self._send_json(200, runtime.resolve_write_approval(bool(data.get("approve"))))
+            elif parsed.path == "/api/organize/scan":
+                self._send_json(200, runtime.organize_scan())
+            elif parsed.path == "/api/organize/apply":
+                self._send_json(200, runtime.queue_organize_apply(str(data.get("category", ""))))
+            elif parsed.path == "/api/organize/undo":
+                self._send_json(200, runtime.queue_organize_undo())
             elif parsed.path == "/api/clear":
                 self._send_json(200, runtime.clear_notice())
             elif parsed.path == "/api/action":
