@@ -159,6 +159,46 @@ class PetTest(unittest.TestCase):
             organize.apply(kind="extracted", home=str(ro), log_dir=str(ro / "log"))  # 격리도 되돌리기 대상이다
             self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
 
+    def test_quarantine_groups_go_through_write_gate(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            (dl / "pic.png").write_text("IMG")
+            z = dl / "pic.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            (dl / "3월 영수증.pdf").write_text("same")
+            (dl / "3월 영수증 (1).pdf").write_text("same")  # 재무 중복 = 검토 필요 → 펫 묶음에서 제외
+            for i, p in enumerate(sorted(dl.iterdir())):
+                os.utime(p, (1 + i, 1 + i))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            rt.organize_scan()
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["quarantine"], [["extracted", "풀린 압축", 1, z.stat().st_size]])
+            self.assertEqual((org["reclaim"], org["trashed"]), (z.stat().st_size, 0))
+            self.assertFalse(rt.queue_organize_apply(kind="duplicate")["ok"])  # 검토 필요뿐이면 요청 불가
+
+            res = rt.queue_organize_apply(kind="extracted")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["pending"]["qkind"], "extracted")
+            self.assertIn("삭제 아님", res["pending"]["task"])
+            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertTrue(z.exists())  # 거절하면 그대로
+
+            rt.queue_organize_apply(kind="extracted")
+            with mock.patch("ro.route.run") as run:
+                out = rt.resolve_write_approval(True)
+                run.assert_not_called()
+            self.assertTrue(out["ok"], out)
+            self.assertIn("풀린 압축 1건 격리", out["output"])
+            self.assertFalse(z.exists())
+            org = rt.snapshot()["organize"]
+            self.assertEqual((org["quarantine"], org["undo"]["count"]), ([], 1))
+            self.assertGreater(org["trashed"], 0)  # 격리 보관 중 용량 표시
+
     def test_organize_goes_through_write_gate(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
             h = Path(d).resolve()

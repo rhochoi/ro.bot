@@ -315,11 +315,21 @@ class PetRuntime:
         moves = organize.pending(self.home, sources=("cleanup", "organize"))  # tidy 기록은 펫 되돌리기에 넣지 않는다
         moved = {e["id"] for e in moves}  # 이미 옮긴·격리한(되돌리지 않은) 항목은 다시 세지 않는다
         ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and i["id"] not in moved)
+        # 치울 후보: 검토 필요(재무·계약 중복)는 펫에서 승인할 수 없으니 묶음에서 뺀다
+        q_n, q_bytes = Counter(), Counter()
+        for i in plan["items"]:
+            if i.get("action") == "quarantine" and not i["review"] and i["id"] not in moved:
+                q_n[i["kind"]] += 1
+                q_bytes[i["kind"]] += i["size"]
+        _, trashed = organize.trash_size(self.home)
         last = moves[-1]["batch"] if moves else None
         return {
             "created": plan["created"],
             "dest_root": plan["dest_root"].replace(str(Path.home()), "~", 1),
             "counts": [[c, ready[c]] for c in organize.CATEGORIES if ready[c]],
+            "quarantine": [[k, organize.KIND_LABELS.get(k, k), q_n[k], q_bytes[k]] for k in q_n],
+            "reclaim": sum(q_bytes.values()),
+            "trashed": trashed,
             "review": sum(i["review"] for i in plan["items"] if i.get("action", "move") == "move"),
             "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves)} if last else None,
         }
@@ -342,9 +352,18 @@ class PetRuntime:
             self.write_pending = item
         return {"ok": True, "pending": item}
 
-    def queue_organize_apply(self, category):
-        """카테고리 이동을 바로 하지 않고 쓰기 승인 대기열에 올린다."""
+    def queue_organize_apply(self, category=None, kind=None):
+        """카테고리 이동(category) 또는 치울 후보 격리(kind)를 바로 하지 않고 쓰기 승인 대기열에 올린다."""
         summary = self.organize_summary()
+        if kind:
+            group = next((g for g in (summary or {}).get("quarantine", []) if g[0] == kind), None)
+            if not group:
+                return {"ok": False, "output": "이 종류의 치울 후보가 없습니다. 정리안을 먼저 만드세요."}
+            _, label, n, size = group
+            return self._queue({"kind": "organize_apply", "category": None, "qkind": kind, "count": n,
+                                "plan_created": summary["created"],
+                                "task": f"치울 후보 격리: {label} {n}건({organize._mb(size)})을 ~/.ro/cleanup/trash로 "
+                                        "옮김 — 삭제 아님, 되돌리기 가능"})
         n = dict(map(tuple, summary["counts"])).get(category, 0) if summary else 0
         if not n:
             return {"ok": False, "output": "이 카테고리에 옮길 항목이 없습니다. 정리안을 먼저 만드세요."}
@@ -366,9 +385,13 @@ class PetRuntime:
                 plan = organize.load_plan(self.home)
                 if plan["created"] != item["plan_created"]:
                     raise ValueError("승인 요청 뒤에 정리안이 바뀌었습니다. 다시 요청하세요.")
-                batch, done, skipped = organize.apply(category=item["category"], home=self.home,
-                                                      log_dir=self.log_dir)
-                output = f"{item['category']} {len(done)}건 이동 (되돌리기 가능)"
+                batch, done, skipped = organize.apply(category=item.get("category"), kind=item.get("qkind"),
+                                                      home=self.home, log_dir=self.log_dir)
+                if item.get("qkind"):
+                    label = organize.KIND_LABELS.get(item["qkind"], item["qkind"])
+                    output = f"{label} {len(done)}건 격리 (되돌리기 가능, 삭제 아님)"
+                else:
+                    output = f"{item['category']} {len(done)}건 이동 (되돌리기 가능)"
             else:
                 batch, done, skipped = organize.undo(item["batch"], self.home, self.log_dir)
                 output = f"{len(done)}건을 원래 자리로 되돌림"
@@ -907,6 +930,8 @@ PET_HTML = r"""<!DOCTYPE html>
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-msg { font-size: 10.5px; opacity: 0.72; min-height: 0; }
   .org-msg:empty { display: none; }
+  .org-cats:empty { display: none; }
+  .chip-btn.quar { background: transparent; color: var(--bubble-fg); box-shadow: inset 0 0 0 1px var(--panel-soft); }
 
   /* 최근 기록 3줄 리스트 (줄 잘림 방지) */
   .logs {
@@ -1648,6 +1673,7 @@ PET_HTML = r"""<!DOCTYPE html>
       <div class="gate-title">파일 정리 (승인 전에는 옮기지 않음)</div>
       <div id="orgSummary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
       <div id="orgCats" class="org-cats"></div>
+      <div id="orgQuar" class="org-cats"></div>
       <div class="gate-actions">
         <button id="orgScanBtn" class="pill-btn ghost">정리안 만들기</button>
         <button id="orgUndoBtn" class="pill-btn ghost" style="display:none;">되돌리기</button>
@@ -1756,6 +1782,7 @@ const orgCard = document.getElementById("orgCard");
 const orgToggleBtn = document.getElementById("orgToggleBtn");
 const orgSummary = document.getElementById("orgSummary");
 const orgCats = document.getElementById("orgCats");
+const orgQuar = document.getElementById("orgQuar");
 const orgScanBtn = document.getElementById("orgScanBtn");
 const orgUndoBtn = document.getElementById("orgUndoBtn");
 const orgMsg = document.getElementById("orgMsg");
@@ -2420,32 +2447,48 @@ document.getElementById("writeRejectBtn").addEventListener("click", async () => 
 });
 
 /* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
+function fmtBytes(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
+}
+
+function orgChip(parent, text, title, body, cls) {
+  const b = document.createElement("button");
+  b.className = cls ? `chip-btn ${cls}` : "chip-btn";
+  b.textContent = text;
+  b.title = title;
+  b.addEventListener("click", async () => {
+    const r = await apiPost("/api/organize/apply", body);
+    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
+    await refreshState();
+  });
+  parent.appendChild(b);
+}
+
 function renderOrganize(o) {
   const key = JSON.stringify(o || null);
   if (key === orgKey) return;
   orgKey = key;
   orgCats.innerHTML = "";
+  orgQuar.innerHTML = "";
   if (!o) {
     orgSummary.textContent = "정리안이 없습니다. 먼저 정리안을 만드세요.";
     orgUndoBtn.style.display = "none";
     return;
   }
   const total = o.counts.reduce((a, c) => a + c[1], 0);
-  orgSummary.textContent = total
-    ? `옮길 수 있는 ${total}건 · 검토 필요 ${o.review}건. 카테고리를 누르면 승인 요청이 올라갑니다.`
-    : `옮길 항목이 없습니다 (검토 필요 ${o.review}건은 터미널 ro organize edit로 확정).`;
-  o.counts.forEach(([cat, n]) => {
-    const b = document.createElement("button");
-    b.className = "chip-btn";
-    b.textContent = `${cat} ${n}`;
-    b.title = `${cat} ${n}건 이동 승인 요청`;
-    b.addEventListener("click", async () => {
-      const r = await apiPost("/api/organize/apply", { category: cat });
-      orgMsg.textContent = r.ok ? "아래에서 승인하면 옮깁니다." : (r.output || "");
-      await refreshState();
-    });
-    orgCats.appendChild(b);
-  });
+  const quar = o.quarantine || [];
+  const qn = quar.reduce((a, g) => a + g[2], 0);
+  const parts = [];
+  if (total) parts.push(`정리 ${total}`);
+  if (qn) parts.push(`치울 후보 ${qn}(${fmtBytes(o.reclaim)})`);
+  if (o.review) parts.push(`검토 ${o.review}`);
+  orgSummary.textContent = parts.length
+    ? `${parts.join(" · ")} — 누르면 승인 요청이 올라갑니다.` + (o.review ? " 검토 항목은 터미널 ro organize edit로." : "")
+    : "옮기거나 치울 항목이 없습니다.";
+  if (o.trashed) orgSummary.textContent += ` 격리 보관 중 ${fmtBytes(o.trashed)}(삭제 전이라 공간은 그대로).`;
+  o.counts.forEach(([cat, n]) => orgChip(orgCats, `${cat} ${n}`, `${cat} ${n}건 이동 승인 요청`, { category: cat }));
+  quar.forEach(([kind, label, n, size]) => orgChip(orgQuar, `${label} ${n} · ${fmtBytes(size)}`,
+    `${label} ${n}건을 격리(삭제 아님, 되돌리기 가능) 승인 요청`, { kind }, "quar"));
   if (o.undo) {
     orgUndoBtn.style.display = "inline-block";
     orgUndoBtn.textContent = `되돌리기 (${o.undo.count}건)`;
@@ -2595,7 +2638,12 @@ def make_handler(runtime):
             elif parsed.path == "/api/organize/scan":
                 self._send_json(200, runtime.organize_scan())
             elif parsed.path == "/api/organize/apply":
-                self._send_json(200, runtime.queue_organize_apply(str(data.get("category", ""))))
+                kind = str(data.get("kind") or "")
+                if kind and kind not in organize.QUARANTINE_KINDS:
+                    self._send_json(400, {"ok": False, "output": "알 수 없는 종류"})
+                else:
+                    self._send_json(200, runtime.queue_organize_apply(str(data.get("category") or "") or None,
+                                                                      kind or None))
             elif parsed.path == "/api/organize/undo":
                 self._send_json(200, runtime.queue_organize_undo())
             elif parsed.path == "/api/clear":

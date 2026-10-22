@@ -273,14 +273,25 @@ def _checks():
             dl.mkdir()
             f = dl / "영수증.txt"
             f.write_text("결제")
-            os.utime(f, (1, 1))
+            import zipfile
+            (dl / "pic.png").write_text("IMG")
+            z = dl / "pic.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
             rt = pet.PetRuntime(home=str(t / ".ro"), log_dir=str(t / ".ro" / "log"), map_path=str(t / "m.json"))
             rt.organize_root, rt.organize_dest = dl, t / "Documents" / "정리됨"
             rt.organize_scan()
             queued = rt.queue_organize_apply("재무")["ok"]
             st = rt.snapshot()
-            return queued and f.exists() and st["mood"] == "anxious" \
+            moves_wait = queued and f.exists() and st["mood"] == "anxious" \
                 and st["write_pending"]["kind"] == "organize_apply" and not rt.organize_dest.exists()
+            rt.resolve_write_approval(False)
+            q_queued = rt.queue_organize_apply(kind="extracted")["ok"]  # 치울 후보 격리도 같은 게이트
+            trash = t / ".ro" / "cleanup" / "trash"
+            return moves_wait and q_queued and z.exists() and not trash.exists() \
+                and rt.snapshot()["write_pending"].get("qkind") == "extracted"
 
     return [
         ("비밀 마스킹", redaction),
@@ -300,7 +311,7 @@ def _checks():
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
         ("Pet은 로컬 전용·비밀 마스킹·쓰기 승인 게이트 유지", pet_safety_invariants),
-        ("Pet 파일 정리는 승인 전 이동 없음", pet_organize_needs_approval),
+        ("Pet 파일 정리·격리는 승인 전 이동 없음", pet_organize_needs_approval),
     ]
 
 
