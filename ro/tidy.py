@@ -122,7 +122,7 @@ def load_plan(home=HOME):
     try:
         return json.loads((_dir(home) / "plan.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        raise ValueError("계획이 없습니다. 먼저 `python -m ro.tidy scan --root DIR`를 실행하세요.")
+        raise ValueError("계획이 없습니다. 먼저 `ro tidy scan --root DIR`를 실행하세요.")
 
 
 def _journal(home):
