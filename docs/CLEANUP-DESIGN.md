@@ -1,6 +1,6 @@
 # 정리 통합 설계안 — `ro tidy` + `ro organize` → 하나의 흐름
 
-작성: 2026-10-22 · 상태: **설계 확정, 구현 전**(결정 ①~④ 확정, §9). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
+작성: 2026-10-22 · 상태: **설계 확정, C1 구현됨**(결정 ①~④ 확정, §9 · 공용 탐지기 `ro/detect.py`). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
 
 ## 1. 목표와 완료 조건
 
@@ -102,7 +102,7 @@ ro tidy …                                                         # 별칭: �
 
 | 단계 | 내용 | 종료 조건 |
 |---|---|---|
-| C1 | tidy 탐지기(중복·풀린 압축·옛 버전, 남길 쪽 재확인)를 공용 모듈로 분리. 동작 변화 없음 | 기존 테스트 전부 통과 |
+| C1 ✅ | tidy 탐지기(중복·풀린 압축·옛 버전, 남길 쪽 재확인)를 공용 모듈 `ro/detect.py`로 분리. 동작 변화 없음 | 기존 테스트 전부 통과 + 실데이터 scan 결과 동일 |
 | C2 | organize scan이 탐지기를 호출해 `action`·`kind`·`keep` 기록, 중요 카테고리 보호, 오래됨 태그화, 남길 쪽 규칙(§3-5) | 같은 파일 이중 제안 0건 테스트, `KCC 경비 내역`형 사례 = keep |
 | C3 | 통합 apply/undo + 공용 journal, 옛 tidy·organize 기록 읽기 | 이동·격리 섞인 배치 apply→undo 원상복구, 옛 배치 undo |
 | C4 | show/edit 확장, `ro tidy` 별칭, README·install 안내 한 줄화, `ro eval` 통합 항목 | CLI 테스트, 별칭 안내 문구 |

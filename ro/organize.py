@@ -30,7 +30,8 @@ from urllib.parse import unquote
 
 from . import fsutil, log
 from .mapper import is_secret
-from .tidy import _sha, check_root
+from .detect import sha256 as _sha
+from .tidy import check_root
 
 HOME = "~/.ro"
 ROOT = "~/Downloads"

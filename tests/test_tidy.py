@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from ro import tidy
+from ro import detect, tidy
 
 
 class TidyTest(unittest.TestCase):
@@ -164,7 +164,7 @@ class TidyTest(unittest.TestCase):
 
     def test_korean_names_cp949_and_nfd(self):
         info = mock.Mock(flag_bits=0, filename="경비 영수증.jpg".encode("cp949").decode("cp437"))
-        self.assertEqual(tidy._zip_name(info), "경비 영수증.jpg")
+        self.assertEqual(detect.zip_entry_name(info), "경비 영수증.jpg")
         self.w(unicodedata.normalize("NFD", "문서/영수증.jpg"), "IMG", 1)
         self.zip_of("문서.zip", {"영수증.jpg": "IMG"}, age_days=1)
         self.assertEqual(list(self.kinds(tidy.scan(self.root, min_size=1)).values()), ["extracted"])
