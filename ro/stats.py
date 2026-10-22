@@ -1,7 +1,8 @@
 """Phase 3 일간 통계: 로그 이벤트 → 로컬 집계(~/.ro/stats/YYYY-MM-DD.json).
 
 외부로 나가지 않는다. 집계에는 개수와 도구·프로젝트 이름만 있고, 이벤트 원문(커밋 제목 등)은 없다.
-활동 이벤트는 (소스, ref[, id]) 기준으로 중복을 걷어낸다 — 세션은 같은 ref의 최신 rev만 센다.
+활동 이벤트는 (소스, ref[, id]) 기준으로 중복을 걷어낸다 — 세션은 같은 ref의 최신 rev만 센다
+(로그 전체에서 최신이 아니면 다른 날 파일에 있어도 세지 않는다).
 
   python -m ro.stats [--day YYYY-MM-DD]
 """
@@ -32,9 +33,26 @@ def _dedupe(events):
     return list(best.values())
 
 
-def daily(day, log_dir=log.LOG_DIR):
+def latest_session_revs(log_dir=log.LOG_DIR):
+    """세션 ref → 로그 전체에서 가장 최신인 (rev, 날짜). 며칠에 걸쳐 이어진 세션이 날마다 세어지지 않게 한다.
+
+    같은 세션 id가 서로 다른 날 같은 rev로 기록될 수 있어 rev만으로는 구분되지 않는다. 같은 rev면 더 늦은 날이 최신이다.
+    """
+    latest = {}
+    for e in log.read_all(log_dir):
+        d = e.get("data") or {}
+        if e.get("kind") == "activity" and d.get("type") == "session":
+            key = (d.get("rev", 0), e["ts"][:10])
+            latest[d.get("ref")] = max(latest.get(d.get("ref"), key), key)
+    return latest
+
+
+def daily(day, log_dir=log.LOG_DIR, latest=None):
     events = log.read(day, log_dir)
-    acts = _dedupe(events)
+    latest = latest_session_revs(log_dir) if latest is None else latest
+    acts = [e for e in _dedupe(events)
+            if (e["data"].get("type") != "session"
+                or (e["data"].get("rev", 0), day) >= latest.get(e["data"].get("ref"), (0, "")))]
     tools, projects, engines = Counter(), Counter(), Counter()
     turns = calls = errors = sessions = 0
     for e in acts:
@@ -63,8 +81,8 @@ def daily(day, log_dir=log.LOG_DIR):
     }
 
 
-def write(day, home=HOME, log_dir=log.LOG_DIR):
-    stat = daily(day, log_dir)
+def write(day, home=HOME, log_dir=log.LOG_DIR, latest=None):
+    stat = daily(day, log_dir, latest)
     fsutil.atomic_write(Path(home).expanduser() / "stats" / f"{day}.json",
                         json.dumps(stat, ensure_ascii=False, indent=2))
     return stat
@@ -92,8 +110,9 @@ def main(argv=None):
     ap.add_argument("--days", type=int, default=1, help="최근 N일 다시 집계")
     args = ap.parse_args(argv)
     days = [args.day] if args.day else last_days(args.days)
+    latest = latest_session_revs()  # 여러 날을 다시 집계할 때 로그를 한 번만 읽는다
     for day in days:
-        s = write(day)
+        s = write(day, latest=latest)
         print(f"{day}: 활동 {s['activity']}건, 세션 {s['sessions']['count']}, 라우팅 {s['routes']['count']}")
 
 
