@@ -341,6 +341,7 @@ class PetTest(unittest.TestCase):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]
         self.assertIn("askInput.disabled = true;", submit)
+        self.assertIn("if (!res || !res.ok) {", submit)  # 엔진 실패(ok: false)도 질문을 되돌린다
         self.assertIn("if (!askInput.value) askInput.value = q;", submit)
         keydown = html[html.index('window.addEventListener("keydown"'):]
         self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))

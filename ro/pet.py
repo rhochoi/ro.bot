@@ -2352,8 +2352,8 @@ askForm.addEventListener("submit", async (e) => {
     askSubmit.disabled = false;
   }
   askNoticeUntil = 0;
-  if (!res || res.busy || res.error) {
-    // 답을 못 받았으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
+  if (!res || !res.ok) {
+    // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
     if (!askInput.value) askInput.value = q;
     askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
     askNoticeUntil = Date.now() + 8000;
