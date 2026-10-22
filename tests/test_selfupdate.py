@@ -17,6 +17,12 @@ class SelfUpdateTest(unittest.TestCase):
                 mock.patch("shutil.which", return_value="/x/pipx"):
             self.assertEqual(selfupdate.update_command()[0], ["pipx", "upgrade", "rog-bot"])
 
+    def test_uv_tool_install_uses_uv(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
+                mock.patch("shutil.which", return_value="/x/uv"), \
+                mock.patch.object(selfupdate.sys, "prefix", "/Users/a/.local/share/uv/tools/rog-bot"):
+            self.assertEqual(selfupdate.update_command()[0], ["uv", "tool", "upgrade", "rog-bot"])
+
     def test_no_pipx_reports_failure(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
                 mock.patch("shutil.which", return_value=None):

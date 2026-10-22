@@ -1,0 +1,42 @@
+# main에 머지되면 테스트 후 날짜 버전 태그(vYYYY.M.D, 같은 날 여러 번이면 .1, .2 …)와 Release를 만든다.
+# 패키지 버전은 setuptools-scm이 이 태그에서 계산하므로 사람이 버전을 고칠 일이 없다.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: test
+        run: python -m unittest discover -s tests -t .
+      - name: tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "이미 태그가 있음"; exit 0
+          fi
+          base="v$(date -u +%Y.%-m.%-d)"
+          tag="$base"; n=0
+          while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do
+            n=$((n + 1)); tag="$base.$n"
+          done
+          git tag "$tag"
+          git push origin "$tag"
+          gh release create "$tag" --generate-notes --title "$tag"

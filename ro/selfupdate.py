@@ -1,6 +1,6 @@
 """ro update / ro doctor: 설치 방식에 맞춰 업데이트하고 환경을 점검한다.
 
-체크아웃(.git이 있는 저장소)이면 git pull --ff-only, pipx 설치본이면 pipx upgrade.
+체크아웃(.git이 있는 저장소)이면 git pull --ff-only, uv tool 설치본이면 uv tool upgrade, pipx 설치본이면 pipx upgrade.
 사용자가 명령을 실행했을 때만 동작하며, 실행하는 명령을 먼저 출력한다.
 """
 import shutil
@@ -18,6 +18,8 @@ def update_command():
     """(명령, 설명). 자동 업데이트가 불가능하면 (None, 안내)."""
     if (ROOT / ".git").exists():
         return ["git", "-C", str(ROOT), "pull", "--ff-only"], "저장소 체크아웃"
+    if "/uv/tools/" in sys.prefix and shutil.which("uv"):
+        return ["uv", "tool", "upgrade", PACKAGE], "uv tool 설치본"
     if shutil.which("pipx"):
         return ["pipx", "upgrade", PACKAGE], "pipx 설치본"
     return None, "pipx가 없습니다. 설치한 방식(pip 등)으로 직접 업그레이드하세요."

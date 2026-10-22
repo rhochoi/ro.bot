@@ -128,7 +128,7 @@ def _checks():
         import shutil
         with tempfile.TemporaryDirectory() as h:
             toml = Path(h) / "routing.toml"
-            shutil.copy(route.ROUTING_PATH, toml)
+            shutil.copy(route.routing_path(), toml)
             before = toml.read_text()
             base = datetime.datetime.now() - datetime.timedelta(hours=40)
             evs = []

@@ -17,7 +17,8 @@ HOME = "~/.ro"
 MIN_SAMPLES = 3
 MIN_RATE = 0.8
 MIN_REPEAT = 3
-MEMORY_PATH = Path(__file__).resolve().parent.parent / "memory" / "ro-model.md"
+MEMORY_PATH = Path(HOME).expanduser() / "ro-model.md"  # 사용자별 기억(저장소·패키지에는 템플릿만)
+MEMORY_TEMPLATE = Path(__file__).resolve().parent / "ro-model.template.md"
 MEMORY_MAX = 160
 MEMORY_TTL_DAYS = 90
 
@@ -112,7 +113,7 @@ def approve(cid, home=HOME, memory_path=MEMORY_PATH, routing_path=None):
     if peek and peek.get("kind") == "routing":
         from . import revise  # 지연 임포트(순환 방지)
         # routing.toml 적용이 검증을 통과해야만 대기열에서 빼고 규칙으로 기록한다
-        revise.apply_to_toml(peek, routing_path or route.ROUTING_PATH)
+        revise.apply_to_toml(peek, routing_path)
     cand = _pop(cid, home)
     rules = load_rules(home)
     rules.append(log.redact(cand))
@@ -123,7 +124,7 @@ def approve(cid, home=HOME, memory_path=MEMORY_PATH, routing_path=None):
 
 
 def append_memory(cand, path=MEMORY_PATH, today=None):
-    """승인된 기억 후보를 memory/ro-model.md에 한 줄로 추가한다(출처·확인일·유효기간·신뢰 포함).
+    """승인된 기억 후보를 ~/.ro/ro-model.md에 한 줄로 추가한다(출처·확인일·유효기간·신뢰 포함).
     파일만 수정한다 — 커밋은 사용자가 diff를 보고 직접 한다."""
     today = today or datetime.date.today()
     text = ambient.sanitize(" ".join(str(cand["text"]).split()), MEMORY_MAX)
@@ -133,12 +134,12 @@ def append_memory(cand, path=MEMORY_PATH, today=None):
     trust = cand.get("trust") if cand.get("trust") in ("높음", "보통", "낮음") else "낮음"
     line = f"- {text} · 출처: {source} · 확인: {today} · 유효: {until}까지 · 신뢰: {trust}"
     p = Path(path)
-    body = p.read_text(encoding="utf-8") if p.exists() else ""
+    body = (p if p.exists() else MEMORY_TEMPLATE).read_text(encoding="utf-8")
     body = body.replace("(아직 승인된 항목 없음)\n", "").replace("(아직 승인된 항목 없음)", "")
     body = body.rstrip("\n")
     last = body.splitlines()[-1] if body else ""
     sep = "\n" if last.startswith("- ") and "<사실" not in last else "\n\n"
-    p.write_text(body + sep + line + "\n", encoding="utf-8")
+    fsutil.atomic_write(p, body + sep + line + "\n")
     return line
 
 

@@ -1,5 +1,6 @@
 """ro 터미널 CLI.  python -m ro map | show"""
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
@@ -11,8 +12,16 @@ from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper,
 DEFAULT_OUT = "~/.ro/map.json"
 
 
+def _version():
+    try:
+        return importlib.metadata.version(selfupdate.PACKAGE)
+    except importlib.metadata.PackageNotFoundError:
+        return "개발 체크아웃(미설치)"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
+    ap.add_argument("--version", action="version", version=f"ro {_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("map", help="읽기 전용 스캔으로 지도 생성")
     m.add_argument("--roots", nargs="+", default=mapper.DEFAULT_ROOTS)
@@ -223,9 +232,9 @@ def main(argv=None):
             log.append(f"learn_{args.action}", c["text"], {"id": c["id"], "kind": c["kind"]})
             print(f"{args.action}: [{c['id']}] {c['text']}")
             if args.action == "approve" and c.get("kind") == "routing":
-                print("routing.toml을 수정함 — `git diff routing.toml` 확인 후 커밋하세요(자동 커밋 안 함)")
+                print(f"{route.USER_ROUTING.expanduser()}을 수정함 — 내용을 확인하세요")
             if args.action == "approve" and c.get("kind") == "memory":
-                print("memory/ro-model.md에 추가됨 — `git diff memory/` 확인 후 커밋하세요(자동 커밋 안 함)")
+                print(f"{learn.MEMORY_PATH}에 추가됨 — 내용을 확인하세요")
         elif args.action == "rules":
             for r in learn.load_rules():
                 print(f"[{r['id']}] {r['text']} ({r['evidence']})")
