@@ -1,4 +1,5 @@
-"""`ro tidy`가 ro.tidy로 그대로 전달되는지: 격리된 HOME에서 scan → apply → undo → status를 실제 CLI로 돌린다."""
+"""`ro tidy`는 `ro organize`로 넘기는 별칭이다: 격리된 HOME에서 scan → apply → undo → status를 실제 CLI로 돌린다."""
+import json
 import os
 import subprocess
 import sys
@@ -10,10 +11,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-class CliTidyTest(unittest.TestCase):
+class CliTidyAliasTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.home = Path(self.tmp.name)
+        self.home = Path(self.tmp.name).resolve()
         self.root = self.home / "Downloads"
         self.root.mkdir()
         self.old = self.root / "old.bin"
@@ -29,43 +30,47 @@ class CliTidyTest(unittest.TestCase):
         return subprocess.run([sys.executable, "-m", "ro", *args], cwd=REPO, env=env,
                               capture_output=True, text=True, timeout=60)
 
-    def test_scan_apply_undo_status(self):
+    def test_scan_apply_undo_status_go_through_organize(self):
         r = self.ro("tidy", "scan", "--root", str(self.root))
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("old.bin", r.stdout)
-        self.assertIn("아무것도 바꾸지 않았습니다", r.stdout)
+        self.assertIn("`ro organize`로 합쳐졌습니다", r.stderr)
+        self.assertIn("## 치울 후보", r.stdout)  # --stale로 넘겨져 오래된 파일이 치울 후보가 된다
         self.assertTrue(self.old.exists())
-        cid = r.stdout.split("[", 1)[1].split("]", 1)[0]
+        plan = json.loads((self.home / ".ro" / "cleanup" / "plan.json").read_text())
+        [it] = plan["items"]
+        self.assertEqual((it["action"], it["kind"]), ("quarantine", "stale"))
 
-        r = self.ro("tidy", "apply", cid)
+        r = self.ro("tidy", "apply", it["id"])
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertFalse(self.old.exists())  # 격리(이동)됨
+        self.assertFalse(self.old.exists())
+        self.assertTrue(list((self.home / ".ro" / "cleanup" / "trash").rglob("*old.bin")))
 
         r = self.ro("tidy", "undo")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(self.old.exists())  # 원위치 복원
+        self.assertTrue(self.old.exists())
 
         r = self.ro("tidy", "status")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("move", r.stdout)
+        self.assertIn("quarantine", r.stdout)
         self.assertIn("restore", r.stdout)
 
-    def test_help_and_errors_come_from_tidy(self):
+    def test_help_and_errors(self):
         r = self.ro("tidy", "--help")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("usage: ro tidy", r.stdout)
+        self.assertIn("ro organize", r.stdout)
         r = self.ro("tidy")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("usage: ro tidy", r.stderr)
 
-    def test_apply_without_plan_points_to_ro_tidy_scan(self):
+    def test_apply_without_plan_points_to_organize_scan(self):
         r = self.ro("tidy", "apply", "deadbeef")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("`ro tidy scan --root DIR`", r.stderr)
+        self.assertIn("`ro organize scan`", r.stderr)
 
-    def test_listed_in_ro_help(self):
+    def test_listed_in_ro_help_as_alias(self):
         r = self.ro("--help")
-        self.assertIn("tidy", r.stdout)
+        self.assertIn("(별칭) ro organize로 합쳐짐", r.stdout)
 
 
 if __name__ == "__main__":
