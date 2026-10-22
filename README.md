@@ -37,7 +37,7 @@ ro --version   # 설치된 버전
 - `ro collect allow|deny|status|run` 활동 수집(허용한 소스만), `ro feedback y|n ...`, `ro log delete --yes`
 - `python -m ro organize scan|show|edit|apply|undo` 다운로드 폴더 분류·이름 정리 (승인한 것만 이동, 되돌리기 가능. `docs/ORGANIZE-DESIGN.md`)
 - `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서 (말풍선의 `정리` 버튼: 정리안 보기 → 카테고리별 승인 → 되돌리기)
-- `python -m ro tidy scan --root ~/Downloads` 중복·오래된 파일 후보 보고(읽기 전용) → `tidy apply ID...` 격리(영구 삭제 없음) → `tidy undo` 복원 · `tidy status` 이력
+- `python -m ro tidy scan --root ~/Downloads` 중복·풀린 압축 원본·옛 버전(`_v3`, `(1)`)·오래된 파일 후보 보고(읽기 전용) → `tidy apply ID...` 격리(영구 삭제 없음) → `tidy undo` 복원 · `tidy status` 이력
 - `python -m ro learn` / `route` / `log` / `audit` / `eval` / `ambient` 상세는 `docs/BLUEPRINT.md`
 - 테스트: `python -m unittest discover -s tests -t .`
 
