@@ -9,8 +9,10 @@ import stat
 import tempfile
 import time
 from pathlib import Path
+from unittest import mock
 
-from . import ambient, ask, distill, learn, log, mapper, revise, route, stats, tidy
+from . import (ambient, ask, collectors, distill, learn, log, mapper, pet, revise, route, stats,
+               tidy)
 
 HOME = "~/.ro"
 
@@ -165,8 +167,40 @@ def _checks():
         m = {"projects": [{"name": "evil", "path": "/tmp/evil", "languages": {}}]}
         return ask.plan("evil 설명", m, cwd="/home/me", use_context=False)["cwd"] == "/home/me"
 
+    def collect_needs_allow():
+        # 허용 목록이 비어 있으면 셸 기록이 있어도 아무것도 읽지 않는다(기본 거부).
+        # 대조군: 같은 기록을 허용하면 실제로 읽혀야 한다(그렇지 않으면 검사가 공허하다).
+        with tempfile.TemporaryDirectory() as h, mock.patch.dict(os.environ, {"HOME": h}):
+            (Path(h) / ".zsh_history").write_text(f": {int(time.time()) - 60}:0;ls\n")
+            denied = collectors.run(home=h, log_dir=h)
+            clean = not any(e["kind"] == "activity" for e in log.read_all(h))
+            collectors.set_allow("shell", enabled=True, home=h)
+            allowed = collectors.run(sources=("shell",), home=h, log_dir=h)
+            return denied == {"git": 0, "shell": 0, "sessions": 0} and clean \
+                and allowed["shell"] == 1
+
+    def collect_drops_arguments():
+        n = collectors.normalize_command
+        return n("curl -u user:hunter2 https://x?token=zz") == "curl" \
+            and "sk-" not in (n("export API_KEY=sk-abcdefghijklmnopqrstuv") or "")
+
+    def pet_safety_invariants():
+        with tempfile.TemporaryDirectory() as h:
+            rt = pet.PetRuntime(home=h, log_dir=h, map_path=str(Path(h) / "map.json"))
+            rt.queue_write_approval("배포 token=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            st = rt.snapshot()
+            try:
+                pet.start_server(rt, host="0.0.0.0")
+                local_only = False
+            except ValueError:
+                local_only = True
+            return (local_only and st["mood"] == "anxious"
+                    and "ABCDEFGH" not in json.dumps(st, ensure_ascii=False))
+
     return [
         ("비밀 마스킹", redaction),
+        ("수집기는 허용한 소스만 읽음", collect_needs_allow),
+        ("수집기는 명령 인자·비밀을 버림", collect_drops_arguments),
         ("ask는 지목된 남의 폴더에서 엔진을 실행하지 않음", ask_stays_in_user_cwd),
         ("엔진 기본 모드는 읽기", read_mode_default),
         ("쓰기는 명시 플래그에서만", write_needs_flag),
@@ -178,6 +212,7 @@ def _checks():
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
+        ("Pet은 로컬 전용·비밀 마스킹·쓰기 승인 게이트 유지", pet_safety_invariants),
     ]
 
 

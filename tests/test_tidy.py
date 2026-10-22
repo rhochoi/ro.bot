@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -79,6 +80,18 @@ class TidyTest(unittest.TestCase):
         self.assertEqual(b.read_text(), "same")
         with self.assertRaises(ValueError):
             tidy.undo(None, self.ro, self.log)  # 이미 복원됨
+
+    def test_undo_restores_original_permissions(self):
+        self.w("a.txt", "same", 10)
+        b = self.w("b.txt", "same", 1)
+        os.chmod(b, 0o644)
+        plan = tidy.scan(self.root, min_size=1)
+        tidy.save_plan(plan, self.ro)
+        _, done, _ = tidy.apply([plan["items"][0]["id"]], self.ro, self.log)
+        trashed = list((self.ro / "tidy" / "trash").rglob("*-b.txt"))
+        self.assertEqual(stat.S_IMODE(trashed[0].stat().st_mode), 0o600)  # 격리본은 비공개
+        tidy.undo(None, self.ro, self.log)
+        self.assertEqual(stat.S_IMODE(b.stat().st_mode), 0o644)
 
     def test_apply_only_listed_ids_and_rejects_changed_file(self):
         self.w("a.txt", "same", 10)

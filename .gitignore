@@ -1,3 +1,5 @@
 .venv/
 __pycache__/
 .bench-fixtures/
+.DS_Store
+.claude/
