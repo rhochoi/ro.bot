@@ -18,6 +18,7 @@ ro update      # 업데이트 (pipx 설치본은 pipx upgrade rog-bot)
 
 - `python -m ro map` 프로젝트·도구 지도 생성 (`~/.ro/map.json`)
 - `python -m ro ask "질문" [--dry-run]` 컨텍스트 선택 → 엔진 호출 → 기록
+- `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서
 - `python -m ro learn` / `route` / `log` / `audit` / `eval` / `ambient` 상세는 `docs/BLUEPRINT.md`
 - 테스트: `python -m unittest discover -s tests -t .`
 

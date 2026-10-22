@@ -1,12 +1,12 @@
 # 작업 유형 → 엔진/모델 라우팅표. 캐릭터의 일부(데이터)이며 코드가 아니다.
 # 변경은 커밋으로 남기고, 개정 제안(M7)은 근거와 함께 사용자가 승인한다.
 # model이 빈 문자열이면 엔진 기본 모델을 쓴다(모델 이름은 자주 바뀌므로 확인 후에만 채운다).
-# 엔진 검증 상태(2026-10-21): codex·agy 읽기 모드 실호출 확인, claude는 로그인 만료로 미확인.
+# 엔진 검증 상태(2026-10-21): codex·agy 읽기 모드 실호출 확인, claude 읽기 모드 탐침 통과(2026-10-22, claude-sonnet-5-5; 기본 모델 Fable 5.1은 사용 크레딧 필요로 실패).
 updated = "2026-10-21"
 
 [routes.design]
 engine = "claude"
-model = ""
+model = "claude-sonnet-5-5"
 keywords = ["설계", "리뷰", "검토", "설명", "분석", "design", "review", "explain", "plan"]
 why = "긴 맥락·설계·교차 검토"
 
@@ -25,4 +25,4 @@ why = "에디터·브라우저 연동 작업"
 # 어떤 유형에도 맞지 않을 때
 [fallback]
 engine = "claude"
-model = ""
+model = "claude-sonnet-5-5"
