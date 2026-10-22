@@ -310,10 +310,8 @@ class PetRuntime:
             plan = organize.load_plan(self.home)
         except ValueError:
             return None
-        entries = organize.read_journal(self.home)
-        restored = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
-        moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored]
-        moved = {e["id"] for e in moves}  # 이미 옮긴(되돌리지 않은) 항목은 다시 세지 않는다
+        moves = organize.pending(self.home, sources=("cleanup", "organize"))  # tidy 기록은 펫 되돌리기에 넣지 않는다
+        moved = {e["id"] for e in moves}  # 이미 옮긴·격리한(되돌리지 않은) 항목은 다시 세지 않는다
         ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and i["id"] not in moved)
         last = moves[-1]["batch"] if moves else None
         return {

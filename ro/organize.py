@@ -9,12 +9,13 @@
 - 파일마다 행동은 하나(docs/CLEANUP-DESIGN.md): move(분류 폴더로 이동) · quarantine(치울 후보) · keep(보관).
   판정 순서는 공용 탐지기(ro/detect.py)의 완전 중복 → 풀린 압축 원본 → 옛 버전 → 분류. 하위 폴더는 남길 쪽으로만 쓰인다.
   재무·계약·서류는 옛 버전·오래됨 이유로 치우지 않는다(완전 중복은 검토 필요로만). 오래됨은 태그이고 --stale일 때만 치울 후보.
-  치울 후보의 실제 격리는 다음 단계(C3)에서 붙는다 — 지금 apply는 move 항목만 옮긴다.
+- apply는 치울 후보를 먼저 ~/.ro/cleanup/trash/<batch>/로 격리하고(남길 쪽이 같은 배치에서 먼저 옮겨지지 않게) 그다음 이동한다.
+  기록은 ~/.ro/cleanup/journal.jsonl 하나에 남기고, undo는 예전 organize·tidy 기록의 배치도 되돌린다.
 
   ro organize scan [--root ~/Downloads] [--stale [--stale-days 180]]
   ro organize show [--category 재무] [--review]
   ro organize edit ID [--category 문서] [--name "전세 계약서"]
-  ro organize apply ID [ID...] | --category 재무
+  ro organize apply ID [ID...] | --category 재무 | --kind extracted
   ro organize undo [BATCH] | status
 """
 import argparse
@@ -24,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 import unicodedata
@@ -435,55 +437,82 @@ def edit(cid, category=None, name=None, home=HOME, log_dir=log.LOG_DIR):
 
 
 # ---------- 적용·되돌리기 ----------
-def _journal(home):
-    return _dir(home) / "journal.jsonl"
+def _cleanup_dir(home):
+    return Path(home).expanduser() / "cleanup"
+
+
+def _journals(home):
+    """새 기록은 cleanup에, 예전 organize·tidy 기록은 읽기·복원 표시만 한다."""
+    h = Path(home).expanduser()
+    return {"cleanup": h / "cleanup" / "journal.jsonl", "organize": h / "organize" / "journal.jsonl",
+            "tidy": h / "tidy" / "journal.jsonl"}
 
 
 def read_journal(home=HOME):
+    """모든 기록(각 항목에 source 표시)을 시간 순으로."""
     out = []
-    try:
-        for line in _journal(home).read_text(encoding="utf-8").splitlines():
+    for source, path in _journals(home).items():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
             try:
-                out.append(json.loads(line))
+                out.append({**json.loads(line), "source": source})
             except json.JSONDecodeError:
                 continue
-    except OSError:
-        pass
+    out.sort(key=lambda e: e.get("ts", ""))
     return out
 
 
-def _append(entry, home):
-    fsutil.ensure_dir(_dir(home))
-    fd = os.open(_journal(home), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+def pending(home=HOME, sources=("cleanup", "organize", "tidy")):
+    """되돌리지 않은 이동·격리 기록."""
+    entries = [e for e in read_journal(home) if e["source"] in sources]
+    restored = {(e["source"], e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
+    return [e for e in entries if e["op"] in ("move", "quarantine")
+            and (e["source"], e["batch"], e["id"]) not in restored]
+
+
+def _append(entry, home, source="cleanup"):
+    path = _journals(home)[source]
+    fsutil.ensure_dir(path.parent)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def apply(ids=(), category=None, home=HOME, log_dir=log.LOG_DIR):
-    """지정한 id(또는 카테고리의 확정 항목)만 옮긴다. 반환: (batch, 적용 목록, 건너뜀 [(id, 이유)])."""
+def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
+    """지정한 id(또는 카테고리의 이동 항목, 종류별 치울 후보)만 처리한다. 치울 후보를 먼저 격리하고 그다음 옮긴다.
+    반환: (batch, 적용 목록, 건너뜀 [(id, 이유)])."""
     plan = load_plan(home)
     root = check_root(plan["root"])
     dest_root = Path(plan["dest_root"])
     by_id = {i["id"]: i for i in plan["items"]}
+    ids = list(ids)
     if category:
-        ids = list(ids) + [i["id"] for i in plan["items"] if i["category"] == category and movable(i)]
+        ids += [i["id"] for i in plan["items"] if i["category"] == category and movable(i)]
+    if kind:
+        ids += [i["id"] for i in plan["items"] if i.get("action") == "quarantine" and i["kind"] == kind
+                and not i["review"]]
     if not ids:
-        raise ValueError("적용할 id나 --category를 지정하세요")
+        raise ValueError("적용할 id나 --category·--kind를 지정하세요")
+    # 남길 쪽(중복 원본·최신 버전·풀린 파일)이 같은 배치의 이동으로 먼저 사라지지 않게 격리를 앞에 둔다
+    ids = sorted(dict.fromkeys(ids), key=lambda c: (by_id.get(c) or {}).get("action") != "quarantine")
     batch = time.strftime("%Y%m%d-%H%M%S")
+    trash_root = _cleanup_dir(home) / "trash"
     done, skipped = [], []
-    for cid in dict.fromkeys(ids):
+    for cid in ids:
         it = by_id.get(cid)
         if not it:
             skipped.append((cid, "계획에 없는 id"))
             continue
-        if it.get("action", "move") == "quarantine":
-            skipped.append((cid, "치울 후보 — organize의 격리는 다음 단계에서 붙습니다(지금은 ro tidy)"))
-            continue
-        if it.get("action", "move") == "keep":
+        action = it.get("action", "move")
+        if action == "keep":
             skipped.append((cid, "보관 항목 — 옮기려면 edit --category로 위치를 정하세요"))
             continue
         if it["review"]:
-            skipped.append((cid, "검토 필요 — edit로 카테고리를 확정한 뒤 적용하세요"))
+            skipped.append((cid, "검토 필요 — edit로 카테고리를 확정한 뒤 적용하세요" if action == "move"
+                            else "검토 필요(재무·계약 관련 중복) — 직접 확인한 뒤 정리하세요"))
             continue
         src = Path(it["path"])
         try:
@@ -492,48 +521,83 @@ def apply(ids=(), category=None, home=HOME, log_dir=log.LOG_DIR):
             st = src.stat()
             if st.st_size != it["size"] or int(st.st_mtime) != it["mtime"] or _sha(src) != it["sha"]:
                 raise ValueError("계획 이후 파일이 바뀜")
-            dst = Path(it["dest"])
-            if dest_root.resolve() not in dst.resolve().parents:
-                raise ValueError("정리 폴더 밖으로 가는 경로")
-            dst = _unique(dst, set())
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src), str(dst))
+            if action == "quarantine":
+                if not detect.kept_ok(it, src, root):
+                    raise ValueError("남겨 둔 쪽이 사라지거나 바뀜 — 다시 scan 하세요")
+                dst = fsutil.ensure_dir(trash_root / batch) / f"{cid}-{src.name}"
+                if dst.exists():
+                    raise ValueError("격리 위치가 이미 있음")
+                mode = stat.S_IMODE(st.st_mode)  # 격리본은 비공개로 두되 복원 때 원래 권한을 되돌린다
+                shutil.move(str(src), str(dst))
+                os.chmod(dst, 0o600)
+                entry = {"op": "quarantine", "kind": it["kind"], "mode": mode, "trash": str(trash_root)}
+            else:
+                dst = Path(it["dest"])
+                if dest_root.resolve() not in dst.resolve().parents:
+                    raise ValueError("정리 폴더 밖으로 가는 경로")
+                dst = _unique(dst, set())
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                entry = {"op": "move", "dest_root": str(dest_root)}
         except (OSError, ValueError) as e:
             skipped.append((cid, str(e)))
             continue
-        _append({"op": "move", "batch": batch, "id": cid, "src": str(src), "dst": str(dst), "sha": it["sha"],
-                 "root": str(root), "dest_root": str(dest_root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
+        _append({**entry, "batch": batch, "id": cid, "src": str(src), "dst": str(dst), "sha": it["sha"],
+                 "root": str(root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
         done.append({**it, "dest": str(dst)})
     if done:
-        cats = Counter(i["category"] for i in done)
+        cats = Counter(i["category"] for i in done if i.get("action", "move") == "move")
         log.append("organize", f"정리 {len(done)}건 (batch {batch})",
-                   {"batch": batch, "count": len(done), "categories": dict(cats)}, log_dir=log_dir)
+                   {"batch": batch, "count": len(done), "categories": dict(cats),
+                    "quarantined": sum(i.get("action") == "quarantine" for i in done)}, log_dir=log_dir)
     return batch, done, skipped
 
 
+def _check_restorable(e, home):
+    """기록 하나를 되돌려도 되는지(원본 위치·격리/정리 위치·내용). 실패하면 ValueError."""
+    src, dst = Path(e["src"]), Path(e["dst"])
+    if e["op"] == "quarantine" or e["source"] == "tidy":  # tidy 기록의 move는 격리였다
+        trash = Path(e.get("trash") or Path(home).expanduser() / "tidy" / "trash").resolve()
+        if trash not in dst.resolve().parents or not dst.is_file() or dst.is_symlink():
+            raise ValueError("격리본이 없음")
+        inside = (src.parent.resolve() == Path(e["root"]).resolve() if e["source"] != "tidy"
+                  else Path(e["root"]).resolve() in src.resolve().parents)
+        stop = trash
+    else:
+        stop = Path(e["dest_root"]).resolve()
+        if stop not in dst.resolve().parents or not dst.is_file() or dst.is_symlink():
+            raise ValueError("정리된 파일이 없음")
+        inside = src.parent.resolve() == Path(e["root"]).resolve()
+    if not inside:
+        raise ValueError("원래 루트 밖")
+    if src.exists():
+        raise ValueError("원위치에 이미 파일이 있음")
+    if _sha(dst) != e["sha"]:
+        raise ValueError("정리 후 내용이 바뀜")
+    return src, dst, stop
+
+
 def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
-    """배치(기본: 가장 최근)를 원래 이름·위치로 되돌린다. 반환: (batch, 복원 목록, 건너뜀)."""
-    entries = read_journal(home)
-    restored = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
-    moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored]
-    if not moves:
+    """배치(기본: 가장 최근)를 원래 이름·위치로 되돌린다. 이동·격리 모두, 예전 organize·tidy 배치도.
+    반환: (batch, 복원 목록, 건너뜀)."""
+    todo = pending(home)
+    if not todo:
         raise ValueError("되돌릴 항목이 없습니다")
-    batch = batch or moves[-1]["batch"]
+    if batch:
+        group = [e for e in todo if e["batch"] == batch]
+    else:
+        last = todo[-1]
+        batch, group = last["batch"], [e for e in todo if (e["source"], e["batch"]) == (last["source"], last["batch"])]
     done, skipped = [], []
-    for e in [m for m in moves if m["batch"] == batch]:
-        src, dst, dest_root = Path(e["src"]), Path(e["dst"]), Path(e["dest_root"]).resolve()
+    for e in group:
         try:
-            if dest_root not in dst.resolve().parents or not dst.is_file() or dst.is_symlink():
-                raise ValueError("정리된 파일이 없음")
-            if src.parent.resolve() != Path(e["root"]).resolve():
-                raise ValueError("원래 루트 밖")
-            if src.exists():
-                raise ValueError("원위치에 이미 파일이 있음")
-            if _sha(dst) != e["sha"]:
-                raise ValueError("정리 후 내용이 바뀜")
+            src, dst, stop = _check_restorable(e, home)
+            src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dst), str(src))
-            for d in dst.parents:  # 비게 된 카테고리 폴더만 지운다(정리 루트 자체는 남김)
-                if d.resolve() == dest_root or dest_root not in d.resolve().parents:
+            if "mode" in e:
+                os.chmod(src, e["mode"])
+            for d in dst.parents:  # 비게 된 카테고리·배치 폴더만 지운다(정리 루트·격리 루트 자체는 남김)
+                if d.resolve() == stop or stop not in d.resolve().parents:
                     break
                 try:
                     d.rmdir()
@@ -542,8 +606,8 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
         except (OSError, ValueError) as ex:
             skipped.append((e["id"], str(ex)))
             continue
-        _append({"op": "restore", "batch": batch, "id": e["id"], "src": e["src"],
-                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
+        _append({"op": "restore", "batch": e["batch"], "id": e["id"], "src": e["src"],
+                 "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home, e["source"])  # 원래 기록 쪽에 복원을 남긴다
         done.append(e)
     if done:
         log.append("organize", f"되돌림 {len(done)}건 (batch {batch})", {"batch": batch, "count": len(done)},
@@ -609,6 +673,8 @@ def main(argv=None):
     a = sub.add_parser("apply", help="지정한 항목만 이동(삭제 없음)")
     a.add_argument("ids", nargs="*")
     a.add_argument("--category", choices=CATEGORIES, help="이 카테고리의 확정 항목 전부")
+    a.add_argument("--kind", choices=("duplicate", "extracted", "version", "stale"),
+                   help="이 종류의 치울 후보 전부(검토 필요 제외)")
     u = sub.add_parser("undo", help="원래 이름·위치로 되돌리기")
     u.add_argument("batch", nargs="?")
     sub.add_parser("status", help="이동·복원 이력")
@@ -630,9 +696,10 @@ def main(argv=None):
             it = edit(args.id, args.category, args.name)
             print(f"[{it['id']}] → {it['category']}/{Path(it['dest']).name}")
         elif args.cmd == "apply":
-            batch, done, skipped = apply(args.ids, args.category)
+            batch, done, skipped = apply(args.ids, args.category, args.kind)
             for i in done:
-                print(f"{Path(i['path']).name} → {i['dest']}")
+                verb = "격리" if i.get("action") == "quarantine" else "→"
+                print(f"{Path(i['path']).name} {verb} {i['dest']}")
             print(f"정리 {len(done)}건 (batch {batch}) — 되돌리기: ro organize undo {batch}")
             for cid, why in skipped:
                 print(f"건너뜀 [{cid}]: {why}")
@@ -643,7 +710,7 @@ def main(argv=None):
                 print(f"건너뜀 [{cid}]: {why}")
         else:
             for e in read_journal():
-                print(f"{e['ts']} {e['op']:7} {e['batch']} [{e['id']}] {e['src']}")
+                print(f"{e['ts']} {e['op']:10} {e['source']:8} {e['batch']} [{e['id']}] {e['src']}")
     except ValueError as e:
         raise SystemExit(str(e))
 
