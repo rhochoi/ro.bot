@@ -341,6 +341,34 @@ class PetTest(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_handler_exception_returns_json_500(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            srv = pet.start_server(rt, host="127.0.0.1", port=0)
+            port = srv.server_address[1]
+            try:
+                with mock.patch.object(rt, "snapshot", side_effect=RuntimeError("/Users/secret/path")):
+                    req = Request(f"http://127.0.0.1:{port}/api/state", headers={"X-Ro-Token": rt.token})
+                    with self.assertRaises(HTTPError) as ctx:
+                        urlopen(req, timeout=3)
+                self.assertEqual(ctx.exception.code, 500)
+                body = json.loads(ctx.exception.read().decode("utf-8"))
+                self.assertEqual(body, {"ok": False, "error": "server error: RuntimeError"})  # 예외 내용(경로)은 싣지 않는다
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_ask_form_keeps_question_on_failure(self):
+        html = pet.PET_HTML
+        submit = html[html.index('askForm.addEventListener("submit"'):]
+        self.assertIn("askInput.disabled = true;", submit)
+        self.assertIn("if (!res || !res.ok) {", submit)  # 엔진 실패(ok: false)도 질문을 되돌린다
+        self.assertIn("if (!askInput.value) askInput.value = q;", submit)
+        keydown = html[html.index('window.addEventListener("keydown"'):]
+        self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))
+        self.assertIn("div.title = text;", html)
+        self.assertNotIn('logsBox.innerHTML = ""', html)
+
     def test_snapshot_rereads_disk_only_when_files_change(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))

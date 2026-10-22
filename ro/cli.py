@@ -114,7 +114,7 @@ def main(argv=None):
     bp = bsub.add_parser("report", help="결과 요약")
     bp.add_argument("--file")
     lg = sub.add_parser("log", help="이벤트 기록·조회")
-    lsub = lg.add_subparsers(dest="log_cmd", required=True)
+    lsub = lg.add_subparsers(dest="log_cmd")  # 하위 명령 없이 `ro log`면 오늘 요약
     a = lsub.add_parser("add", help="이벤트 기록")
     a.add_argument("kind")
     a.add_argument("summary")
@@ -384,7 +384,7 @@ def main(argv=None):
                 raise SystemExit("기록을 삭제합니다(되돌릴 수 없음). 확인하려면 --yes를 붙이세요.")
             print(f"기록 파일 {log.delete(args.before)}개 삭제")
         else:
-            print(log.summarize(args.date))
+            print(log.summarize(getattr(args, "date", None) or time.strftime("%Y-%m-%d")))
     elif args.cmd == "pet":
         if args.status:
             st = pet.PetRuntime().snapshot()
@@ -406,7 +406,7 @@ def main(argv=None):
         for p in data["projects"]:
             git = p.get("git") or {}
             langs = ",".join(p["languages"]) or "-"
-            print(f"- {p['name']}  [{langs}]  {git.get('branch') or ''}  {p['path']}")
+            print(f"- {p['name']}  [{langs}]  {git.get('branch') or '-'}  {p['path']}")
             purpose = (p.get("summary") or {}).get("purpose")
             if purpose:
                 print(f"    {purpose}")

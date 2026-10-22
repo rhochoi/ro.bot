@@ -75,6 +75,25 @@ def _read_head(path, limit):
         return ""
 
 
+def clip(text, limit):
+    """limit자 이하로 자르되 줄·단어·마크다운 링크 중간에서 끊지 않고, 잘렸으면 …로 표시한다."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit - 1]
+    nl = cut.rfind("\n")
+    if nl > limit // 2:
+        return cut[:nl].rstrip() + "\n…"  # 여러 줄이면 반쯤 남은 줄은 통째로 버린다
+    sp = cut.rfind(" ")
+    if sp > limit // 2:
+        cut = cut[:sp]
+    lb = cut.rfind("[")
+    if lb >= 0:
+        tail = cut[lb:]
+        if "]" not in tail or ("](" in tail and ")" not in tail[tail.index("](") + 2:]):
+            cut = cut[:lb]  # 닫히지 않은 [링크](…)는 통째로 뺀다
+    return cut.rstrip() + "…"
+
+
 def _purpose(text):
     """README 첫 의미 있는 줄(제목 다음 첫 문장, 없으면 제목)."""
     title = None
@@ -86,8 +105,8 @@ def _purpose(text):
         if line.startswith("#"):
             title = title or line.lstrip("# ").strip()
             continue
-        return line[:PURPOSE_MAX]
-    return (title or "")[:PURPOSE_MAX]
+        return clip(line, PURPOSE_MAX)
+    return clip(title or "", PURPOSE_MAX)
 
 
 def summarize_project(path):
@@ -101,7 +120,7 @@ def summarize_project(path):
     for name in ("AGENTS.md", "CLAUDE.md"):
         f = path / name
         if f.is_file():
-            summary["guide"] = _read_head(f, GUIDE_MAX).strip()
+            summary["guide"] = clip(_read_head(f, GUIDE_MAX + 1).strip(), GUIDE_MAX)
             break
     try:
         entries = sorted(path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
