@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -174,13 +175,14 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
             dst = trash / f"{cid}-{src.name}"
             if dst.exists():
                 raise ValueError("격리 위치가 이미 있음")
+            mode = stat.S_IMODE(st.st_mode)  # 격리본은 비공개로 두되 복원 때 원래 권한을 되돌린다
             shutil.move(str(src), str(dst))
             os.chmod(dst, 0o600)
         except (OSError, ValueError) as e:
             skipped.append((cid, str(e)))
             continue
         _append({"op": "move", "batch": batch, "id": cid, "src": str(src), "dst": str(dst), "sha": sha,
-                 "root": str(root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
+                 "mode": mode, "root": str(root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
         done.append(it)
     if done:
         log.append("tidy", f"격리 {len(done)}건 (batch {batch})", {"batch": batch, "count": len(done)}, log_dir=log_dir)
@@ -210,6 +212,8 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
                 raise ValueError("격리본 해시 불일치")
             src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dst), str(src))
+            if "mode" in e:  # 이 필드가 생기기 전의 기록은 권한 정보가 없어 그대로 둔다
+                os.chmod(src, e["mode"])
         except (OSError, ValueError) as ex:
             skipped.append((e["id"], str(ex)))
             continue
