@@ -25,7 +25,7 @@ exit 0
 """
 CURL = """#!/bin/bash
 echo "curl $*" >> "$LOG"
-echo 'mkdir -p "$HOME/.local/bin" && cp "$STUBS/uv.real" "$HOME/.local/bin/uv"'
+echo 'echo "uv-installer UV_NO_MODIFY_PATH=$UV_NO_MODIFY_PATH" >> "$LOG"; mkdir -p "$HOME/.local/bin" && cp "$STUBS/uv.real" "$HOME/.local/bin/uv"'
 """
 PIPX = """#!/bin/bash
 echo "rog-bot 0.1.0"
@@ -85,6 +85,7 @@ class InstallScriptTest(unittest.TestCase):
         r, log = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("curl -LsSf https://astral.sh/uv/install.sh", log)
+        self.assertIn("uv-installer UV_NO_MODIFY_PATH=1", log)  # 셸 설정은 uv 설치기가 건드리지 않는다
         self.assertTrue(any(x.startswith("uv tool install") for x in log))
 
     def test_stops_without_repo_access(self):

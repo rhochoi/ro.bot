@@ -30,7 +30,7 @@ def update(runner=subprocess.run):
     if cmd is None:
         print(why)
         return 1
-    print(f"{why}: {' '.join(cmd)}")
+    print(f"{why}: {' '.join(cmd)}", flush=True)  # 하위 명령 출력보다 먼저 보이게
     return runner(cmd).returncode
 
 
