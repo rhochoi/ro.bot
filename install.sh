@@ -97,7 +97,7 @@ main() {
 
 다음 단계:
   ro map                         내 프로젝트 지도 만들기(~/.ro에만 저장)
-  ro organize scan               다운로드 폴더 정리안 보기(승인한 것만 옮김)
+  ro organize scan               다운로드 정리안: 분류 이동·치울 후보·보관(승인한 것만, undo 가능)
   ro ask "이 프로젝트 구조 설명해줘"
   ro pet                         펫 다시 띄우기(끄기: 메뉴바 아이콘 → 종료)
   ro update                      나중에 업데이트

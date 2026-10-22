@@ -1,6 +1,6 @@
 # 정리 통합 설계안 — `ro tidy` + `ro organize` → 하나의 흐름
 
-작성: 2026-10-22 · 상태: **설계 확정, C1~C3 구현됨**(결정 ①~④ 확정, §9 · 공용 탐지기 `ro/detect.py` · 구현 메모 §11). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
+작성: 2026-10-22 · 상태: **설계 확정, C1~C4 구현됨**(결정 ①~④ 확정, §9 · 공용 탐지기 `ro/detect.py` · 구현 메모 §11). 근거는 `ro/tidy.py`·`ro/organize.py`·`ro/pet.py`(main `5a65723`)와 같은 날 실제 `~/Downloads` 정리 결과.
 
 ## 1. 목표와 완료 조건
 
@@ -105,7 +105,7 @@ ro tidy …                                                         # 별칭: �
 | C1 ✅ | tidy 탐지기(중복·풀린 압축·옛 버전, 남길 쪽 재확인)를 공용 모듈 `ro/detect.py`로 분리. 동작 변화 없음 | 기존 테스트 전부 통과 + 실데이터 scan 결과 동일 |
 | C2 ✅ | organize scan이 탐지기를 호출해 `action`·`kind`·`keep` 기록, 중요 카테고리 보호, 오래됨 태그화, 남길 쪽 규칙(§3-5) | 같은 파일 이중 제안 0건 테스트, `KCC 경비 내역`형 사례 = keep |
 | C3 ✅ | 통합 apply/undo + 공용 journal, 옛 tidy·organize 기록 읽기 | 이동·격리 섞인 배치 apply→undo 원상복구, 옛 배치 undo |
-| C4 | show/edit 확장, `ro tidy` 별칭, README·install 안내 한 줄화, `ro eval` 통합 항목 | CLI 테스트, 별칭 안내 문구 |
+| C4 ✅ | show/edit 확장, `ro tidy` 별칭, README·install 안내 한 줄화, `ro eval` 통합 항목 | CLI 테스트, 별칭 안내 문구 |
 | C5 | 펫: 치울 후보 묶음·확보 용량 표시, 승인 게이트에 `kind` | 펫 단위 테스트 + 브라우저 렌더 확인 |
 | C6 | `trash` 용량 보기 / 비우기(N일 경과 배치만, 터미널 `yes` 확인, `purge` 기록) | 최근 배치 보존·비대화 실행 거부·확인 전 무변경·purge 후 undo 거부 테스트 |
 | C7 (선택) | 승인 기록 → `ro learn` 후보("풀린 압축 원본은 매번 승인함") — 자동 적용은 하지 않음 | 후보 생성 → 승인 → 다음 scan 기본 선택에 반영 |
@@ -150,4 +150,15 @@ ro tidy …                                                         # 별칭: �
 - `undo`(배치 생략)는 출처와 관계없이 가장 최근 배치. 펫의 되돌리기는 cleanup·organize 기록만 본다(tidy 배치는 CLI로).
 - 계획 파일은 아직 `~/.ro/organize/plan.json`(펫·CLI 호환). §5의 `cleanup/plan.json` 이전은 C4에서 별칭 작업과 함께.
 - 실데이터 확인(읽기 전용): 오늘 기록 organize 이동 93건(2배치)·tidy 격리 11건(1배치)을 새 리더가 모두 읽고 3배치를 되돌릴 수 있는 것으로 표시.
+
+**C4 (2026-10-22)**
+- `show --action move|quarantine|keep --kind …` 필터. `edit ID --action keep|move|quarantine`:
+  재무·계약 중복(`review`)은 `--action quarantine`으로 확정(탐지 근거 `kind`·`keep`은 유지 → 적용 직전 재확인도 그대로),
+  탐지 근거가 없는 파일을 직접 치울 후보로 지정하면 `kind: manual`. `keep`/`quarantine`과 `--category`·`--name`은 함께 쓸 수 없다.
+- `ro tidy`는 별칭: 안내(stderr) 후 `scan`→`organize scan --stale`, `apply`·`undo`·`status`→같은 organize 명령. `--min-size`는 무시.
+  정리 대상이 최상위 파일로 바뀐 점을 안내 문구에 적었다. 라이브러리 `ro/tidy.py`(`walk`·`check_root`·`python -m ro.tidy`)는 남아 있다.
+- 계획 파일은 `~/.ro/cleanup/plan.json`. 불러올 때 새 위치가 없으면 예전 `~/.ro/organize/plan.json`을 읽고, 다음 저장(scan·edit)부터 새 위치에 쓴다
+  → 업그레이드 직후에도 펫의 정리안이 사라지지 않는다.
+- README의 organize·tidy 두 줄을 한 줄로, 설치 안내의 정리 줄도 통합 흐름으로.
+- `ro eval`에 "정리 통합" 항목(파일당 제안 하나·재무 옛 버전 보관·격리+이동 한 배치 후 undo 원상복구·예전 tidy 배치 undo) — undo나 재무 보호를 끄면 FAIL하는 것 확인. 전체 18개.
 

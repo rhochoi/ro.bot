@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from . import (config, fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, organize, pet, route,
-               selfupdate, setup as setup_mod, tidy)
+               selfupdate, setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -30,8 +30,8 @@ def _version():
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv[:1] == ["tidy"]:  # --help 같은 선두 옵션까지 ro.tidy가 해석하도록 그대로 넘긴다
-        return tidy.main(argv[1:])
+    if argv[:1] == ["tidy"]:  # 별칭: ro organize로 합쳐졌다(--help 같은 선두 옵션까지 그대로 넘긴다)
+        return organize.tidy_alias(argv[1:])
     if argv[:1] == ["organize"]:
         return organize.main(argv[1:])
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
@@ -63,7 +63,7 @@ def main(argv=None):
     ic = asub.add_parser("ics", help="ICS 파일의 7일 내 일정을 로그로 기록")
     ic.add_argument("file")
     nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
-    sub.add_parser("tidy", add_help=False, help="중복·오래된 파일 정리(scan → apply ID → undo, 영구 삭제 없음)")  # 목록 표시용
+    sub.add_parser("tidy", add_help=False, help="(별칭) ro organize로 합쳐짐 — 곧 사라집니다")  # 목록 표시용
     sub.add_parser("organize", add_help=False,
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
     sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")

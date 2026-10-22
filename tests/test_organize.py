@@ -118,7 +118,7 @@ class OrganizeTest(unittest.TestCase):
         it = next(iter(self.scan().values()))
         self.assertEqual(it["category"], "재무")
         self.assertTrue(Path(it["dest"]).name.endswith("_3월 영수증.pdf"))
-        self.assertNotIn("SECRET-BODY", (self.ro / "organize" / "plan.json").read_text())
+        self.assertNotIn("SECRET-BODY", (self.ro / "cleanup" / "plan.json").read_text())
         self.assertFalse(self.dest.exists())
 
     def test_original_gets_clean_name_before_copy(self):
@@ -312,6 +312,7 @@ class OrganizeTest(unittest.TestCase):
         items = self.scan()
         batch, _, _ = organize.apply(self.ids(items, "data.xlsx"), home=self.ro, log_dir=self.log)
         legacy = self.ro / "organize" / "journal.jsonl"  # 예전 위치의 기록인 척 옮긴다
+        legacy.parent.mkdir(parents=True, exist_ok=True)
         (self.ro / "cleanup" / "journal.jsonl").rename(legacy)
         _, back, _ = organize.undo(batch, home=self.ro, log_dir=self.log)
         self.assertEqual(len(back), 1)
@@ -332,7 +333,7 @@ class OrganizeTest(unittest.TestCase):
     def test_legacy_plan_without_action_still_applies(self):
         self.w("data.xlsx", "d")
         self.scan()
-        path = self.ro / "organize" / "plan.json"
+        path = self.ro / "cleanup" / "plan.json"
         plan = json.loads(path.read_text())
         for i in plan["items"]:
             for k in ("action", "kind", "keep", "tags"):
@@ -340,6 +341,62 @@ class OrganizeTest(unittest.TestCase):
         path.write_text(json.dumps(plan, ensure_ascii=False))
         _, done, _ = organize.apply(category="표·데이터", home=self.ro, log_dir=self.log)
         self.assertEqual(len(done), 1)
+
+    def test_plan_saved_under_cleanup_and_legacy_plan_loads(self):
+        self.w("data.xlsx", "d")
+        self.scan()
+        new = self.ro / "cleanup" / "plan.json"
+        self.assertTrue(new.exists())
+        legacy = self.ro / "organize" / "plan.json"
+        legacy.parent.mkdir(parents=True)
+        new.rename(legacy)  # 업그레이드 전 계획만 있는 상태
+        self.assertEqual(len(organize.load_plan(self.ro)["items"]), 1)
+        it = organize.load_plan(self.ro)["items"][0]
+        organize.edit(it["id"], category="문서", home=self.ro, log_dir=self.log)
+        self.assertTrue(new.exists())  # 고치는 순간 새 위치로 저장된다
+
+    # --- 정리 통합 C4: edit --action · show 필터 ---
+
+    def test_edit_action_confirms_finance_duplicate(self):
+        self.w("3월 영수증.pdf", "same", OLD - 100)
+        dup = self.w("3월 영수증 (1).pdf", "same")
+        items = self.scan()
+        cid = items["3월 영수증 (1).pdf"]["id"]
+        it = organize.edit(cid, action="quarantine", home=self.ro, log_dir=self.log)
+        self.assertEqual((it["action"], it["kind"], it["review"]), ("quarantine", "duplicate", False))
+        self.assertTrue(it["keep"].endswith("3월 영수증.pdf"))  # 탐지 근거는 유지 → 적용 직전 재확인도 그대로
+        _, done, _ = organize.apply([cid], home=self.ro, log_dir=self.log)
+        self.assertEqual(len(done), 1)
+        self.assertFalse(dup.exists())
+
+    def test_edit_action_keep_manual_quarantine_and_move(self):
+        a = self.w("메모.txt", "m")
+        self.w("pic.png", "IMG")
+        self.zip_of("pic.zip", {"pic.png": "IMG"})
+        items = self.scan()
+        it = organize.edit(items["메모.txt"]["id"], action="quarantine", home=self.ro, log_dir=self.log)
+        self.assertEqual((it["kind"], it["keep"]), ("manual", None))
+        it = organize.edit(items["pic.zip"]["id"], action="keep", home=self.ro, log_dir=self.log)
+        self.assertEqual((it["action"], it["kind"]), ("keep", "manual"))
+        it = organize.edit(items["pic.zip"]["id"], action="move", home=self.ro, log_dir=self.log)
+        self.assertEqual(it["action"], "move")  # 카테고리를 안 줘도 원래 분류로 이동 항목이 된다
+        with self.assertRaises(ValueError):
+            organize.edit(items["pic.png"]["id"], category="문서", action="keep", home=self.ro, log_dir=self.log)
+        _, done, _ = organize.apply([items["메모.txt"]["id"]], home=self.ro, log_dir=self.log)
+        self.assertEqual(len(done), 1)
+        self.assertFalse(a.exists())
+
+    def test_show_filters(self):
+        self.w("pic.png", "IMG")
+        self.zip_of("pic.zip", {"pic.png": "IMG"})
+        self.w("메모.txt", "m")
+        self.scan()
+        plan = organize.load_plan(self.ro)
+        q = organize.show(plan, action="quarantine")
+        self.assertIn("pic.zip", q)
+        self.assertNotIn("메모.txt", q)
+        self.assertIn("pic.zip", organize.show(plan, kind="extracted"))
+        self.assertNotIn("pic.zip", organize.show(plan, action="move"))
 
     def test_show_lists_sections(self):
         self.w("pic.png", "IMG")

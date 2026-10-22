@@ -140,13 +140,56 @@ def _checks():
                 plan = organize.scan(root, dest)
                 organize.save_plan(plan, t / "ro")
                 unchanged = {p.name: p.read_text() for p in root.iterdir()} == before and not dest.exists()
-                no_body = "SECRETBODY" not in (t / "ro" / "organize" / "plan.json").read_text()
+                no_body = "SECRETBODY" not in (t / "ro" / "cleanup" / "plan.json").read_text()
                 ids = [i["id"] for i in plan["items"]]
                 _, done, skipped = organize.apply(ids, home=t / "ro", log_dir=str(t / "log"))
                 moved = len(done) == 1 and len(skipped) == 1  # 검토 필요 항목은 옮기지 않음
                 organize.undo(None, t / "ro", str(t / "log"))
             return unchanged and no_body and moved \
                 and {p.name: p.read_text() for p in root.iterdir()} == before
+
+    def cleanup_unified_safe():
+        # 정리 통합: 파일마다 제안 하나, 재무 옛 버전은 보관, 격리→이동을 한 배치로 적용해도 undo 한 번에 원상복구,
+        # 예전 tidy 격리 배치도 organize undo로 되돌린다. 영구 삭제 경로는 없다.
+        import zipfile
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            (root / "a.pdf").write_text("dup")
+            (root / "b.pdf").write_text("dup")
+            (root / "pic.png").write_text("IMG")
+            with zipfile.ZipFile(root / "pic.zip", "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            (root / "경비 내역.xlsx").write_text("old")
+            (root / "경비 내역 (1).xlsx").write_text("new")
+            for i, f in enumerate(sorted(root.iterdir())):
+                os.utime(f, (100 + i, 100 + i))
+            os.utime(root / "a.pdf", (1, 1))  # 중복의 원본
+            (root / "sub").mkdir()
+            (root / "sub" / "old.bin").write_text("x" * 5000)
+            os.utime(root / "sub" / "old.bin", (1, 1))
+            before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            ro_home, logs = t / "ro", str(t / "log")
+            with mock.patch("pathlib.Path.home", return_value=t / "home"), \
+                    mock.patch.object(route, "run", side_effect=AssertionError("엔진 호출")):
+                plan = organize.scan(root, t / "home" / "Documents" / "정리됨", extractor=lambda ps: {})
+                organize.save_plan(plan, ro_home)
+                by = {Path(i["path"]).name: i for i in plan["items"]}
+                one_each = len({i["path"] for i in plan["items"]}) == len(plan["items"])
+                kept = [n for n, i in by.items() if i["action"] == "keep"]
+                judged = (by["b.pdf"]["action"], by["pic.zip"]["action"]) == ("quarantine", "quarantine") and \
+                    len(kept) == 1 and kept[0].startswith("경비 내역")  # 재무 옛 버전은 치우지 않고 보관
+                _, done, _ = organize.apply([i["id"] for i in plan["items"]], home=ro_home, log_dir=logs)
+                applied = len(done) == len(plan["items"]) - 1  # 보관 1건만 남는다
+                organize.undo(None, ro_home, logs)
+                tplan = tidy.scan(root, min_size=1)
+                tidy.save_plan(tplan, ro_home)
+                old = [i["id"] for i in tplan["items"] if i["path"].endswith("old.bin")]
+                tidy.apply(old, ro_home, logs)
+                organize.undo(None, ro_home, logs)  # 예전 tidy 배치
+            after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            return one_each and judged and applied and old and after == before
 
     def revise_needs_approval():
         import datetime
@@ -252,6 +295,7 @@ def _checks():
         ("라우팅 개정안: 승인 전 routing.toml 불변", revise_needs_approval),
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
         ("분류 정리: 읽기 전용 스캔·본문 미저장·엔진 미호출·검토 항목 보류·복원 가능", organize_safe),
+        ("정리 통합: 파일당 제안 하나·재무 보관·격리+이동 한 배치 복원·예전 tidy 배치 복원", cleanup_unified_safe),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),

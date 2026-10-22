@@ -1,7 +1,7 @@
 """정리(분류·이름): 폴더 최상위 파일을 규칙·키워드로 분류하고 새 이름을 제안한 뒤, 승인한 항목만 옮긴다.
 
-원칙 (docs/ORGANIZE-DESIGN.md)
-- scan은 읽기 전용이다. 계획(~/.ro/organize/plan.json)만 쓴다. 파일 본문은 로컬에서 앞부분만 읽고 저장하지 않는다.
+원칙 (docs/ORGANIZE-DESIGN.md, docs/CLEANUP-DESIGN.md)
+- scan은 읽기 전용이다. 계획(~/.ro/cleanup/plan.json)만 쓴다. 파일 본문은 로컬에서 앞부분만 읽고 저장하지 않는다.
   외부 엔진으로는 아무것도 보내지 않는다(로컬 LLM 단계 L3는 아직 없음).
 - 분류: L1 확장자·이름 패턴 → L2 키워드(파일 이름·문서 앞부분). 확신도가 낮으면 '검토 필요'로만 표시하고 옮기지 않는다.
 - apply는 id나 카테고리를 직접 지정해야 하고 영구 삭제는 없다. 되돌림 로그(journal.jsonl)로 undo한다.
@@ -13,8 +13,8 @@
   기록은 ~/.ro/cleanup/journal.jsonl 하나에 남기고, undo는 예전 organize·tidy 기록의 배치도 되돌린다.
 
   ro organize scan [--root ~/Downloads] [--stale [--stale-days 180]]
-  ro organize show [--category 재무] [--review]
-  ro organize edit ID [--category 문서] [--name "전세 계약서"]
+  ro organize show [--action move|quarantine|keep] [--kind extracted] [--category 재무] [--review]
+  ro organize edit ID [--category 문서] [--name "전세 계약서"] | --action keep|move|quarantine
   ro organize apply ID [ID...] | --category 재무 | --kind extracted
   ro organize undo [BATCH] | status
 """
@@ -27,6 +27,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 import unicodedata
 import zipfile
@@ -68,6 +69,8 @@ KEYWORDS = {
     "학습·자료": ("논문", "강의", "보고서", "연구", "초록", "발표자료", "학회", "abstract", "references",
               "lecture", "thesis", "journal", "proceedings"),
 }
+ACTIONS = ("move", "quarantine", "keep")
+QUARANTINE_KINDS = ("duplicate", "extracted", "version", "stale")
 IMPORTANT = ("재무", "계약·서류")  # 옛 버전·오래됨 이유로는 치우지 않는 종류
 # 표·이미지처럼 키워드 세분을 하지 않는 파일도 이름이 이렇다면 같은 보호를 받는다(예: "KCC 경비 내역.xlsx")
 IMPORTANT_EXTRA = ("경비", "정산", "결산", "재무", "회계", "미수금", "세금", "예산", "영수")
@@ -283,7 +286,7 @@ def _unique(dest, taken):
 
 # ---------- 계획 ----------
 def _dir(home):
-    return Path(home).expanduser() / "organize"
+    return Path(home).expanduser() / "organize"  # 예전 계획 위치(읽기만)
 
 
 def _candidates(root, dest_root, now):
@@ -395,27 +398,51 @@ def _judge(root, files, items, now, stale, stale_days):
 
 
 def save_plan(plan, home=HOME):
-    fsutil.atomic_write(_dir(home) / "plan.json", json.dumps(log.redact(plan), ensure_ascii=False, indent=2))
+    fsutil.atomic_write(_cleanup_dir(home) / "plan.json", json.dumps(log.redact(plan), ensure_ascii=False, indent=2))
 
 
 def load_plan(home=HOME):
-    try:
-        return json.loads((_dir(home) / "plan.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        raise ValueError("계획이 없습니다. 먼저 `ro organize scan`을 실행하세요.")
+    """~/.ro/cleanup/plan.json, 없으면 예전 위치(~/.ro/organize/plan.json). 다음 저장부터 새 위치로 옮겨진다."""
+    for path in (_cleanup_dir(home) / "plan.json", _dir(home) / "plan.json"):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, json.JSONDecodeError):
+            break
+    raise ValueError("계획이 없습니다. 먼저 `ro organize scan`을 실행하세요.")
 
 
-def edit(cid, category=None, name=None, home=HOME, log_dir=log.LOG_DIR):
-    """카테고리·이름을 직접 확정한다. 확정한 항목은 '검토 필요'가 풀린다."""
+def edit(cid, category=None, name=None, home=HOME, log_dir=log.LOG_DIR, action=None):
+    """카테고리·이름·행동을 직접 확정한다. 확정한 항목은 '검토 필요'가 풀린다.
+    action: keep(그대로 둠) · quarantine(치울 후보, 재무·계약 중복의 확정 포함) · move(분류 폴더로 이동)."""
     plan = load_plan(home)
     it = next((i for i in plan["items"] if i["id"] == cid), None)
     if not it:
         raise ValueError(f"계획에 없는 id: {cid}")
     if category and category not in CATEGORIES:
         raise ValueError(f"카테고리는 다음 중 하나: {', '.join(CATEGORIES)}")
+    if action and action not in ACTIONS:
+        raise ValueError(f"행동은 다음 중 하나: {', '.join(ACTIONS)}")
+    if action in ("keep", "quarantine"):
+        if category or name:
+            raise ValueError("보관·치울 후보로 바꿀 때는 --category·--name을 함께 쓸 수 없습니다")
+        before = it.get("action", "move")
+        if action == "keep":
+            it.update(action="keep", kind="manual", keep=None)
+        elif it.get("kind") not in QUARANTINE_KINDS:
+            it.update(action="quarantine", kind="manual", keep=None)  # 직접 지정: 남길 쪽 없이 그 파일만 치운다
+        else:
+            it["action"] = "quarantine"  # 탐지 근거(kind·keep)는 그대로 두고 확정만 한다
+        it.update(review=False, edited=True, confidence=1.0)
+        it["reasons"] = [f"직접 {'보관' if action == 'keep' else '치울 후보'}로 지정"] + it["reasons"]
+        save_plan(plan, home)
+        log.append("organize_edit", f"{before} → {action}", {"from": before, "to": action, "kind": it["kind"]},
+                   log_dir=log_dir)
+        return it
     if it.get("action", "move") != "move":
-        if not category:
-            raise ValueError("치울 후보·보관 항목은 --category로 옮길 위치를 정하면 이동 항목으로 바뀝니다")
+        if not category and action != "move":
+            raise ValueError("치울 후보·보관 항목은 --category(또는 --action move)로 이동 항목으로 바꿉니다")
         it.update(action="move", kind="classified", keep=None)
     before = it["category"]
     dest = Path(it["dest"])
@@ -512,7 +539,7 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
             continue
         if it["review"]:
             skipped.append((cid, "검토 필요 — edit로 카테고리를 확정한 뒤 적용하세요" if action == "move"
-                            else "검토 필요(재무·계약 관련 중복) — 직접 확인한 뒤 정리하세요"))
+                            else "검토 필요(재무·계약 관련 중복) — 확인 후 edit ID --action quarantine로 확정하세요"))
             continue
         src = Path(it["path"])
         try:
@@ -620,9 +647,10 @@ def _mb(n):
     return f"{n / 1048576:.1f}MB" if n >= 1048576 else f"{n / 1024:.0f}KB"
 
 
-def show(plan, category=None, review=False):
+def show(plan, category=None, review=False, action=None, kind=None):
     lines = []
-    items = [i for i in plan["items"] if (not category or i["category"] == category) and (not review or i["review"])]
+    items = [i for i in plan["items"] if (not category or i["category"] == category) and (not review or i["review"])
+             and (not action or i.get("action", "move") == action) and (not kind or i.get("kind") == kind)]
     moves = [i for i in items if i.get("action", "move") == "move"]
     for cat in CATEGORIES:
         group = [i for i in moves if i["category"] == cat]
@@ -655,6 +683,37 @@ def show(plan, category=None, review=False):
     return "\n".join(lines)
 
 
+TIDY_NOTICE = ("`ro tidy`는 `ro organize`로 합쳐졌습니다(이 별칭은 곧 사라집니다). 같은 동작: "
+               "ro organize scan --stale · show --action quarantine · apply ID · undo · status. "
+               "정리 대상은 이제 폴더 최상위 파일입니다(하위 폴더는 남길 쪽 판단에만 쓰임).")
+
+
+def tidy_alias(argv=None):
+    """예전 `ro tidy` 명령을 organize로 넘긴다(docs/CLEANUP-DESIGN.md 결정 ①)."""
+    ap = argparse.ArgumentParser(prog="ro tidy", description="별칭 — ro organize로 합쳐짐. " + TIDY_NOTICE)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("scan", help="= ro organize scan --stale")
+    s.add_argument("--root", default=ROOT)
+    s.add_argument("--stale-days", type=int, default=STALE_DAYS)
+    s.add_argument("--min-size", type=int, help="무시됨(organize는 크기 하한이 없음)")
+    a = sub.add_parser("apply", help="= ro organize apply ID...")
+    a.add_argument("ids", nargs="+")
+    u = sub.add_parser("undo", help="= ro organize undo [BATCH]")
+    u.add_argument("batch", nargs="?")
+    sub.add_parser("status", help="= ro organize status")
+    args = ap.parse_args(argv)
+    print(TIDY_NOTICE, file=sys.stderr)
+    if args.cmd == "scan":
+        if args.min_size is not None:
+            print("--min-size는 무시합니다.", file=sys.stderr)
+        return main(["scan", "--root", args.root, "--stale", "--stale-days", str(args.stale_days)])
+    if args.cmd == "apply":
+        return main(["apply", *args.ids])
+    if args.cmd == "undo":
+        return main(["undo", *([args.batch] if args.batch else [])])
+    return main(["status"])
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ro organize", description="파일 분류·이름 정리 → 승인 후 이동 → 되돌리기")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -666,10 +725,13 @@ def main(argv=None):
     sh = sub.add_parser("show", help="계획 보기")
     sh.add_argument("--category", choices=CATEGORIES)
     sh.add_argument("--review", action="store_true", help="검토 필요 항목만")
+    sh.add_argument("--action", choices=ACTIONS, help="이동·치울 후보·보관 중 하나만")
+    sh.add_argument("--kind", choices=QUARANTINE_KINDS + ("classified", "important", "manual"))
     e = sub.add_parser("edit", help="카테고리·이름 확정")
     e.add_argument("id")
     e.add_argument("--category", choices=CATEGORIES)
     e.add_argument("--name", help="새 제목(날짜 접두어는 유지, 확장자는 바꾸지 않음)")
+    e.add_argument("--action", choices=ACTIONS, help="행동을 직접 정한다(재무·계약 중복은 quarantine으로 확정)")
     a = sub.add_parser("apply", help="지정한 항목만 이동(삭제 없음)")
     a.add_argument("ids", nargs="*")
     a.add_argument("--category", choices=CATEGORIES, help="이 카테고리의 확정 항목 전부")
@@ -689,12 +751,15 @@ def main(argv=None):
             print(show(plan))
             print("아무것도 옮기지 않았습니다. 적용(이동 항목): ro organize apply ID... | --category 카테고리")
         elif args.cmd == "show":
-            print(show(load_plan(), args.category, args.review))
+            print(show(load_plan(), args.category, args.review, args.action, args.kind))
         elif args.cmd == "edit":
-            if not args.category and not args.name:
-                raise ValueError("--category나 --name 중 하나는 필요합니다")
-            it = edit(args.id, args.category, args.name)
-            print(f"[{it['id']}] → {it['category']}/{Path(it['dest']).name}")
+            if not args.category and not args.name and not args.action:
+                raise ValueError("--category·--name·--action 중 하나는 필요합니다")
+            it = edit(args.id, args.category, args.name, action=args.action)
+            if it["action"] == "move":
+                print(f"[{it['id']}] → {it['category']}/{Path(it['dest']).name}")
+            else:
+                print(f"[{it['id']}] {it['action']} ({it['kind']})")
         elif args.cmd == "apply":
             batch, done, skipped = apply(args.ids, args.category, args.kind)
             for i in done:
