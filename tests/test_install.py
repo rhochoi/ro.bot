@@ -27,6 +27,12 @@ CURL = """#!/bin/bash
 echo "curl $*" >> "$LOG"
 echo 'echo "uv-installer UV_NO_MODIFY_PATH=$UV_NO_MODIFY_PATH" >> "$LOG"; mkdir -p "$HOME/.local/bin" && cp "$STUBS/uv.real" "$HOME/.local/bin/uv"'
 """
+# 기본은 비공개 저장소처럼 실패한다. GIT_PUBLIC=1이면 공개 저장소처럼 읽힌다(실제 네트워크 접근 없음).
+GIT = """#!/bin/bash
+echo "git $*" >> "$LOG"
+[ "$1" = ls-remote ] && [ "${GIT_PUBLIC:-}" = 1 ] && exit 0
+exit 128
+"""
 PIPX = """#!/bin/bash
 echo "rog-bot 0.1.0"
 """
@@ -40,6 +46,7 @@ class InstallScriptTest(unittest.TestCase):
         self.stubs.mkdir()
         self.home.mkdir()
         self.fake_bin = self.home / ".local" / "bin"
+        self.stub("git", GIT)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -70,6 +77,20 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("uv tool update-shell", log)  # 가짜 bin이 PATH에 없으므로
         self.assertIn("ro doctor", log)
         self.assertFalse(any(x.startswith("curl") for x in log))
+
+    def test_public_repo_needs_no_gh(self):
+        self.stub("uv", UV)  # gh 스텁 없음: 공개 저장소면 gh 없이 끝나야 한다
+        r, log = self.run_script(GIT_PUBLIC="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(any(x.startswith("gh") for x in log))
+        self.assertIn("uv tool install --force --python 3.13 git+https://github.com/rhochoi/ro.bot.git", log)
+        self.assertIn("ro doctor", log)
+
+    def test_private_repo_without_gh_stops(self):
+        self.stub("uv", UV)
+        r, log = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("gh가 필요합니다", r.stderr)
 
     def test_ref_pins_branch(self):
         self.stub("gh", GH)

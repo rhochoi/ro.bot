@@ -11,8 +11,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from . import (ambient, ask, collectors, distill, learn, log, mapper, pet, revise, route, stats,
-               tidy)
+from . import (ambient, ask, collectors, distill, learn, log, mapper, organize, pet, revise, route,
+               stats, tidy)
 
 HOME = "~/.ro"
 
@@ -123,6 +123,31 @@ def _checks():
                 tidy.undo(None, t / "ro", str(t / "log"))
                 return {p.name for p in root.iterdir()} == before
 
+    def organize_safe():
+        # scan은 읽기 전용·본문 미저장·엔진 호출 없음, apply→undo는 원래 이름·위치로 복원한다.
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            (root / "2026-01-02 영수증.txt").write_text("SECRETBODY 결제")
+            (root / "memo.xyz").write_text("x")
+            for f in root.iterdir():
+                os.utime(f, (1, 1))
+            before = {p.name: p.read_text() for p in root.iterdir()}
+            dest = t / "home" / "Documents" / "정리됨"
+            with mock.patch("pathlib.Path.home", return_value=t / "home"), \
+                    mock.patch.object(route, "run", side_effect=AssertionError("엔진 호출")):
+                plan = organize.scan(root, dest)
+                organize.save_plan(plan, t / "ro")
+                unchanged = {p.name: p.read_text() for p in root.iterdir()} == before and not dest.exists()
+                no_body = "SECRETBODY" not in (t / "ro" / "organize" / "plan.json").read_text()
+                ids = [i["id"] for i in plan["items"]]
+                _, done, skipped = organize.apply(ids, home=t / "ro", log_dir=str(t / "log"))
+                moved = len(done) == 1 and len(skipped) == 1  # 검토 필요 항목은 옮기지 않음
+                organize.undo(None, t / "ro", str(t / "log"))
+            return unchanged and no_body and moved \
+                and {p.name: p.read_text() for p in root.iterdir()} == before
+
     def revise_needs_approval():
         import datetime
         import shutil
@@ -209,6 +234,7 @@ def _checks():
         ("증류: 승인 전 기록 없음·원문 미전송·읽기 모드", distill_needs_approval_and_no_raw),
         ("라우팅 개정안: 승인 전 routing.toml 불변", revise_needs_approval),
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
+        ("분류 정리: 읽기 전용 스캔·본문 미저장·엔진 미호출·검토 항목 보류·복원 가능", organize_safe),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
