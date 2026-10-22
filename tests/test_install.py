@@ -1,5 +1,6 @@
 """install.sh: gh·uv·curl·pipx를 가짜 명령으로 바꿔 흐름만 검증한다(네트워크·실제 설치 없음)."""
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -57,7 +58,9 @@ class InstallScriptTest(unittest.TestCase):
         p.chmod(0o755)
 
     def run_script(self, **env):
+        # 사용자 터미널처럼 UTF-8 로캘로 돌린다(macOS bash 3.2는 이때 "$VAR한글"을 변수 이름으로 읽는다)
         e = {"PATH": f"{self.stubs}:/usr/bin:/bin", "HOME": str(self.home), "LOG": str(self.log),
+             "LANG": "ko_KR.UTF-8", "LC_ALL": "ko_KR.UTF-8",
              "FAKE_BIN": str(self.fake_bin), "STUBS": str(self.stubs), "RO_YES": "1", **env}
         r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True, timeout=30,
                            stdin=subprocess.DEVNULL)
@@ -66,6 +69,12 @@ class InstallScriptTest(unittest.TestCase):
 
     def test_syntax(self):
         self.assertEqual(subprocess.run(["bash", "-n", str(SCRIPT)]).returncode, 0)
+
+    def test_no_bare_variable_before_non_ascii(self):
+        # "$PYTHON은" → bash 3.2 + UTF-8에서 'PYTHON\xec' 미정의 변수로 죽는다. 비ASCII 앞 변수는 ${}로 감싼다.
+        bad = [line for line in SCRIPT.read_text(encoding="utf-8").splitlines()
+               if re.search(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]", line)]
+        self.assertEqual(bad, [])
 
     def test_installs_with_existing_uv(self):
         self.stub("gh", GH)
