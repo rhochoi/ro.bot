@@ -652,6 +652,28 @@ PET_HTML = r"""<!DOCTYPE html>
   .bubble.hidden {
     display: none;
   }
+  /* 창(오버레이 360×520) 안에 맞춘다: 툴바·입력창은 고정, 가운데(팔레트·대화·카드·기록)만 스크롤 */
+  .bubble {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  .stage > .pet-wrap { flex-shrink: 0; }
+  .bubble-scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-right: -6px;
+    padding-right: 6px;
+    scrollbar-width: thin;
+  }
+  .bubble-scroll > * { flex-shrink: 0; }
   .bubble-top {
     display: flex;
     justify-content: space-between;
@@ -1523,6 +1545,7 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <div id="bubbleScroll" class="bubble-scroll">
     <!-- 모션 가이드 12종 즉시 상호작용 팔레트 -->
     <div id="actPalette" class="act-palette">
       <div class="act-palette-title">
@@ -1607,6 +1630,7 @@ PET_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div id="logsBox" class="logs"></div>
+    </div>
 
     <form id="askForm" class="ask-form">
       <input id="askInput" class="ask-input" type="text" placeholder="오늘 할 일이나 프로젝트를 물어보세요..." autocomplete="off" />
@@ -2208,11 +2232,13 @@ function applyState(st) {
   }
 
   renderOrganize(st.organize);
+  const wasPending = pendingKind;
   pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
 
   if (st.write_pending) {
     writeCard.style.display = "flex";
     writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
+    if (!wasPending) writeCard.scrollIntoView({ block: "nearest" });  // 새 승인 요청은 보이는 곳으로
   } else {
     writeCard.style.display = "none";
   }
@@ -2325,7 +2351,10 @@ function renderOrganize(o) {
 orgToggleBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   orgCard.classList.toggle("hidden");
-  orgToggleBtn.textContent = orgCard.classList.contains("hidden") ? "정리 ▸" : "정리 ▾";
+  const open = !orgCard.classList.contains("hidden");
+  orgToggleBtn.textContent = open ? "정리 ▾" : "정리 ▸";
+  if (open && !actPalette.classList.contains("hidden")) actToggleBtn.click();  // 자리를 내준다
+  if (open) orgCard.scrollIntoView({ block: "nearest" });
 });
 orgScanBtn.addEventListener("click", async () => {
   orgScanBtn.disabled = true;
