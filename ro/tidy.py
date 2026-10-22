@@ -1,11 +1,15 @@
-"""Phase 4 정리: 중복·오래된 파일을 읽기 전용으로 보고하고, 승인한 항목만 격리(이동)한다.
+"""Phase 4 정리: 중복·풀린 압축 원본·옛 버전·오래된 파일을 읽기 전용으로 보고하고, 승인한 항목만 격리(이동)한다.
 
 원칙
 - scan은 읽기 전용이다. 계획(~/.ro/tidy/plan.json)만 쓴다.
 - apply는 id를 직접 지정해야 하고, 영구 삭제는 하지 않는다 — ~/.ro/tidy/trash/로 옮기고
   되돌림 로그(journal.jsonl)에 남긴다. undo로 원위치 복원(내용 해시 확인).
 - 비밀 파일·숨김 항목·프로젝트 폴더(.git·package.json 등)·심볼릭 링크는 건드리지 않는다. 홈 디렉터리 자체나 홈 밖은 루트가 될 수 없다.
-- 계획과 달라진 파일(크기·수정시각·해시)은 적용하지 않는다.
+- 계획과 달라진 파일(크기·수정시각·해시)은 적용하지 않는다. 남겨 둔 쪽(중복 원본·최신 버전·풀린 파일)이
+  사라졌거나 바뀌었으면 그 항목도 적용하지 않는다.
+- 풀린 압축 원본: 압축 안의 모든 파일이 옆(또는 압축 이름 폴더)에 같은 CRC로 있을 때만 제안한다.
+- 옛 버전: 같은 폴더·확장자에서 `_v3`, `(1)`, `_1` 같은 표시만 다른 묶음. `(1)`·`_1`은 표시 없는 원본이
+  함께 있을 때만 묶는다(`1장_1`·`1장_2` 같은 연속물 오탐 방지). 가장 높은 vN, 없으면 가장 최근 수정본을 남긴다.
 
   ro tidy scan --root DIR [--stale-days 180] [--min-size 4096]
   ro tidy apply ID [ID...] | undo [BATCH]
@@ -15,9 +19,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import time
+import unicodedata
+import zipfile
+import zlib
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,6 +39,10 @@ MIN_SIZE = 4096  # 작은 파일은 정리 이득이 적고 설정·소스 조�
 PROJECT_MARKERS = (".git", "package.json", "pyproject.toml", "Cargo.toml", "go.mod", "Package.swift",
                    "Makefile", "requirements.txt", "pom.xml", "build.gradle")
 STALE_DAYS = 180
+MAX_ZIP_ENTRIES = 5000  # 이보다 큰 압축은 대조 비용이 커서 판단하지 않는다
+VERSION_RE = re.compile(r"^(?P<base>.*?)[ _-]v(?P<n>\d+)$", re.I)  # 기획안_v13
+COPY_RES = (re.compile(r"^(?P<base>.*?)\s*\((?P<n>\d+)\)$"),  # 문서 (1)
+            re.compile(r"^(?P<base>.*?)[_-](?P<n>\d{1,2})$"))  # 문서_1
 
 
 def _dir(home):
@@ -75,14 +87,113 @@ def walk(root):
             yield p, st
 
 
+def _crc(path):
+    c = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            c = zlib.crc32(chunk, c)
+    return c
+
+
+def _zip_name(info):
+    """압축 안 파일 이름. UTF-8 표시가 없으면 cp437로 읽힌 바이트를 UTF-8·CP949로 다시 해석한다(한글 이름)."""
+    if info.flag_bits & 0x800:
+        return info.filename
+    raw = info.filename.encode("cp437", errors="replace")
+    for enc in ("utf-8", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return info.filename
+
+
+def _find_plain(base, rel, root):
+    """base/rel 위치의 일반 파일(유니코드 정규화 차이 허용). 루트 밖·링크는 없는 것으로 본다."""
+    for form in ("NFC", "NFD"):
+        p = base / unicodedata.normalize(form, rel)
+        if p.is_file() and not p.is_symlink() and root in p.resolve().parents:
+            return p
+    return None
+
+
+def extracted_copy(zpath, root):
+    """압축 안의 모든 파일이 이미 풀려 있으면 그 폴더(압축과 같은 폴더 또는 압축 이름 폴더), 아니면 None."""
+    found = _extracted(zpath, root)
+    return found[0] if found else None
+
+
+def _extracted(zpath, root):
+    """(풀린 폴더, 풀린 파일 경로들) 또는 None."""
+    try:
+        with zipfile.ZipFile(zpath) as zf:
+            infos = [i for i in zf.infolist() if not i.is_dir()]
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        return None
+    entries = []
+    for i in infos:
+        name = _zip_name(i)
+        parts = Path(name).parts
+        if name.startswith("/") or ".." in parts:
+            return None  # 위치가 이상한 압축은 판단하지 않는다
+        if parts[0] == "__MACOSX" or parts[-1].startswith("._") or parts[-1] == ".DS_Store":
+            continue
+        entries.append((name, i.CRC))
+    if not entries or len(entries) > MAX_ZIP_ENTRIES:
+        return None
+    zpath = Path(zpath)
+    for base in (zpath.parent, zpath.parent / zpath.stem):
+        hits = [_find_plain(base, n, root) for n, _ in entries]
+        if all(hits) and all(_crc(p) == c for p, (_, c) in zip(hits, entries)):
+            return base, hits
+    return None
+
+
+def _version_key(stem):
+    """(비교용 이름, 번호, 명시적 vN 여부). 표시가 없으면 번호 None."""
+    stem = unicodedata.normalize("NFC", stem)
+    m = VERSION_RE.match(stem)
+    if m:
+        return m["base"].strip().lower(), int(m["n"]), True
+    for r in COPY_RES:
+        m = r.match(stem)
+        if m and m["base"].strip():
+            return m["base"].strip().lower(), int(m["n"]), False
+    return stem.strip().lower(), None, False
+
+
+def version_groups(files):
+    """files: [(Path, stat)] → [(남길 것, [옛 버전...])]. 같은 폴더·확장자에서 표시만 다른 이름끼리 묶는다."""
+    groups = defaultdict(list)
+    for p, st in files:
+        base, n, explicit = _version_key(p.stem)
+        groups[(p.parent, p.suffix.lower(), base)].append((p, st, n, explicit))
+    out = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        explicit = [m for m in members if m[3]]
+        if not explicit and not any(m[2] is None for m in members):
+            continue  # (1)·_1만 있고 원본이 없으면 버전이 아니라 연속물일 수 있다
+        pool = explicit or members
+        keeper = max(pool, key=lambda m: (m[2] if explicit else 0, m[1].st_mtime))
+        out.append(((keeper[0], keeper[1]), [(p, st) for p, st, _, _ in members if p != keeper[0]]))
+    return out
+
+
+def _k(p):
+    return unicodedata.normalize("NFC", str(p))
+
+
 def scan(root, stale_days=STALE_DAYS, min_size=MIN_SIZE, now=None):
     root = check_root(root)
     now = now or time.time()
     by_size = defaultdict(list)
-    for p, st in walk(root):
+    files = list(walk(root))
+    for p, st in files:
         if st.st_size >= min_size:
             by_size[st.st_size].append((p, st))
-    items, claimed = [], set()
+    items, claimed = [], set()  # 유니코드 정규화한 경로 문자열(한글 NFD/NFC 차이)
     for size, group in by_size.items():
         if len(group) < 2:
             continue
@@ -94,13 +205,30 @@ def scan(root, stale_days=STALE_DAYS, min_size=MIN_SIZE, now=None):
                 continue
             same.sort(key=lambda x: (x[1].st_mtime, len(str(x[0])), str(x[0])))
             keeper = same[0][0]  # 가장 오래된 것을 원본으로 남긴다
-            claimed.add(keeper)  # 원본은 오래됐다는 이유로도 제안하지 않는다(내용이 사라지지 않게)
+            claimed.add(_k(keeper))  # 원본은 오래됐다는 이유로도 제안하지 않는다(내용이 사라지지 않게)
             for p, st in same[1:]:
-                claimed.add(p)
-                items.append(_item("duplicate", p, st, sha, f"{keeper} 와 내용 동일"))
+                claimed.add(_k(p))
+                items.append(_item("duplicate", p, st, sha, f"{keeper} 와 내용 동일", keeper))
     for size, group in by_size.items():
         for p, st in group:
-            if p not in claimed and now - st.st_mtime > stale_days * 86400:
+            if _k(p) not in claimed and p.suffix.lower() == ".zip":
+                found = _extracted(p, root)
+                if found:
+                    base, hits = found
+                    claimed.add(_k(p))
+                    claimed.update(_k(h) for h in hits)  # 풀린 파일은 압축을 치우면 유일한 사본이 되므로 다른 이유로 제안하지 않는다
+                    where = "같은 폴더" if base == p.parent else f"{base.name}/ 폴더"
+                    items.append(_item("extracted", p, st, None, f"압축 안 파일이 모두 {where}에 풀려 있음(CRC 일치)",
+                                       base))
+    for keeper, olds in version_groups([(p, st) for p, st in files if _k(p) not in claimed]):
+        claimed.add(_k(keeper[0]))  # 최신본은 오래됐다는 이유로도 제안하지 않는다
+        for p, st in olds:
+            claimed.add(_k(p))
+            if st.st_size >= min_size:
+                items.append(_item("version", p, st, None, f"{keeper[0].name} 의 옛 버전", keeper[0]))
+    for size, group in by_size.items():
+        for p, st in group:
+            if _k(p) not in claimed and now - st.st_mtime > stale_days * 86400:
                 items.append(_item("stale", p, st, None, f"{int((now - st.st_mtime) / 86400)}일간 수정 없음"))
     items.sort(key=lambda i: -i["size"])
     total = len(items)
@@ -109,9 +237,25 @@ def scan(root, stale_days=STALE_DAYS, min_size=MIN_SIZE, now=None):
     return plan
 
 
-def _item(kind, p, st, sha, reason):
-    return {"id": hashlib.sha1(f"{kind}:{p}".encode()).hexdigest()[:8], "kind": kind, "path": str(p),
-            "size": st.st_size, "mtime": int(st.st_mtime), "sha": sha, "reason": reason}
+def _item(kind, p, st, sha, reason, keep=None):
+    it = {"id": hashlib.sha1(f"{kind}:{p}".encode()).hexdigest()[:8], "kind": kind, "path": str(p),
+          "size": st.st_size, "mtime": int(st.st_mtime), "sha": sha, "reason": reason}
+    if keep is not None:
+        it["keep"] = str(keep)  # 남겨 두는 쪽: 적용 직전에 아직 있는지 다시 확인한다
+    return it
+
+
+def _kept_ok(it, src, root):
+    """남겨 두는 쪽이 그대로인지. 계획에 keep이 없는(이전 형식) 항목은 확인하지 않는다."""
+    keep = it.get("keep")
+    if not keep:
+        return True
+    if it["kind"] == "extracted":
+        return extracted_copy(src, root) == Path(keep)
+    k = Path(keep)
+    if not k.is_file() or k.is_symlink():
+        return False
+    return it["kind"] != "duplicate" or _sha(k) == it["sha"]
 
 
 def save_plan(plan, home=HOME):
@@ -172,6 +316,8 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
             sha = it["sha"] or _sha(src)
             if it["sha"] and _sha(src) != it["sha"]:
                 raise ValueError("내용 해시가 달라짐")
+            if not _kept_ok(it, src, root):
+                raise ValueError("남겨 둔 쪽이 사라지거나 바뀜 — 다시 scan 하세요")
             dst = trash / f"{cid}-{src.name}"
             if dst.exists():
                 raise ValueError("격리 위치가 이미 있음")
