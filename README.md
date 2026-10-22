@@ -7,7 +7,7 @@ ro — 개인 로컬 전용 비서. 이 Mac의 프로젝트를 읽기 전용으�
 비공개 저장소라 GitHub 읽기 권한과 로그인(`gh auth login`)이 필요합니다. Python 3.11+, pipx 필요(`brew install pipx`).
 
 ```bash
-pipx install git+https://github.com/rhochoi/rog.bot.git
+pipx install git+https://github.com/rhochoi/ro.bot.git
 ro doctor      # 설치·엔진(claude/codex/agy) 점검. 쓰는 엔진만 있으면 됩니다
 ro update      # 업데이트 (pipx 설치본은 pipx upgrade rog-bot)
 ```
