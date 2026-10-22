@@ -1,12 +1,14 @@
 """ro 터미널 CLI.  python -m ro map | show"""
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
 import time
 from pathlib import Path
 
-from . import config, fixtures, setup as setup_mod, fsutil, ambient, ask, bench, harden, learn, log, mapper, route
+from . import (config, fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, organize, pet, route,
+               selfupdate, setup as setup_mod, tidy)
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -19,8 +21,21 @@ def emit(args, event, text, err=False):
         print(text, file=sys.stderr if err else sys.stdout)
 
 
+def _version():
+    try:
+        return importlib.metadata.version(selfupdate.PACKAGE)
+    except importlib.metadata.PackageNotFoundError:
+        return "개발 체크아웃(미설치)"
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["tidy"]:  # --help 같은 선두 옵션까지 ro.tidy가 해석하도록 그대로 넘긴다
+        return tidy.main(argv[1:])
+    if argv[:1] == ["organize"]:
+        return organize.main(argv[1:])
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
+    ap.add_argument("--version", action="version", version=f"ro {_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("map", help="읽기 전용 스캔으로 지도 생성")
     m.add_argument("--roots", nargs="+", help="스캔할 폴더(기본: ~/.ro/config.json의 roots, 없으면 ~/Developer ~/Projects)")
@@ -30,6 +45,7 @@ def main(argv=None):
     r = sub.add_parser("route", help="엔진 선택 후 작업 실행")
     r.add_argument("task")
     r.add_argument("--engine", choices=route.ENGINES, help="수동 지정(기본: 자동 추천)")
+    r.add_argument("--model", type=route.valid_model, help="이번 실행만 모델 지정(기본: routing.toml)")
     r.add_argument("--write", action="store_true", help="쓰기 허용(실행 전 확인)")
     r.add_argument("--cwd")
     r.add_argument("--dry-run", action="store_true", help="추천만 출력")
@@ -47,9 +63,15 @@ def main(argv=None):
     ic = asub.add_parser("ics", help="ICS 파일의 7일 내 일정을 로그로 기록")
     ic.add_argument("file")
     nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
+    sub.add_parser("tidy", add_help=False, help="중복·오래된 파일 정리(scan → apply ID → undo, 영구 삭제 없음)")  # 목록 표시용
+    sub.add_parser("organize", add_help=False,
+                   help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
+    sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")
+    sub.add_parser("doctor", help="설치 상태·엔진 점검")
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
     q.add_argument("question")
     q.add_argument("--engine", choices=route.ENGINES)
+    q.add_argument("--model", type=route.valid_model, help="이번 실행만 모델 지정(기본: routing.toml)")
     q.add_argument("--project", help="프로젝트 이름 직접 지정")
     q.add_argument("--no-context", action="store_true", help="컨텍스트 없이 질문만 전송")
     q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
@@ -104,6 +126,12 @@ def main(argv=None):
     dl.add_argument("--yes", action="store_true")
     sm = lsub.add_parser("summary", help="일일 요약")
     sm.add_argument("--date", default=time.strftime("%Y-%m-%d"))
+    pt = sub.add_parser("pet", help="코덱스 펫 스타일 데스크톱 오버레이 + 메뉴바 비서")
+    pt.add_argument("--port", type=int, default=0, help="로컬 서버 포트 (기본: 자동 할당)")
+    pt.add_argument("--browser", action="store_true", help="데스크톱 오버레이 대신 브라우저로 열기")
+    pt.add_argument("--no-wander", action="store_true", help="자동 산책 이동 끄기")
+    pt.add_argument("--status", action="store_true", help="현재 펫 표정·층 상태를 JSON으로 출력 후 종료")
+    pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)
 
     if args.cmd == "map":
@@ -112,6 +140,10 @@ def main(argv=None):
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
+    elif args.cmd == "update":
+        raise SystemExit(selfupdate.update())
+    elif args.cmd == "doctor":
+        raise SystemExit(selfupdate.doctor())
     elif args.cmd == "bench":
         home = Path("~/.ro").expanduser()
         if args.bench_cmd == "gen":
@@ -137,7 +169,11 @@ def main(argv=None):
         elif args.bench_cmd == "run":
             tpath = Path(args.tasks).expanduser()
             if not tpath.exists():
-                tpath = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
+                here = Path(__file__).resolve().parent
+                tpath = next((c for c in (here.parent / "bench" / "tasks.example.json",
+                                          here / "_data" / "tasks.example.json") if c.is_file()), None)
+                if tpath is None:
+                    raise SystemExit("예시 과제 파일을 찾지 못했습니다.")
                 print(f"과제 파일이 없어 예시를 사용합니다: {tpath}")
             tasks = bench.load_tasks(tpath)
             only = [x for x in args.only.split(",") if x]
@@ -194,8 +230,8 @@ def main(argv=None):
             raise SystemExit(2)
         pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,
                       engine=args.engine or config.load().get("engine") or None, rules=learn.load_rules(), project=args.project,
-                      history=ask.load_history() if args.cont else None)
-        head = (f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
+                      model=args.model, history=ask.load_history() if args.cont else None)
+        head = (f"엔진: {pl['engine']} / 모델: {pl['model'] or '엔진 기본'} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
                 f" / 컨텍스트 {len(pl['context'])}자")
         preview = {"event": "preview", "engine": pl["engine"], "category": pl["category"],
                    "projects": pl["projects"], "context_chars": len(pl["context"]), "prompt": pl["prompt"]}
@@ -267,14 +303,15 @@ def main(argv=None):
         if pref:
             engine, reason = pref, "수동 지정" if args.engine else "설정의 선호 엔진"
         mode = "write" if args.write else "read"
-        print(f"엔진: {engine} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
+        model = args.model or route.model_for(category, engine)
+        print(f"엔진: {engine} / 모델: {model or '엔진 기본'} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
         if args.dry_run:
             return
         if args.write and input("쓰기 모드로 실행합니다. 계속? [y/N] ").strip().lower() != "y":
             raise SystemExit("취소됨")
-        res = route.run(engine, args.task, args.write, args.cwd)
+        res = route.run(engine, args.task, args.write, args.cwd, model=model)
         log.append("route", args.task[:80], {
-            "engine": engine, "category": category, "mode": mode, "ok": res["ok"],
+            "engine": engine, "model": model, "category": category, "mode": mode, "ok": res["ok"],
             "code": res["code"], "duration": res["duration"]}, engine=engine)
         print(res["output"])
         if res["reason"]:
@@ -286,10 +323,14 @@ def main(argv=None):
                 raise SystemExit("후보 id가 필요합니다.")
             try:
                 c = getattr(learn, args.action)(args.id)
-            except KeyError as e:
+            except (KeyError, ValueError) as e:
                 raise SystemExit(str(e))
             log.append(f"learn_{args.action}", c["text"], {"id": c["id"], "kind": c["kind"]})
             print(f"{args.action}: [{c['id']}] {c['text']}")
+            if args.action == "approve" and c.get("kind") == "routing":
+                print(f"{route.USER_ROUTING.expanduser()}을 수정함 — 내용을 확인하세요")
+            if args.action == "approve" and c.get("kind") == "memory":
+                print(f"{learn.MEMORY_PATH}에 추가됨 — 내용을 확인하세요")
         elif args.action == "rules":
             for r in learn.load_rules():
                 print(f"[{r['id']}] {r['text']} ({r['evidence']})")
@@ -344,6 +385,17 @@ def main(argv=None):
             print(f"기록 파일 {log.delete(args.before)}개 삭제")
         else:
             print(log.summarize(args.date))
+    elif args.cmd == "pet":
+        if args.status:
+            st = pet.PetRuntime().snapshot()
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+            return
+        if args.build:
+            out = pet.launch(build_only=True)
+            print(f"macOS 오버레이 빌드 완료: {out}")
+            return
+        pet.launch(port=args.port, mode="browser" if args.browser else "overlay",
+                   wander=not args.no_wander)
     else:
         path = Path(args.map).expanduser()
         if not path.exists():

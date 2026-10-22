@@ -190,7 +190,7 @@ def build_prompt(question, context, history=None):
     return "\n\n".join(parts)
 
 
-def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), project=None,
+def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), project=None, model=None,
          history=None, log_dir=log.LOG_DIR):
     """실행 계획(엔진·프로젝트·프롬프트)만 계산한다. 아무것도 실행하지 않는다."""
     projects = mapdata["projects"] if mapdata else []
@@ -208,7 +208,7 @@ def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), p
     # 엔진은 프로젝트 폴더의 훅·설정(.claude/, AGENTS.md)을 따른다. 이름이 질문에 걸렸다는
     # 이유만으로 남의 폴더(~/Downloads 등)에서 실행하지 않는다: 사용자가 있는 곳 또는 --project로 지정한 곳만.
     return {"engine": eng, "category": category, "reason": reason,
-            "model": route.model_for(category, eng),
+            "model": model or route.model_for(category, eng),
             "projects": [p["name"] for p in picked], "context": context,
             "question": question,
             "prompt": build_prompt(question, context, history),

@@ -14,7 +14,16 @@ from pathlib import Path
 ENGINES = ("claude", "codex", "agy")
 TIMEOUT = 600
 
-ROUTING_PATH = Path(__file__).resolve().parent.parent / "routing.toml"
+ROUTING_PATH = Path(__file__).resolve().parent.parent / "routing.toml"  # 저장소 체크아웃
+PACKAGED_ROUTING = Path(__file__).resolve().parent / "_data" / "routing.toml"  # 설치본(wheel)에 포함
+USER_ROUTING = Path("~/.ro/routing.toml")  # 개인 덮어쓰기: 있으면 최우선
+
+
+def routing_path():
+    for p in (USER_ROUTING.expanduser(), ROUTING_PATH, PACKAGED_ROUTING):
+        if p.is_file():
+            return p
+    return ROUTING_PATH
 
 # routing.toml을 읽지 못할 때의 기본값: (카테고리, 키워드, 엔진)
 BUILTIN_RULES = [
@@ -24,17 +33,12 @@ BUILTIN_RULES = [
 ]
 
 
-USER_ROUTING = Path("~/.ro/routing.toml").expanduser()
-
-
 def load_routing(path=None):
     """routing.toml → {"rules": [(카테고리, 키워드, 엔진, 모델)], "fallback": (엔진, 모델)}.
     파일이 없거나 형식이 틀리면 경고 후 내장 기본값을 쓴다(엔진 호출이 막히지 않게).
-    path가 없으면 사용자 파일(~/.ro/routing.toml)을, 그것도 없으면 번들 기본 파일을 쓴다."""
-    if path is None:
-        path = USER_ROUTING if USER_ROUTING.exists() else ROUTING_PATH
+    path가 없으면 routing_path()(사용자 파일 → 저장소 → 설치본 순)를 쓴다."""
     try:
-        data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+        data = tomllib.loads(Path(path or routing_path()).read_text(encoding="utf-8"))
         rules = []
         for name, r in data["routes"].items():
             if r["engine"] not in ENGINES or not r["keywords"]:
@@ -81,6 +85,13 @@ def model_for(category, engine, routing=None):
         if c == category:
             return model if e == engine else ""
     return routing["fallback"][1] if routing["fallback"][0] == engine else ""
+
+
+def valid_model(name):
+    """실행마다 지정하는 모델 이름. 옵션처럼 보이는 값은 엔진 인자로 넘기지 않는다."""
+    if not name or name.startswith("-") or any(c.isspace() for c in name):
+        raise ValueError(f"모델 이름이 올바르지 않습니다: {name!r}")
+    return name
 
 
 def choose(task, rules=(), routing=None):
