@@ -23,9 +23,15 @@ BUILTIN_RULES = [
 ]
 
 
-def load_routing(path=ROUTING_PATH):
+USER_ROUTING = Path("~/.ro/routing.toml").expanduser()
+
+
+def load_routing(path=None):
     """routing.toml → {"rules": [(카테고리, 키워드, 엔진, 모델)], "fallback": (엔진, 모델)}.
-    파일이 없거나 형식이 틀리면 경고 후 내장 기본값을 쓴다(엔진 호출이 막히지 않게)."""
+    파일이 없거나 형식이 틀리면 경고 후 내장 기본값을 쓴다(엔진 호출이 막히지 않게).
+    path가 없으면 사용자 파일(~/.ro/routing.toml)을, 그것도 없으면 번들 기본 파일을 쓴다."""
+    if path is None:
+        path = USER_ROUTING if USER_ROUTING.exists() else ROUTING_PATH
     try:
         data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
         rules = []
@@ -106,15 +112,16 @@ def build_command(engine, task, write=False, cwd=None, skip_git_check=False, mod
 
 
 def run(engine, task, write=False, cwd=None, skip_git_check=False, model=""):
-    """엔진 실행. 반환: dict(ok, code, duration, output)."""
+    """엔진 실행. 반환: dict(ok, code, duration, output, reason). reason: ""|not_installed|timeout|failed."""
     if not shutil.which(engine):
-        return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치"}
+        return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치", "reason": "not_installed"}
     start = time.time()
     try:
         r = subprocess.run(build_command(engine, task, write, cwd, skip_git_check, model), capture_output=True,
                            text=True, timeout=TIMEOUT, cwd=cwd,
                            stdin=subprocess.DEVNULL)  # 엔진이 상속된 stdin을 기다리며 멈추지 않게
         return {"ok": r.returncode == 0, "code": r.returncode,
-                "duration": round(time.time() - start, 1), "output": r.stdout or r.stderr}
+                "duration": round(time.time() - start, 1), "output": r.stdout or r.stderr,
+                "reason": "" if r.returncode == 0 else "failed"}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "code": None, "duration": float(TIMEOUT), "output": "시간 초과"}
+        return {"ok": False, "code": None, "duration": float(TIMEOUT), "output": "시간 초과", "reason": "timeout"}

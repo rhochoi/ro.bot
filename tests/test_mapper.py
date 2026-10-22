@@ -54,3 +54,19 @@ class MapperTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultRootsTest(unittest.TestCase):
+    def test_default_excludes_personal_folders_and_config_overrides(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from ro import mapper
+        for bad in ("~/Downloads", "~/Documents"):
+            self.assertNotIn(bad, mapper.DEFAULT_ROOTS)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(mapper.default_roots(d), mapper.DEFAULT_ROOTS)
+            (Path(d) / "config.json").write_text(json.dumps({"roots": ["~/Work"]}))
+            self.assertEqual(mapper.default_roots(d), ["~/Work"])
+            (Path(d) / "config.json").write_text("깨짐")
+            self.assertEqual(mapper.default_roots(d), mapper.DEFAULT_ROOTS)

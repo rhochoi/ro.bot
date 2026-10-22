@@ -15,7 +15,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("map", help="읽기 전용 스캔으로 지도 생성")
-    m.add_argument("--roots", nargs="+", default=mapper.DEFAULT_ROOTS)
+    m.add_argument("--roots", nargs="+", help="스캔할 폴더(기본: ~/.ro/config.json의 roots, 없으면 ~/Developer ~/Projects)")
     m.add_argument("--out", default=DEFAULT_OUT)
     s = sub.add_parser("show", help="저장된 지도 요약")
     s.add_argument("--map", default=DEFAULT_OUT)
@@ -77,7 +77,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.cmd == "map":
-        data = mapper.build_map(args.roots)
+        data = mapper.build_map(args.roots or mapper.default_roots())
         out = mapper.save_map(data, args.out)
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
@@ -85,7 +85,7 @@ def main(argv=None):
     elif args.cmd == "bench":
         home = Path("~/.ro").expanduser()
         if args.bench_cmd == "gen":
-            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
+            mapdata = mapper.build_map(mapper.default_roots())
             mapper.save_map(mapdata, DEFAULT_OUT)
             extra = [n for n in args.projects.split(",") if n]
             repo = Path(__file__).resolve().parent.parent
@@ -159,7 +159,7 @@ def main(argv=None):
     elif args.cmd == "ask":
         mapdata = ask.load_map()
         if mapdata is None:
-            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
+            mapdata = mapper.build_map(mapper.default_roots())
             mapper.save_map(mapdata, DEFAULT_OUT)
             print(f"지도가 없어 새로 만들었습니다 (프로젝트 {len(mapdata['projects'])}개)")
         pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,

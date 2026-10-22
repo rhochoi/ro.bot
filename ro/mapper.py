@@ -16,7 +16,17 @@ from pathlib import Path
 
 from . import fsutil, log
 
-DEFAULT_ROOTS = ["~/Claude", "~/Downloads", "~/Developer", "~/Documents"]
+# 배포 기본값: 개인 폴더(Downloads·Documents 등)는 스캔하지 않는다. 사용자가 ~/.ro/config.json의
+# {"roots": [...]}로 지정한다.
+DEFAULT_ROOTS = ["~/Developer", "~/Projects"]
+
+
+def default_roots(home="~/.ro"):
+    try:
+        roots = json.loads((Path(home).expanduser() / "config.json").read_text(encoding="utf-8")).get("roots")
+    except (OSError, ValueError, AttributeError):
+        roots = None
+    return [str(r) for r in roots] if isinstance(roots, list) and roots else list(DEFAULT_ROOTS)
 MAX_DEPTH = 3
 
 SKIP_DIRS = {
