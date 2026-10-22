@@ -631,6 +631,11 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-fg);
     overflow: hidden;
   }
+  /* 브라우저 모드(--browser): 투명 오버레이가 아니므로 배경을 깔아 카드·글자 대비를 지킨다 */
+  body.web { background: #DCD6CA; }
+  @media (prefers-color-scheme: dark) {
+    body.web { background: #2F2C28; }
+  }
   .stage {
     position: relative;
     width: 100%; height: 100%;
@@ -666,6 +671,7 @@ PET_HTML = r"""<!DOCTYPE html>
      ========================================================= */
   .bubble {
     width: 326px;
+    max-width: 100%;
     background: var(--panel-bg);
     color: var(--panel-fg);
     border: 1.5px solid var(--panel-border);
@@ -835,7 +841,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border-radius: 16px;
     font-size: 11.5px;
     line-height: 1.48;
-    max-height: 128px;
+    max-height: min(240px, 42vh);
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: keep-all;
@@ -872,6 +878,13 @@ PET_HTML = r"""<!DOCTYPE html>
     gap: 6px;
   }
   .gate-title { font-size: 10.5px; opacity: 0.72; font-weight: 700; }
+  .gate-text {  /* 긴 후보 문장이 카드를 한없이 키우지 않게: 4줄까지, 전체는 title로 */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .fb-done { font-size: 10.5px; opacity: 0.8; }
   .gate-actions { display: flex; gap: 6px; }
   .pill-btn {
     background: var(--bubble-fg);
@@ -1626,6 +1639,7 @@ PET_HTML = r"""<!DOCTYPE html>
           <button id="fbYes" class="chip-btn" title="첫 답변 수용">수용</button>
           <button id="fbNo" class="chip-btn" title="아쉬움">거절</button>
         </span>
+        <span id="fbDone" class="fb-done" style="display:none;"></span>
       </div>
     </div>
 
@@ -1651,8 +1665,8 @@ PET_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div id="ruleCard" class="gate-card" style="display:none;">
-      <div class="gate-title">규칙 학습 후보 발견 (승인 전 미적용)</div>
-      <div id="ruleText"></div>
+      <div id="ruleTitle" class="gate-title">규칙 학습 후보 발견 (승인 전 미적용)</div>
+      <div id="ruleText" class="gate-text"></div>
       <div class="gate-actions">
         <button id="ruleApproveBtn" class="pill-btn">승인</button>
         <button id="ruleRejectBtn" class="pill-btn ghost">거절</button>
@@ -1747,6 +1761,9 @@ const orgUndoBtn = document.getElementById("orgUndoBtn");
 const orgMsg = document.getElementById("orgMsg");
 const writeText = document.getElementById("writeText");
 const feedbackBtns = document.getElementById("feedbackBtns");
+const fbDone = document.getElementById("fbDone");
+const ruleTitle = document.getElementById("ruleTitle");
+let fbDoneUntil = 0;
 const logsBox = document.getElementById("logsBox");
 const askForm = document.getElementById("askForm");
 const askInput = document.getElementById("askInput");
@@ -2140,6 +2157,21 @@ let webLastDxSign = 0;
 let webShakeCount = 0;
 let webLastReversal = 0;
 
+/* 브라우저 모드: 창을 옮길 수 없으니 펫과 말풍선을 페이지 안에서 옮긴다(둘 다 화면 밖으로 나가지 않게) */
+let stageX = 0;
+let stageY = 0;
+function moveStageBy(dx, dy) {
+  const prev = [stageX, stageY];
+  stageX += dx;
+  stageY += dy;
+  stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
+  if (rects.some((r) => r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight)) {
+    [stageX, stageY] = prev;
+    stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  }
+}
+
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
   if (e.target.closest("button") || e.target.closest("input")) return;
@@ -2189,7 +2221,8 @@ window.addEventListener("mousemove", (e) => {
   if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
-    notifyHost({ type: "moveBy", dx, dy });
+    if (isNativeHost) notifyHost({ type: "moveBy", dx, dy });
+    else moveStageBy(dx, dy);
   }
 });
 
@@ -2274,6 +2307,7 @@ function applyState(st) {
     const projs = (st.last_answer.projects || []).join(", ") || "-";
     subStatusText.textContent = `${st.counts.today_events}건 기록 완료 · ${st.last_answer.engine} (${projs})`;
     feedbackBtns.style.display = st.last_answer.feedback_given ? "none" : "inline-flex";
+    fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
   } else if (!locked) {
     userMsgRow.style.display = "none";
     roMainBubble.textContent = st.status_line;
@@ -2297,7 +2331,10 @@ function applyState(st) {
     const r = st.pending_rules[0];
     currentRuleId = r.id;
     ruleCard.style.display = "flex";
+    const total = (st.counts && st.counts.pending_rules) || st.pending_rules.length;
+    ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total} · 승인 전 미적용)`;
     ruleText.textContent = `${r.text} (${r.evidence})`;
+    ruleText.title = ruleText.textContent;
   } else {
     currentRuleId = null;
     ruleCard.style.display = "none";
@@ -2441,15 +2478,24 @@ orgUndoBtn.addEventListener("click", async () => {
   orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
   await refreshState();
 });
-document.getElementById("fbYes").addEventListener("click", async () => {
-  await apiPost("/api/feedback", { accepted: true });
+async function sendFeedback(accepted) {
+  let res = null;
+  try {
+    res = await apiPost("/api/feedback", { accepted });
+  } catch (err) {}
+  // 눌렀는지 알 수 있게 잠깐 결과를 남긴다(버튼은 한 번만 누를 수 있다)
+  fbDone.textContent = res && res.ok ? (accepted ? "수용 반영 ✓" : "거절 반영 ✓") : "반영 실패 — 다시 눌러 주세요";
+  fbDoneUntil = Date.now() + 2500;
   await refreshState();
-});
-document.getElementById("fbNo").addEventListener("click", async () => {
-  await apiPost("/api/feedback", { accepted: false });
-  await refreshState();
-});
+}
+document.getElementById("fbYes").addEventListener("click", () => sendFeedback(true));
+document.getElementById("fbNo").addEventListener("click", () => sendFeedback(false));
 
+if (!isNativeHost) {
+  // 브라우저에서는 처음부터 대화창을 연다: 봇만 덩그러니 있으면 무엇을 할지 알기 어렵다
+  document.body.classList.add("web");
+  setBubbleOpen(true);
+}
 refreshState();
 window._poll = setInterval(refreshState, 450);
 </script>

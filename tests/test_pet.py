@@ -358,6 +358,28 @@ class PetTest(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_browser_mode_fallbacks(self):
+        html = pet.PET_HTML
+        init = html[html.index("if (!isNativeHost) {\n  // 브라우저에서는"):]
+        self.assertIn('document.body.classList.add("web");', init)  # 불투명 배경
+        self.assertIn("setBubbleOpen(true);", init)  # 대화창을 처음부터 연다
+        self.assertIn("body.web { background:", html)
+        self.assertIn("else moveStageBy(dx, dy);", html)  # 웹 드래그는 페이지 안에서 옮긴다
+        self.assertIn("max-height: min(240px, 42vh);", html)
+
+    def test_rule_counter_and_feedback_ack(self):
+        html = pet.PET_HTML
+        self.assertIn("ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total}", html)
+        self.assertIn('id="ruleText" class="gate-text"', html)
+        self.assertIn('"수용 반영 ✓"', html)
+
+    def test_menubar_icon_is_template_and_permission_hint(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("img.isTemplate = true", src)  # 다크 메뉴바에서도 보인다
+        self.assertIn("fill(using: .clear)", src)  # 눈은 템플릿 알파로 뚫는다
+        self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
+        self.assertIn("Privacy_ScreenCapture", src)
+
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]
