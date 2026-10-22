@@ -76,6 +76,13 @@ def model_for(category, engine, routing=None):
     return routing["fallback"][1] if routing["fallback"][0] == engine else ""
 
 
+def valid_model(name):
+    """실행마다 지정하는 모델 이름. 옵션처럼 보이는 값은 엔진 인자로 넘기지 않는다."""
+    if not name or name.startswith("-") or any(c.isspace() for c in name):
+        raise ValueError(f"모델 이름이 올바르지 않습니다: {name!r}")
+    return name
+
+
 def choose(task, rules=(), routing=None):
     """(engine, category, reason). 승인된 규칙이 있으면 우선, 없으면 routing.toml 키워드 규칙."""
     routing = routing or load_routing()

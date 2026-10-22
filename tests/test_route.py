@@ -66,3 +66,20 @@ class RouteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelOverrideTest(unittest.TestCase):
+    def test_valid_model_rejects_option_like_values(self):
+        self.assertEqual(route.valid_model("claude-sonnet-5-5"), "claude-sonnet-5-5")
+        for bad in ("", "--dangerously-skip-permissions", "-m x", "a b"):
+            with self.assertRaises(ValueError):
+                route.valid_model(bad)
+
+    def test_flag_beats_routing_table_in_ask_plan(self):
+        from ro import ask
+        routing = {"rules": [], "fallback": ("claude", "claude-sonnet-5-5")}
+        with mock.patch.object(route, "load_routing", return_value=routing):
+            base = ask.plan("안녕", None, use_context=False)
+            over = ask.plan("안녕", None, use_context=False, model="other-model")
+        self.assertEqual(base["model"], "claude-sonnet-5-5")
+        self.assertEqual(over["model"], "other-model")

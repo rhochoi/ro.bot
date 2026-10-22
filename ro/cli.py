@@ -22,6 +22,7 @@ def main(argv=None):
     r = sub.add_parser("route", help="엔진 선택 후 작업 실행")
     r.add_argument("task")
     r.add_argument("--engine", choices=route.ENGINES, help="수동 지정(기본: 자동 추천)")
+    r.add_argument("--model", type=route.valid_model, help="이번 실행만 모델 지정(기본: routing.toml)")
     r.add_argument("--write", action="store_true", help="쓰기 허용(실행 전 확인)")
     r.add_argument("--cwd")
     r.add_argument("--dry-run", action="store_true", help="추천만 출력")
@@ -42,6 +43,7 @@ def main(argv=None):
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
     q.add_argument("question")
     q.add_argument("--engine", choices=route.ENGINES)
+    q.add_argument("--model", type=route.valid_model, help="이번 실행만 모델 지정(기본: routing.toml)")
     q.add_argument("--project", help="프로젝트 이름 직접 지정")
     q.add_argument("--no-context", action="store_true", help="컨텍스트 없이 질문만 전송")
     q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
@@ -163,8 +165,8 @@ def main(argv=None):
             mapper.save_map(mapdata, DEFAULT_OUT)
             print(f"지도가 없어 새로 만들었습니다 (프로젝트 {len(mapdata['projects'])}개)")
         pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,
-                      engine=args.engine, rules=learn.load_rules(), project=args.project)
-        print(f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
+                      engine=args.engine, rules=learn.load_rules(), project=args.project, model=args.model)
+        print(f"엔진: {pl['engine']} / 모델: {pl['model'] or '엔진 기본'} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
               f" / 컨텍스트 {len(pl['context'])}자")
         if args.dry_run:
             print("--- 전송될 프롬프트 ---")
@@ -182,14 +184,15 @@ def main(argv=None):
         if args.engine:
             engine, reason = args.engine, "수동 지정"
         mode = "write" if args.write else "read"
-        print(f"엔진: {engine} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
+        model = args.model or route.model_for(category, engine)
+        print(f"엔진: {engine} / 모델: {model or '엔진 기본'} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
         if args.dry_run:
             return
         if args.write and input("쓰기 모드로 실행합니다. 계속? [y/N] ").strip().lower() != "y":
             raise SystemExit("취소됨")
-        res = route.run(engine, args.task, args.write, args.cwd)
+        res = route.run(engine, args.task, args.write, args.cwd, model=model)
         log.append("route", args.task[:80], {
-            "engine": engine, "category": category, "mode": mode, "ok": res["ok"],
+            "engine": engine, "model": model, "category": category, "mode": mode, "ok": res["ok"],
             "code": res["code"], "duration": res["duration"]}, engine=engine)
         print(res["output"])
         raise SystemExit(0 if res["ok"] else 1)
