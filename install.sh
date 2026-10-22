@@ -62,7 +62,7 @@ main() {
 
   local src="git+https://github.com/$REPO.git"
   [ -n "${RO_REF:-}" ] && src="$src@$RO_REF"
-  say "ro 설치: $src (Python $PYTHON은 필요하면 uv가 받습니다)"
+  say "ro 설치: $src (Python ${PYTHON}은 필요하면 uv가 받습니다)"
   uv tool install --force --python "$PYTHON" "$src"
 
   local bin
