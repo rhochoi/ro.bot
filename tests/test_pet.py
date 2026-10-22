@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -213,9 +214,24 @@ class PetTest(unittest.TestCase):
             srv = pet.start_server(rt, host="127.0.0.1", port=0)
             port = srv.server_address[1]
             try:
-                with urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3) as resp:
+                # 상태 조회도 토큰 필요(질문·경로·로그가 담겨 있다)
+                with self.assertRaises(HTTPError) as ctx0:
+                    urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3)
+                self.assertEqual(ctx0.exception.code, 403)
+                req_state = Request(f"http://127.0.0.1:{port}/api/state", headers={"X-Ro-Token": rt.token})
+                with urlopen(req_state, timeout=3) as resp:
                     st = json.loads(resp.read().decode("utf-8"))
                     self.assertIn(st["mood"], pet.MOODS)
+
+                # DNS 리바인딩: 다른 Host 이름이면 토큰이 박힌 첫 페이지도 내주지 않는다
+                for path in ("/", "/api/state"):
+                    req_host = Request(f"http://127.0.0.1:{port}{path}",
+                                       headers={"Host": f"evil.example:{port}", "X-Ro-Token": rt.token})
+                    with self.assertRaises(HTTPError) as ctx_h:
+                        urlopen(req_host, timeout=3)
+                    self.assertEqual(ctx_h.exception.code, 403)
+                with urlopen(f"http://localhost:{port}/", timeout=3) as resp_l:
+                    self.assertIn(rt.token, resp_l.read().decode("utf-8"))
 
                 # 토큰 없이 POST 시 403 거부
                 req_bad = Request(f"http://127.0.0.1:{port}/api/feedback",
@@ -286,11 +302,10 @@ class PetTest(unittest.TestCase):
             srv = pet.start_server(rt, host="127.0.0.1", port=0)
             port = srv.server_address[1]
             try:
-                # GET /api/action?name=alert
-                with urlopen(f"http://127.0.0.1:{port}/api/action?name=alert&duration=2.5", timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    self.assertTrue(data["ok"])
-                    self.assertEqual(data["action"], "alert")
+                # 상태를 바꾸는 GET은 없앴다(토큰 없이 모션을 바꿀 수 있었음)
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(f"http://127.0.0.1:{port}/api/action?name=alert&duration=2.5", timeout=3)
+                self.assertEqual(ctx.exception.code, 404)
 
                 # POST /api/action with token
                 req = Request(f"http://127.0.0.1:{port}/api/action",
@@ -304,6 +319,50 @@ class PetTest(unittest.TestCase):
             finally:
                 srv.shutdown()
                 srv.server_close()
+
+    def test_snapshot_rereads_disk_only_when_files_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            log.append("note", "첫 기록", log_dir=d)
+            with mock.patch.object(pet.log, "read_all", wraps=log.read_all) as read_all, \
+                 mock.patch.object(pet.harden, "audit", wraps=pet.harden.audit) as audit:
+                rt.snapshot()
+                rt.snapshot()
+                self.assertEqual((read_all.call_count, audit.call_count), (1, 1))
+                log.append("note", "두 번째", log_dir=d)
+                self.assertEqual(rt.snapshot()["counts"]["today_events"], 2)
+                self.assertEqual(read_all.call_count, 2)
+                # 파일이 그대로여도 감사는 TTL이 지나면 다시 돈다(로그 재파싱은 없음)
+                with mock.patch.object(pet.time, "monotonic", return_value=time.monotonic() + pet.AUDIT_TTL_SEC + 1):
+                    rt.snapshot()
+                self.assertEqual((read_all.call_count, audit.call_count), (2, 3))
+
+    def test_ask_rejects_while_busy(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            rt.busy = True
+            with mock.patch.object(pet.ask, "load_map", return_value={"projects": []}), \
+                 mock.patch.object(pet.ask, "plan", return_value={"engine": "codex", "prompt": "q", "cwd": d}), \
+                 mock.patch.object(pet.route, "run") as run:
+                res = rt.ask_question("두 번째 질문")
+            self.assertFalse(res["ok"])
+            self.assertTrue(res["busy"])
+            run.assert_not_called()
+            self.assertTrue(rt.busy)  # 먼저 돌던 질문의 busy를 풀지 않는다
+
+    def test_stop_existing_pets_skips_reused_pid(self):
+        with tempfile.TemporaryDirectory() as d:
+            other = subprocess.Popen(["sleep", "30"])
+            try:
+                (Path(d) / "pet.pid").write_text(json.dumps({"py_pid": other.pid, "host_pid": other.pid}))
+                with mock.patch.object(pet.sys, "platform", "linux"):  # 실제 ro-pet-host pkill은 건너뛴다
+                    pet.stop_existing_pets(home=d)
+                time.sleep(0.2)
+                self.assertIsNone(other.poll())  # ro 펫이 아닌 프로세스는 살아 있어야 한다
+            finally:
+                other.kill()
+                other.wait()
+        self.assertFalse(pet._is_pet_process(1, "py_pid"))
 
 
 if __name__ == "__main__":
