@@ -1,18 +1,30 @@
 """ro 터미널 CLI.  python -m ro map | show"""
 import argparse
+import importlib.metadata
 import json
 import os
 import sys
 import time
 from pathlib import Path
 
-from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, pet, route
+from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, pet, route, selfupdate, tidy
 
 DEFAULT_OUT = "~/.ro/map.json"
 
 
+def _version():
+    try:
+        return importlib.metadata.version(selfupdate.PACKAGE)
+    except importlib.metadata.PackageNotFoundError:
+        return "개발 체크아웃(미설치)"
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["tidy"]:  # --help 같은 선두 옵션까지 ro.tidy가 해석하도록 그대로 넘긴다
+        return tidy.main(argv[1:])
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
+    ap.add_argument("--version", action="version", version=f"ro {_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("map", help="읽기 전용 스캔으로 지도 생성")
     m.add_argument("--roots", nargs="+", default=mapper.DEFAULT_ROOTS)
@@ -40,6 +52,9 @@ def main(argv=None):
     ic = asub.add_parser("ics", help="ICS 파일의 7일 내 일정을 로그로 기록")
     ic.add_argument("file")
     nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
+    sub.add_parser("tidy", add_help=False, help="중복·오래된 파일 정리(scan → apply ID → undo, 영구 삭제 없음)")  # 목록 표시용
+    sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")
+    sub.add_parser("doctor", help="설치 상태·엔진 점검")
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
     q.add_argument("question")
     q.add_argument("--engine", choices=route.ENGINES)
@@ -90,6 +105,10 @@ def main(argv=None):
         print(f"프로젝트 {len(data['projects'])}개 → {out}")
         log.append("map", f"프로젝트 {len(data['projects'])}개 스캔",
                    {"roots": data["roots"], "out": str(out)})
+    elif args.cmd == "update":
+        raise SystemExit(selfupdate.update())
+    elif args.cmd == "doctor":
+        raise SystemExit(selfupdate.doctor())
     elif args.cmd == "bench":
         home = Path("~/.ro").expanduser()
         if args.bench_cmd == "gen":
@@ -115,7 +134,11 @@ def main(argv=None):
         elif args.bench_cmd == "run":
             tpath = Path(args.tasks).expanduser()
             if not tpath.exists():
-                tpath = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
+                here = Path(__file__).resolve().parent
+                tpath = next((c for c in (here.parent / "bench" / "tasks.example.json",
+                                          here / "_data" / "tasks.example.json") if c.is_file()), None)
+                if tpath is None:
+                    raise SystemExit("예시 과제 파일을 찾지 못했습니다.")
                 print(f"과제 파일이 없어 예시를 사용합니다: {tpath}")
             tasks = bench.load_tasks(tpath)
             only = [x for x in args.only.split(",") if x]
@@ -213,9 +236,9 @@ def main(argv=None):
             log.append(f"learn_{args.action}", c["text"], {"id": c["id"], "kind": c["kind"]})
             print(f"{args.action}: [{c['id']}] {c['text']}")
             if args.action == "approve" and c.get("kind") == "routing":
-                print("routing.toml을 수정함 — `git diff routing.toml` 확인 후 커밋하세요(자동 커밋 안 함)")
+                print(f"{route.USER_ROUTING.expanduser()}을 수정함 — 내용을 확인하세요")
             if args.action == "approve" and c.get("kind") == "memory":
-                print("memory/ro-model.md에 추가됨 — `git diff memory/` 확인 후 커밋하세요(자동 커밋 안 함)")
+                print(f"{learn.MEMORY_PATH}에 추가됨 — 내용을 확인하세요")
         elif args.action == "rules":
             for r in learn.load_rules():
                 print(f"[{r['id']}] {r['text']} ({r['evidence']})")

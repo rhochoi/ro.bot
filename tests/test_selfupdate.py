@@ -1,0 +1,47 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from ro import route, selfupdate
+
+
+class SelfUpdateTest(unittest.TestCase):
+    def test_checkout_uses_git_pull(self):
+        cmd, _ = selfupdate.update_command()  # 이 테스트는 저장소 체크아웃에서 실행된다
+        self.assertEqual(cmd[:2], ["git", "-C"])
+        self.assertIn("--ff-only", cmd)
+
+    def test_installed_uses_pipx(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
+                mock.patch("shutil.which", return_value="/x/pipx"):
+            self.assertEqual(selfupdate.update_command()[0], ["pipx", "upgrade", "rog-bot"])
+
+    def test_uv_tool_install_uses_uv(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
+                mock.patch("shutil.which", return_value="/x/uv"), \
+                mock.patch.object(selfupdate.sys, "prefix", "/Users/a/.local/share/uv/tools/rog-bot"):
+            self.assertEqual(selfupdate.update_command()[0], ["uv", "tool", "upgrade", "rog-bot"])
+
+    def test_update_header_printed_before_command_output(self):
+        out = []
+        with mock.patch("builtins.print", lambda *a, **k: out.append(k.get("flush"))):
+            selfupdate.update(runner=lambda cmd: mock.Mock(returncode=0))
+        self.assertEqual(out, [True])
+
+    def test_no_pipx_reports_failure(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
+                mock.patch("shutil.which", return_value=None):
+            self.assertIsNone(selfupdate.update_command()[0])
+            self.assertEqual(selfupdate.update(), 1)
+
+    def test_user_routing_overrides(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "routing.toml"
+            f.write_text("x")
+            with mock.patch.object(route, "USER_ROUTING", f):
+                self.assertEqual(route.routing_path(), f)
+
+
+if __name__ == "__main__":
+    unittest.main()

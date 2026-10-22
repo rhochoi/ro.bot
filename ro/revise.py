@@ -130,10 +130,11 @@ def propose(rows, routing=None, min_n=MIN_N, bench=None):
     return cands, notes
 
 
-def apply_to_toml(cand, path=route.ROUTING_PATH, today=None):
-    """routing.toml의 해당 카테고리 engine 한 줄(과 updated)만 바꾼다. 현재 값이 제안 시점과 다르면 거부."""
-    p = Path(path)
-    text = p.read_text(encoding="utf-8")
+def apply_to_toml(cand, path=None, today=None):
+    """routing.toml의 해당 카테고리 engine 한 줄(과 updated)만 바꾼다. 현재 값이 제안 시점과 다르면 거부.
+    path가 없으면 ~/.ro/routing.toml에 쓴다(없으면 지금 쓰는 라우팅표에서 시작)."""
+    p = Path(path or route.USER_ROUTING).expanduser()
+    text = (p if p.exists() else route.routing_path()).read_text(encoding="utf-8")
     cat, old, new = cand["category"], cand["from"], cand["engine"]
     if new not in route.ENGINES or not re.fullmatch(r"[A-Za-z0-9_-]+", cat):
         raise ValueError("잘못된 개정안")
@@ -146,7 +147,7 @@ def apply_to_toml(cand, path=route.ROUTING_PATH, today=None):
     start = m.start(1) + em.start()
     out = text[:start] + f'engine = "{new}"' + text[start + len(em.group(0)):]
     out = re.sub(r'^updated = ".*"$', f'updated = "{today or datetime.date.today()}"', out, count=1, flags=re.M)
-    check = Path(path).with_name(Path(path).name + ".check")
+    check = p.with_name(p.name + ".check")
     check.write_text(out, encoding="utf-8")
     try:
         loaded = route.load_routing(check)
