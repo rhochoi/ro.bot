@@ -7,9 +7,9 @@
 - 비밀 파일·숨김 항목·프로젝트 폴더(.git·package.json 등)·심볼릭 링크는 건드리지 않는다. 홈 디렉터리 자체나 홈 밖은 루트가 될 수 없다.
 - 계획과 달라진 파일(크기·수정시각·해시)은 적용하지 않는다.
 
-  python -m ro.tidy scan --root DIR [--stale-days 180] [--min-size 4096]
-  python -m ro.tidy apply ID [ID...] | undo [BATCH]
-  python -m ro.tidy status
+  ro tidy scan --root DIR [--stale-days 180] [--min-size 4096]
+  ro tidy apply ID [ID...] | undo [BATCH]
+  ro tidy status
 """
 import argparse
 import hashlib

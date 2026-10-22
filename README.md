@@ -29,6 +29,7 @@ ro --version   # 설치된 버전
 - `python -m ro map` 프로젝트·도구 지도 생성 (`~/.ro/map.json`)
 - `python -m ro ask "질문" [--dry-run]` 컨텍스트 선택 → 엔진 호출 → 기록
 - `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서
+- `python -m ro tidy scan --root ~/Downloads` 중복·오래된 파일 후보 보고(읽기 전용) → `tidy apply ID...` 격리(영구 삭제 없음) → `tidy undo` 복원 · `tidy status` 이력
 - `python -m ro learn` / `route` / `log` / `audit` / `eval` / `ambient` 상세는 `docs/BLUEPRINT.md`
 - 테스트: `python -m unittest discover -s tests -t .`
 
