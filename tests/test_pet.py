@@ -3,6 +3,7 @@ import os
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
@@ -136,6 +137,24 @@ class PetTest(unittest.TestCase):
                 app = rt.resolve_write_approval(True)
                 self.assertTrue(app["approved"])
                 self.assertEqual(run.call_args.kwargs.get("write"), True)
+
+    def test_organize_summary_counts_only_move_items(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            (dl / "pic.png").write_text("IMG")
+            with zipfile.ZipFile(dl / "pic.zip", "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            self.assertTrue(rt.organize_scan()["ok"])
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["counts"], [["이미지", 1]])  # 풀린 압축 원본(치울 후보)은 이동 버튼에 안 들어간다
+            self.assertFalse(rt.queue_organize_apply("압축·설치")["ok"])
 
     def test_organize_goes_through_write_gate(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
