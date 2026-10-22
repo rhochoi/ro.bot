@@ -23,6 +23,12 @@ class SelfUpdateTest(unittest.TestCase):
                 mock.patch.object(selfupdate.sys, "prefix", "/Users/a/.local/share/uv/tools/rog-bot"):
             self.assertEqual(selfupdate.update_command()[0], ["uv", "tool", "upgrade", "rog-bot"])
 
+    def test_update_header_printed_before_command_output(self):
+        out = []
+        with mock.patch("builtins.print", lambda *a, **k: out.append(k.get("flush"))):
+            selfupdate.update(runner=lambda cmd: mock.Mock(returncode=0))
+        self.assertEqual(out, [True])
+
     def test_no_pipx_reports_failure(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
                 mock.patch("shutil.which", return_value=None):

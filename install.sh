@@ -42,7 +42,8 @@ main() {
   if ! command -v uv >/dev/null; then
     confirm "uv(파이썬 도구 설치기)가 없습니다. https://astral.sh/uv 공식 설치 스크립트로 설치할까요?" \
       || die "uv 없이 진행할 수 없습니다."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # 셸 설정 파일은 uv 설치기가 아니라 아래 PATH 단계에서만(필요할 때) 고친다
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
     export PATH="$HOME/.local/bin:$PATH"
     command -v uv >/dev/null || die "uv 설치 후에도 찾지 못했습니다. 새 터미널에서 다시 실행하세요."
   fi
