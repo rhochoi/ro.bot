@@ -32,6 +32,8 @@ from . import ask, fsutil, harden, learn, log, mapper, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
+# 채팅 창에서 고를 수 있는 claude 모델(별칭 화이트리스트: 임의 문자열을 CLI 인자로 넘기지 않는다)
+CLAUDE_MODELS = ("sonnet", "haiku", "opus")
 MOODS = ("idle", "recording", "focus", "anxious", "discovery", "resolved")
 MOOD_LABELS = {
     "idle": "기본",
@@ -400,7 +402,7 @@ class PetRuntime:
             "colors": {"black": BLACK, "cream": CREAM},
         }
 
-    def ask_question(self, question, engine=None, project=None, cwd=None):
+    def ask_question(self, question, engine=None, project=None, cwd=None, model=None):
         """읽기 전용으로 질문을 실행하고 결과를 저장한다."""
         question = (question or "").strip()
         if not question:
@@ -412,13 +414,16 @@ class PetRuntime:
         rules = learn.load_rules(self.home)
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
                       engine=engine, rules=rules, project=project)
+        # 선택한 모델은 claude 엔진일 때만 적용한다. 비어 있으면 routing.toml 값을 그대로 쓴다.
+        if model in CLAUDE_MODELS and pl["engine"] == "claude":
+            pl["model"] = model
         with self._lock:
             self.busy = True
             self.busy_task = log.redact(question[:60])
         try:
-            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"])
+            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"], model=pl.get("model", ""))
             log.append("route", question[:80], {
-                "engine": pl["engine"], "category": pl["category"], "mode": "read",
+                "engine": pl["engine"], "model": pl.get("model", ""), "category": pl["category"], "mode": "read",
                 "ok": res["ok"], "code": res["code"], "duration": res["duration"],
                 "projects": pl["projects"], "context_chars": len(pl["context"]), "via": "pet",
             }, engine=pl["engine"], log_dir=self.log_dir)
@@ -792,6 +797,16 @@ PET_HTML = r"""<!DOCTYPE html>
     outline: none;
     user-select: text;
     -webkit-user-select: text;
+  }
+  .model-select {
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+    border: 1.5px solid transparent;
+    border-radius: 999px;
+    padding: 0 8px;
+    font-size: 11px;
+    outline: none;
+    cursor: pointer;
   }
   .ask-input:focus {
     border-color: var(--panel-border);
@@ -1508,6 +1523,12 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="logsBox" class="logs"></div>
 
     <form id="askForm" class="ask-form">
+      <select id="modelSelect" class="model-select" title="claude 모델 (비우면 routing.toml 값)">
+        <option value="">자동</option>
+        <option value="sonnet">sonnet</option>
+        <option value="haiku">haiku</option>
+        <option value="opus">opus</option>
+      </select>
       <input id="askInput" class="ask-input" type="text" placeholder="오늘 할 일이나 프로젝트를 물어보세요..." autocomplete="off" />
       <button id="askSubmit" class="ask-submit" type="submit">묻기</button>
     </form>
@@ -1589,6 +1610,11 @@ const logsBox = document.getElementById("logsBox");
 const askForm = document.getElementById("askForm");
 const askInput = document.getElementById("askInput");
 const askSubmit = document.getElementById("askSubmit");
+const modelSelect = document.getElementById("modelSelect");
+try { modelSelect.value = localStorage.getItem("roModel") || ""; } catch (e) {}
+modelSelect.addEventListener("change", () => {
+  try { localStorage.setItem("roModel", modelSelect.value); } catch (e) {}
+});
 const matBtn = document.getElementById("matBtn");
 const themeBtn = document.getElementById("themeBtn");
 
@@ -2144,7 +2170,7 @@ askForm.addEventListener("submit", async (e) => {
   subStatusText.textContent = "기록 중...";
   petWrap.className = "pet-wrap mood-focus";
   try {
-    await apiPost("/api/ask", { question: q });
+    await apiPost("/api/ask", { question: q, model: modelSelect.value });
   } finally {
     askSubmit.disabled = false;
     await refreshState();
@@ -2241,7 +2267,7 @@ def make_handler(runtime):
             parsed = urlparse(self.path)
             if parsed.path == "/api/ask":
                 res = runtime.ask_question(data.get("question", ""), engine=data.get("engine"),
-                                           project=data.get("project"))
+                                           project=data.get("project"), model=data.get("model"))
                 self._send_json(200, res)
             elif parsed.path == "/api/feedback":
                 self._send_json(200, runtime.record_feedback(bool(data.get("accepted"))))

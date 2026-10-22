@@ -118,6 +118,21 @@ class PetTest(unittest.TestCase):
             fb = rt.record_feedback(True)
             self.assertTrue(fb["ok"])
 
+    def test_ask_model_selection_whitelist_and_engine(self):
+        with tempfile.TemporaryDirectory() as d:
+            map_path = Path(d) / "map.json"
+            map_path.write_text(json.dumps({"projects": [], "tools": {}}))
+            os.chmod(map_path, 0o600)
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(map_path))
+            ok = {"ok": True, "code": 0, "duration": 0.1, "output": "ok"}
+            with mock.patch("ro.route.run", return_value=ok) as run:
+                rt.ask_question("설명해줘", engine="claude", model="haiku")
+                self.assertEqual(run.call_args.kwargs.get("model"), "haiku")
+                rt.ask_question("설명해줘", engine="claude", model="--evil")  # 화이트리스트 밖
+                self.assertNotEqual(run.call_args.kwargs.get("model"), "--evil")
+                rt.ask_question("설명해줘", engine="codex", model="haiku")  # claude 전용
+                self.assertNotEqual(run.call_args.kwargs.get("model"), "haiku")
+
     def test_write_gate_requires_explicit_approval(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))

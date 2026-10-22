@@ -6,7 +6,7 @@ updated = "2026-10-21"
 
 [routes.design]
 engine = "claude"
-model = ""
+model = "sonnet"
 keywords = ["설계", "리뷰", "검토", "설명", "분석", "design", "review", "explain", "plan"]
 why = "긴 맥락·설계·교차 검토"
 
@@ -25,4 +25,4 @@ why = "에디터·브라우저 연동 작업"
 # 어떤 유형에도 맞지 않을 때
 [fallback]
 engine = "claude"
-model = ""
+model = "sonnet"
