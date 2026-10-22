@@ -137,6 +137,63 @@ class PetTest(unittest.TestCase):
                 self.assertTrue(app["approved"])
                 self.assertEqual(run.call_args.kwargs.get("write"), True)
 
+    def test_organize_goes_through_write_gate(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            f = dl / "2026-01-02 영수증.txt"
+            f.write_text("결제")
+            (dl / "memo.xyz").write_text("x")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            moved = rt.organize_dest / "재무" / "2026-01-02_영수증.txt"
+
+            self.assertIsNone(rt.snapshot()["organize"])
+            self.assertFalse(rt.queue_organize_apply("재무")["ok"])  # 정리안 없으면 요청 불가
+            self.assertTrue(rt.organize_scan()["ok"])
+            org = rt.snapshot()["organize"]
+            self.assertEqual((org["counts"], org["review"]), ([["재무", 1]], 1))
+            self.assertFalse(moved.exists())  # scan은 옮기지 않는다
+
+            # 요청만으로는 옮기지 않고, 펫은 불안(승인 대기)
+            self.assertTrue(rt.queue_organize_apply("재무")["ok"])
+            st = rt.snapshot()
+            self.assertEqual((st["mood"], st["write_pending"]["kind"]), ("anxious", "organize_apply"))
+            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertTrue(f.exists())
+
+            # 요청 뒤 정리안이 바뀌면 승인해도 옮기지 않는다
+            rt.queue_organize_apply("재무")
+            time.sleep(1.1)
+            rt.organize_scan()
+            self.assertFalse(rt.resolve_write_approval(True)["ok"])
+            self.assertTrue(f.exists())
+
+            # 승인해야 이동
+            rt.queue_organize_apply("재무")
+            with mock.patch("ro.route.run") as run:
+                res = rt.resolve_write_approval(True)
+                run.assert_not_called()  # 정리는 엔진을 부르지 않는다
+            self.assertTrue(res["ok"], res)
+            self.assertTrue(moved.exists())
+            self.assertFalse(f.exists())
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["counts"], [])  # 옮긴 항목은 다시 요청 대상이 아니다
+            self.assertTrue(org["dest_root"].startswith("~"))
+
+            # 되돌리기도 승인 게이트를 거친다
+            self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
+            rt.queue_organize_undo()
+            self.assertTrue(moved.exists())
+            self.assertTrue(rt.resolve_write_approval(True)["ok"])
+            self.assertTrue(f.exists())
+            self.assertIsNone(rt.snapshot()["organize"]["undo"])
+            self.assertFalse(rt.queue_organize_undo()["ok"])
+
     def test_http_server_localhost_only_and_token_protected(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
@@ -166,6 +223,13 @@ class PetTest(unittest.TestCase):
                                  method="POST")
                 with urlopen(req_ok, timeout=3) as resp2:
                     self.assertEqual(resp2.status, 200)
+
+                # 정리 요청도 토큰 없이는 거부
+                req_org = Request(f"http://127.0.0.1:{port}/api/organize/apply", data=b'{"category": "x"}',
+                                  headers={"Content-Type": "application/json"}, method="POST")
+                with self.assertRaises(HTTPError) as ctx2:
+                    urlopen(req_org, timeout=3)
+                self.assertEqual(ctx2.exception.code, 403)
             finally:
                 srv.shutdown()
                 srv.server_close()

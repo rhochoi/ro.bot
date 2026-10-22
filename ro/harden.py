@@ -222,6 +222,23 @@ def _checks():
             return (local_only and st["mood"] == "anxious"
                     and "ABCDEFGH" not in json.dumps(st, ensure_ascii=False))
 
+    def pet_organize_needs_approval():
+        # 펫의 정리 요청은 승인 대기열에만 오르고, 승인 전에는 파일이 그대로다.
+        with tempfile.TemporaryDirectory() as h, mock.patch.dict(os.environ, {"HOME": str(Path(h).resolve())}):
+            t = Path(h).resolve()
+            dl = t / "Downloads"
+            dl.mkdir()
+            f = dl / "영수증.txt"
+            f.write_text("결제")
+            os.utime(f, (1, 1))
+            rt = pet.PetRuntime(home=str(t / ".ro"), log_dir=str(t / ".ro" / "log"), map_path=str(t / "m.json"))
+            rt.organize_root, rt.organize_dest = dl, t / "Documents" / "정리됨"
+            rt.organize_scan()
+            queued = rt.queue_organize_apply("재무")["ok"]
+            st = rt.snapshot()
+            return queued and f.exists() and st["mood"] == "anxious" \
+                and st["write_pending"]["kind"] == "organize_apply" and not rt.organize_dest.exists()
+
     return [
         ("비밀 마스킹", redaction),
         ("수집기는 허용한 소스만 읽음", collect_needs_allow),
@@ -239,6 +256,7 @@ def _checks():
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
         ("Pet은 로컬 전용·비밀 마스킹·쓰기 승인 게이트 유지", pet_safety_invariants),
+        ("Pet 파일 정리는 승인 전 이동 없음", pet_organize_needs_approval),
     ]
 
 
