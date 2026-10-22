@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -111,17 +112,70 @@ def build_command(engine, task, write=False, cwd=None, skip_git_check=False, mod
     raise ValueError(f"unknown engine: {engine}")
 
 
-def run(engine, task, write=False, cwd=None, skip_git_check=False, model=""):
-    """엔진 실행. 반환: dict(ok, code, duration, output, reason). reason: ""|not_installed|timeout|failed."""
+AUTH_HINT = re.compile(r"/login|log ?in\b|sign ?in\b|authenticat|unauthori[sz]ed|\b401\b|expired|api key", re.I)
+LOGIN_HELP = {"claude": "터미널에서 `claude`를 실행해 로그인하세요.",
+              "codex": "터미널에서 `codex login`을 실행해 로그인하세요.",
+              "agy": "agy에서 다시 로그인하세요."}
+REASON_HELP = {
+    "not_installed": "{engine}가 설치되어 있지 않습니다. 설치 후 로그인하거나 다른 엔진을 선택하세요(--engine).",
+    "auth_required": "{engine} 로그인이 필요하거나 만료됐습니다. {login}",
+    "timeout": "응답이 제한 시간 안에 오지 않았습니다. 질문을 줄이거나 다시 시도하세요.",
+    "cancelled": "취소했습니다.",
+    "failed": "{engine} 실행이 실패했습니다. 아래 원문을 확인하세요.",
+}
+
+
+def explain(engine, reason):
+    """reason → 사용자용 안내문. 정상(빈 reason)이면 빈 문자열."""
+    tmpl = REASON_HELP.get(reason, "")
+    return tmpl.format(engine=engine, login=LOGIN_HELP.get(engine, "")).strip()
+
+
+def _pump(stream, buf, on_line):
+    for line in stream:
+        buf.append(line)
+        if on_line:
+            on_line(line)
+
+
+def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_line=None, timeout=None):
+    """엔진 실행. on_line(줄)을 주면 stdout을 오는 대로 넘긴다(진행 표시용).
+    반환: dict(ok, code, duration, output, reason). reason: ""|not_installed|auth_required|timeout|cancelled|failed.
+    Ctrl+C(KeyboardInterrupt)는 엔진 프로세스를 정리하고 reason=cancelled로 돌려준다."""
     if not shutil.which(engine):
         return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치", "reason": "not_installed"}
+    timeout = timeout or TIMEOUT
     start = time.time()
+    proc = subprocess.Popen(build_command(engine, task, write, cwd, skip_git_check, model), text=True, cwd=cwd,
+                            stdin=subprocess.DEVNULL,  # 엔진이 상속된 stdin을 기다리며 멈추지 않게
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = [], []
+    threads = [threading.Thread(target=_pump, args=(proc.stdout, out, on_line), daemon=True),
+               threading.Thread(target=_pump, args=(proc.stderr, err, None), daemon=True)]
+    for t in threads:
+        t.start()
+    reason = ""
     try:
-        r = subprocess.run(build_command(engine, task, write, cwd, skip_git_check, model), capture_output=True,
-                           text=True, timeout=TIMEOUT, cwd=cwd,
-                           stdin=subprocess.DEVNULL)  # 엔진이 상속된 stdin을 기다리며 멈추지 않게
-        return {"ok": r.returncode == 0, "code": r.returncode,
-                "duration": round(time.time() - start, 1), "output": r.stdout or r.stderr,
-                "reason": "" if r.returncode == 0 else "failed"}
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "code": None, "duration": float(TIMEOUT), "output": "시간 초과", "reason": "timeout"}
+        proc.kill()
+        proc.wait()
+        reason = "timeout"
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        reason = "cancelled"
+    for t in threads:
+        t.join(timeout=2)
+    proc.stdout.close()
+    proc.stderr.close()
+    stdout, stderr = "".join(out), "".join(err)
+    text = stdout or stderr
+    if not reason and proc.returncode != 0:
+        reason = "auth_required" if AUTH_HINT.search(text) else "failed"
+    if reason == "timeout":
+        text = "시간 초과"
+    elif reason == "cancelled":
+        text = text or "취소됨"
+    return {"ok": not reason, "code": None if reason in ("timeout", "cancelled") else proc.returncode,
+            "duration": round(time.time() - start, 1), "output": text, "reason": reason}

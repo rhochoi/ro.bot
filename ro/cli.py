@@ -11,6 +11,14 @@ from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper,
 DEFAULT_OUT = "~/.ro/map.json"
 
 
+def emit(args, event, text, err=False):
+    """--json이면 JSON 한 줄, 아니면 사람이 읽는 텍스트."""
+    if getattr(args, "json", False):
+        print(json.dumps(event, ensure_ascii=False), flush=True)
+    else:
+        print(text, file=sys.stderr if err else sys.stdout)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -45,6 +53,16 @@ def main(argv=None):
     q.add_argument("--project", help="프로젝트 이름 직접 지정")
     q.add_argument("--no-context", action="store_true", help="컨텍스트 없이 질문만 전송")
     q.add_argument("--dry-run", action="store_true", help="전송 내용만 출력")
+    q.add_argument("--yes", action="store_true", help="미리보기 확인 없이 바로 전송(앱·스크립트용)")
+    q.add_argument("--json", action="store_true", help="줄 단위 JSON 이벤트로 출력(preview/line/done)")
+    q.add_argument("-c", "--continue", dest="cont", action="store_true", help="직전 질문·답변을 이어서 질문")
+    fb = sub.add_parser("feedback", help="직전 답변 수용 여부 기록(앱용)")
+    fb.add_argument("verdict", choices=["y", "n"])
+    fb.add_argument("--engine", required=True, choices=route.ENGINES)
+    fb.add_argument("--category", required=True)
+    fb.add_argument("--projects", default="", help="쉼표로 구분")
+    co = sub.add_parser("collect", help="활동 수집기(allow|deny|status|run) — 허용한 소스만 읽음")
+    co.add_argument("rest", nargs=argparse.REMAINDER)
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
     bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bg = bsub.add_parser("gen", help="현재 상태에서 정답을 뽑아 과제 파일 생성 (지도도 새로고침)")
@@ -72,6 +90,9 @@ def main(argv=None):
     a.add_argument("--engine", choices=["claude", "codex", "agy"])
     t = lsub.add_parser("tail", help="최근 이벤트")
     t.add_argument("-n", type=int, default=10)
+    dl = lsub.add_parser("delete", help="기록 삭제(되돌릴 수 없음)")
+    dl.add_argument("--before", help="YYYY-MM-DD 이전만 삭제(생략하면 전부)")
+    dl.add_argument("--yes", action="store_true")
     sm = lsub.add_parser("summary", help="일일 요약")
     sm.add_argument("--date", default=time.strftime("%Y-%m-%d"))
     args = ap.parse_args(argv)
@@ -158,25 +179,62 @@ def main(argv=None):
             print(bench.report(data))
     elif args.cmd == "ask":
         mapdata = ask.load_map()
-        if mapdata is None:
-            mapdata = mapper.build_map(mapper.default_roots())
-            mapper.save_map(mapdata, DEFAULT_OUT)
-            print(f"지도가 없어 새로 만들었습니다 (프로젝트 {len(mapdata['projects'])}개)")
+        if mapdata is None:  # 동의 없이 폴더를 훑지 않는다: 지도는 사용자가 `ro map`으로 직접 만든다
+            msg = "프로젝트 지도가 없습니다. 먼저 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."
+            emit(args, {"event": "error", "reason": "needs_setup", "message": msg}, msg, err=True)
+            raise SystemExit(2)
         pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,
-                      engine=args.engine, rules=learn.load_rules(), project=args.project)
-        print(f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
-              f" / 컨텍스트 {len(pl['context'])}자")
-        if args.dry_run:
-            print("--- 전송될 프롬프트 ---")
-            print(pl["prompt"])
+                      engine=args.engine, rules=learn.load_rules(), project=args.project,
+                      history=ask.load_history() if args.cont else None)
+        head = (f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
+                f" / 컨텍스트 {len(pl['context'])}자")
+        preview = {"event": "preview", "engine": pl["engine"], "category": pl["category"],
+                   "projects": pl["projects"], "context_chars": len(pl["context"]), "prompt": pl["prompt"]}
+        if args.dry_run or (args.json and not args.yes):
+            emit(args, preview, head + "\n--- 전송될 프롬프트 ---\n" + pl["prompt"])
             return
-        res = ask.execute(pl)
-        print(res["output"])
-        if sys.stdin.isatty():
-            ans = input("첫 답변을 그대로 받아들일 수 있나요? [y/n/Enter=건너뜀] ").strip().lower()
-            if ans in ("y", "n"):
-                ask.feedback(pl, ans == "y")
+        if not args.yes:  # 기본값: 보기 전에는 보내지 않는다
+            if not sys.stdin.isatty():
+                raise SystemExit("전송 전 확인이 필요합니다. 터미널에서 실행하거나 --yes를 쓰세요(--dry-run으로 내용 확인).")
+            print(head + "\n--- 전송될 프롬프트 ---\n" + pl["prompt"] + "\n---")
+            if input(f"이 내용을 {pl['engine']}(으)로 보낼까요? [y/N] ").strip().lower() != "y":
+                raise SystemExit("취소됨 (아무것도 전송하지 않았습니다)")
+        streamed = []
+        def on_line(line):
+            streamed.append(line)
+            if args.json:
+                print(json.dumps({"event": "line", "text": line.rstrip("\n")}, ensure_ascii=False), flush=True)
+            else:
+                print(line, end="", flush=True)
+        if sys.stderr.isatty() and not args.json:
+            print(f"{pl['engine']} 응답을 기다리는 중… (Ctrl+C로 취소)", file=sys.stderr)
+        res = ask.execute(pl, on_line=on_line)
+        help_text = route.explain(pl["engine"], res["reason"])
+        if res["ok"]:
+            ask.save_history(args.question, res["output"])
+        done = {"event": "done", "ok": res["ok"], "reason": res["reason"], "help": help_text,
+                "duration": res["duration"], "output": res["output"],
+                "feedback_args": {"engine": pl["engine"], "category": pl["category"],
+                                  "projects": pl["projects"]}}
+        if args.json:
+            print(json.dumps(done, ensure_ascii=False), flush=True)
+        else:
+            if not streamed and res["output"]:
+                print(res["output"])
+            if help_text:
+                print(help_text, file=sys.stderr)
+            if res["ok"] and sys.stdin.isatty():
+                ans = input("첫 답변을 그대로 받아들일 수 있나요? [y/n/Enter=건너뜀] ").strip().lower()
+                if ans in ("y", "n"):
+                    ask.feedback(pl, ans == "y")
         raise SystemExit(0 if res["ok"] else 1)
+    elif args.cmd == "feedback":
+        ask.feedback({"engine": args.engine, "category": args.category,
+                      "projects": [x for x in args.projects.split(",") if x]}, args.verdict == "y")
+        print("기록됨")
+    elif args.cmd == "collect":
+        from . import collectors
+        collectors.main(args.rest)
     elif args.cmd == "route":
         engine, category, reason = route.choose(args.task, learn.load_rules())
         if args.engine:
@@ -192,6 +250,8 @@ def main(argv=None):
             "engine": engine, "category": category, "mode": mode, "ok": res["ok"],
             "code": res["code"], "duration": res["duration"]}, engine=engine)
         print(res["output"])
+        if res["reason"]:
+            print(route.explain(engine, res["reason"]), file=sys.stderr)
         raise SystemExit(0 if res["ok"] else 1)
     elif args.cmd == "learn":
         if args.action in ("approve", "reject"):
@@ -251,6 +311,10 @@ def main(argv=None):
         elif args.log_cmd == "tail":
             for e in log.read(time.strftime("%Y-%m-%d"))[-args.n:]:
                 print(f"{e['ts']} [{e['kind']}] {e['summary']}")
+        elif args.log_cmd == "delete":
+            if not args.yes:
+                raise SystemExit("기록을 삭제합니다(되돌릴 수 없음). 확인하려면 --yes를 붙이세요.")
+            print(f"기록 파일 {log.delete(args.before)}개 삭제")
         else:
             print(log.summarize(args.date))
     else:
