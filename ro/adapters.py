@@ -23,7 +23,8 @@ PROBE_PROMPT = ("이 작업 폴더의 지침(AGENTS.md/CLAUDE.md)에 적힌 '식
                 "파일을 읽거나 명령을 실행하지 말고, 이미 로드된 지침에서만 답해. 지침에 없으면 '모름'이라고만 답해.")
 
 INTRO = ("# rog.bot\n\n도구에 종속되지 않는 하나의 캐릭터. 아래 원칙과 공유 계층은 어떤 도구에서 불러도 같다.\n"
-         "공유 계층: `identity/`(원칙), `memory/ro-model.md`(승인된 기억), `routing.toml`(작업 유형→엔진·모델).\n")
+         "공유 계층: `identity/`(원칙), `~/.ro/ro-model.md`(승인된 기억, 사용자별), "
+         "`ro/routing.toml`(작업 유형→엔진·모델 기본값, 사용자별 사본 `~/.ro/routing.toml`).\n")
 
 
 def _principles(root):

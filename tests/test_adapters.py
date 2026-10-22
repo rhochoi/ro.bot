@@ -58,7 +58,7 @@ class AdaptersTest(unittest.TestCase):
 
 class RoutingTest(unittest.TestCase):
     def test_repo_routing_toml_valid_and_matches_builtin_behavior(self):
-        r = route.load_routing(REPO / "routing.toml")
+        r = route.load_routing(route.DEFAULT_ROUTING)
         self.assertEqual([x[0] for x in r["rules"]], ["design", "implement", "ui"])
         for task, want in [("이 코드 리뷰해줘", "claude"), ("버그 수정하고 테스트", "codex"),
                            ("브라우저 화면 확인", "agy"), ("안녕", "claude")]:

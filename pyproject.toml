@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ro"
+dynamic = ["version"]
+description = "ro — 개인 로컬 전용 비서"
+requires-python = ">=3.11"
+dependencies = ["pyserial"]
+
+[project.scripts]
+ro = "ro.cli:main"
+
+[tool.setuptools]
+packages = ["ro"]
+
+[tool.setuptools.package-data]
+ro = ["pet_mac.swift", "routing.toml", "ro-model.template.md", "bench_tasks.example.json"]
+
+# 버전은 git 태그에서 자동 계산한다. 태그 커밋은 그 버전, 이후 커밋은 2026.10.22.post1.devN 형태.
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+fallback_version = "0.0.0"

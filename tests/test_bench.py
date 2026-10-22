@@ -82,7 +82,7 @@ class BenchTest(unittest.TestCase):
         self.assertIn("수동 선호: ctx 1", bench.report(data))
 
     def test_example_tasks_valid(self):
-        p = Path(__file__).resolve().parent.parent / "bench" / "tasks.example.json"
+        p = Path(__file__).resolve().parent.parent / "ro" / "bench_tasks.example.json"
         self.assertEqual(len(bench.load_tasks(p)), 4)
 
     def _repo(self, d, branch="feature/measure", subject="측정 도구 추가 커밋 메시지"):
