@@ -131,7 +131,7 @@ def build_context(projects, tools=None):
         parts.append("\n".join(lines))
     if tools:
         parts.append("도구: " + ", ".join(t for t, path in tools.items() if path))
-    return mask_home(log.redact("\n\n".join(parts)))[:CONTEXT_CAP]
+    return mapper.clip(mask_home(log.redact("\n\n".join(parts))), CONTEXT_CAP)
 
 
 ACTIVITY_WORDS = (("어제", "yesterday", 1, 1), ("오늘", "today", 0, 0), ("이번 주", "this week", 0, 6),

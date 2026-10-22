@@ -1763,6 +1763,10 @@ let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
 let previewLockUntil = 0;
+// 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
+let askNotice = null;
+let askNoticeUntil = 0;
+let lastLogsKey = "";
 let dragStart = null;
 let didDrag = false;
 const MAT_LABELS = {
@@ -1956,7 +1960,12 @@ document.querySelectorAll(".act-btn").forEach((btn) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") setBubbleOpen(false);
+  if (e.key !== "Escape") return;
+  if (document.activeElement === askInput && askInput.value) {
+    askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
+    return;
+  }
+  setBubbleOpen(false);
 });
 
 /* =========================================================
@@ -2050,6 +2059,13 @@ petWrap.addEventListener("mouseleave", () => {
       window.triggerAction(null);
     }
   }
+});
+
+/* 마우스가 창 밖으로 나가면 시선을 가운데로 되돌린다 */
+document.documentElement.addEventListener("mouseleave", () => {
+  if (currentAction) return;
+  eyesWrap.style.transform = "";
+  layerHead.style.transform = "";
 });
 
 /* 마우스 시선 추적: 눈이 먼저 가고 머리가 살짝 뒤따른다 (호버/액션 진행 중에는 간섭 차단) */
@@ -2249,7 +2265,11 @@ function applyState(st) {
   const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
-  if (st.last_answer) {
+  if (Date.now() < askNoticeUntil) {
+    userMsgRow.style.display = "flex";
+    userQuestionPill.textContent = askNotice.q;
+    roMainBubble.textContent = askNotice.msg;
+  } else if (st.last_answer) {
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = st.last_answer.question;
     roMainBubble.textContent = st.last_answer.output;
@@ -2285,13 +2305,18 @@ function applyState(st) {
     ruleCard.style.display = "none";
   }
 
-  logsBox.innerHTML = "";
-  (st.recent_logs || []).slice().reverse().forEach((item) => {
-    const div = document.createElement("div");
-    div.className = "log-row";
-    div.textContent = `${item.ts} · ${item.kind} · ${item.summary}`;
-    logsBox.appendChild(div);
-  });
+  const rows = (st.recent_logs || []).slice().reverse().map((item) => `${item.ts} · ${item.kind} · ${item.summary}`);
+  const logsKey = rows.join("\n");
+  if (logsKey !== lastLogsKey) {  // 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+    lastLogsKey = logsKey;
+    logsBox.replaceChildren(...rows.map((text) => {
+      const div = document.createElement("div");
+      div.className = "log-row";
+      div.textContent = text;
+      div.title = text;  // 말줄임된 내용은 마우스를 올려 본다
+      return div;
+    }));
+  }
 }
 
 async function refreshState() {
@@ -2307,19 +2332,33 @@ askForm.addEventListener("submit", async (e) => {
   const q = askInput.value.trim();
   if (!q) return;
   askInput.value = "";
+  askInput.disabled = true;
   askSubmit.disabled = true;
   previewLockUntil = 0;
+  askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
+  askNoticeUntil = Infinity;
   userMsgRow.style.display = "flex";
   userQuestionPill.textContent = q;
-  roMainBubble.textContent = "기록을 살피며 풀어내는 중...";
+  roMainBubble.textContent = askNotice.msg;
   subStatusText.textContent = "기록 중...";
   petWrap.className = "pet-wrap mood-focus";
+  let res = null;
   try {
-    await apiPost("/api/ask", { question: q });
+    res = await apiPost("/api/ask", { question: q });
+  } catch (err) {
+    res = null;
   } finally {
+    askInput.disabled = false;
     askSubmit.disabled = false;
-    await refreshState();
   }
+  askNoticeUntil = 0;
+  if (!res || res.busy || res.error) {
+    // 답을 못 받았으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
+    if (!askInput.value) askInput.value = q;
+    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
+    askNoticeUntil = Date.now() + 8000;
+  }
+  await refreshState();
 });
 
 document.getElementById("ruleApproveBtn").addEventListener("click", async () => {
@@ -2453,7 +2492,23 @@ def make_handler(runtime):
             self._send_json(403, {"ok": False, "error": "invalid token"})
             return False
 
+        def _guarded(self, fn):
+            # 처리 중 예외가 나도 연결을 끊지 말고 JSON 500으로 알린다(본문에는 예외 종류만, 경로·내용은 싣지 않음)
+            try:
+                fn()
+            except Exception as e:
+                try:
+                    self._send_json(500, {"ok": False, "error": f"server error: {type(e).__name__}"})
+                except OSError:
+                    pass
+
         def do_GET(self):
+            self._guarded(self._get)
+
+        def do_POST(self):
+            self._guarded(self._post)
+
+        def _get(self):
             if not self._host_ok():
                 return
             parsed = urlparse(self.path)
@@ -2471,7 +2526,7 @@ def make_handler(runtime):
             else:
                 self._send_json(404, {"error": "not found"})
 
-        def do_POST(self):
+        def _post(self):
             if not (self._host_ok() and self._token_ok()):
                 return
             length = int(self.headers.get("Content-Length", "0") or "0")
