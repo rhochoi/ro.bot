@@ -7,7 +7,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, pet, route, selfupdate, tidy
+from . import (fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, organize, pet, route,
+               selfupdate, tidy)
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -23,6 +24,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["tidy"]:  # --help 같은 선두 옵션까지 ro.tidy가 해석하도록 그대로 넘긴다
         return tidy.main(argv[1:])
+    if argv[:1] == ["organize"]:
+        return organize.main(argv[1:])
     ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
     ap.add_argument("--version", action="version", version=f"ro {_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -53,6 +56,8 @@ def main(argv=None):
     ic.add_argument("file")
     nt = asub.add_parser("notify", help="오늘 요약을 macOS 알림으로")
     sub.add_parser("tidy", add_help=False, help="중복·오래된 파일 정리(scan → apply ID → undo, 영구 삭제 없음)")  # 목록 표시용
+    sub.add_parser("organize", add_help=False,
+                   help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
     sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")
     sub.add_parser("doctor", help="설치 상태·엔진 점검")
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")

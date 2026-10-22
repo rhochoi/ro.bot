@@ -7,11 +7,11 @@
 - apply는 id나 카테고리를 직접 지정해야 하고 영구 삭제는 없다. 되돌림 로그(journal.jsonl)로 undo한다.
 - 제외: 숨김·비밀 이름·민감 이름(복구 코드·OTP·시드, 내용도 읽지 않음)·심볼릭 링크·하위 폴더·다운로드 중·최근 10분 내 수정·iCloud 자리표시 파일.
 
-  python -m ro.organize scan [--root ~/Downloads]
-  python -m ro.organize show [--category 재무] [--review]
-  python -m ro.organize edit ID [--category 문서] [--name "전세 계약서"]
-  python -m ro.organize apply ID [ID...] | --category 재무
-  python -m ro.organize undo [BATCH] | status
+  ro organize scan [--root ~/Downloads]
+  ro organize show [--category 재무] [--review]
+  ro organize edit ID [--category 문서] [--name "전세 계약서"]
+  ro organize apply ID [ID...] | --category 재무
+  ro organize undo [BATCH] | status
 """
 import argparse
 import datetime
@@ -325,7 +325,7 @@ def load_plan(home=HOME):
     try:
         return json.loads((_dir(home) / "plan.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        raise ValueError("계획이 없습니다. 먼저 `python -m ro.organize scan`을 실행하세요.")
+        raise ValueError("계획이 없습니다. 먼저 `ro organize scan`을 실행하세요.")
 
 
 def edit(cid, category=None, name=None, home=HOME, log_dir=log.LOG_DIR):

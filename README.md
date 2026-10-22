@@ -2,9 +2,15 @@
 
 ro — 로컬 전용 비서. 이 Mac의 프로젝트를 읽기 전용으로 파악하고, 질문마다 관련 컨텍스트를 붙여 claude·codex·agy 중 적절한 엔진에 읽기 모드로 보내며, 모든 행동을 기록해 승인 후에만 규칙으로 학습한다.
 
-## 설치 (팀원용)
+## 설치
 
-비공개 저장소라 저장소 초대 수락과 [gh](https://cli.github.com)가 필요합니다. 아래 한 줄이면 로그인 확인 → uv 설치(없을 때, 확인 후) → Python과 ro 설치 → `ro doctor`까지 끝납니다. Python·Homebrew는 따로 필요 없습니다.
+아래 한 줄이면 uv 설치(없을 때, 확인 후) → Python과 ro 설치 → `ro doctor`까지 끝납니다. Python·Homebrew는 따로 필요 없습니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rhochoi/ro.bot/main/install.sh | bash
+```
+
+저장소가 비공개인 동안에는 저장소 초대 수락과 [gh](https://cli.github.com) 로그인이 필요하고, 아래 명령으로 설치합니다(스크립트가 공개·비공개를 스스로 판단합니다).
 
 ```bash
 gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
@@ -28,6 +34,7 @@ ro --version   # 설치된 버전
 
 - `python -m ro map` 프로젝트·도구 지도 생성 (`~/.ro/map.json`)
 - `python -m ro ask "질문" [--dry-run]` 컨텍스트 선택 → 엔진 호출 → 기록
+- `python -m ro organize scan|show|edit|apply|undo` 다운로드 폴더 분류·이름 정리 (승인한 것만 이동, 되돌리기 가능. `docs/ORGANIZE-DESIGN.md`)
 - `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서
 - `python -m ro tidy scan --root ~/Downloads` 중복·오래된 파일 후보 보고(읽기 전용) → `tidy apply ID...` 격리(영구 삭제 없음) → `tidy undo` 복원 · `tidy status` 이력
 - `python -m ro learn` / `route` / `log` / `audit` / `eval` / `ambient` 상세는 `docs/BLUEPRINT.md`

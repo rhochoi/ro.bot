@@ -12,9 +12,9 @@
 
 ## 2. 현재 상태 (확인한 사실, 2026-10-22)
 
-- `~/Downloads` 최상위: 파일 158개 + 폴더 7개. PDF 68, docx 19, png 18, html 18, zip 10, xlsx 4, hwp/hwpx 5 등.
-  `~/Documents`·`~/Desktop` 최상위에는 파일이 없다 → **1차 대상은 Downloads 하나로 충분.**
-- 로컬 LLM 실행기(ollama·llama-server·LM Studio) **없음**. 기기: Apple M3, 메모리 16GB.
+- 정리가 필요한 파일은 대개 `~/Downloads` 최상위에 몰려 있다(PDF·docx·이미지·html·zip·xlsx·hwp 순으로 많은 편)
+  → **1차 대상은 Downloads 하나로 충분.**
+- 로컬 LLM 실행기(ollama 등)는 기본 설치돼 있지 않다고 가정한다.
 - 내장 도구로 쓸 수 있는 것: `mdls`(Spotlight 메타데이터), `textutil`(docx/rtf/html→텍스트), `sips`(이미지 정보),
   `swiftc`(PDFKit·Vision OCR 호출 가능). `pdftotext`는 없음.
 - 이미 있는 재료: [ro/tidy.py](../ro/tidy.py)의 `check_root`(홈 하위만), `walk`(숨김·비밀·프로젝트 폴더·심링크 제외),
@@ -74,11 +74,11 @@
 ## 6. 흐름과 명령
 
 ```
-python -m ro.organize scan  --root ~/Downloads        # 읽기 전용 → ~/.ro/organize/plan.json
-python -m ro.organize show  [--category 재무]          # 표로 보기: 현재 이름 → 새 위치/새 이름, 근거, 확신도
-python -m ro.organize edit  ID --category 문서 --name "2026-09-01_전세계약서"
-python -m ro.organize apply ID [ID...] | --category 재무 # 지정한 것만 이동
-python -m ro.organize undo  [BATCH]                     # 원위치
+ro organize scan  --root ~/Downloads        # 읽기 전용 → ~/.ro/organize/plan.json
+ro organize show  [--category 재무]          # 표로 보기: 현재 이름 → 새 위치/새 이름, 근거, 확신도
+ro organize edit  ID --category 문서 --name "2026-09-01_전세계약서"
+ro organize apply ID [ID...] | --category 재무 # 지정한 것만 이동
+ro organize undo  [BATCH]                     # 원위치
 ```
 - 펫 연동(후순위): 말풍선에 "Downloads 정리안 23건" → 카테고리별 승인 버튼(기존 쓰기 승인 게이트 재사용).
 
@@ -100,7 +100,7 @@ python -m ro.organize undo  [BATCH]                     # 원위치
 | O2 | L2 텍스트·메타데이터 추출(PDFKit 헬퍼, docx/hwpx zip, mdls) + 이름 제안 | PDF·docx 샘플에서 날짜·제목 추출 테스트 통과 |
 | O3 | `apply`/`undo`/`edit` (tidy journal 재사용) + eval 3항목 | 임시 폴더에서 apply→undo 원상복구 테스트 |
 | O4 | 실제 Downloads에서 소량(예: 재무 5건) 승인 적용 | 사용자 확인 후 undo 가능 상태 확인 |
-| O5 (선택) | L3 로컬 LLM — Ollama + 소형 모델(16GB에 맞는 3~4B급) | 설치 승인 후, 저확신 파일만 재분류해 정확도 비교 |
+| O5 (선택) | L3 로컬 LLM — Ollama + 소형 모델(메모리 16GB에서도 도는 3~4B급) | 설치 승인 후, 저확신 파일만 재분류해 정확도 비교 |
 | O6 (후순위) | 수정 → learn 후보, 펫 승인 버튼 | 후보 → 승인 → 다음 scan에 반영 |
 
 ## 9. 결정 필요
@@ -119,11 +119,10 @@ python -m ro.organize undo  [BATCH]                     # 원위치
 ## 11. 구현 메모 (O1~O3, 2026-10-22)
 
 - 대상은 **루트 최상위 파일만**이다. 하위 폴더는 사용자가 묶어 둔 단위라 흩뜨리지 않는다.
-- PDF 본문·제목은 macOS PDFKit을 JXA(`osascript -l JavaScript`)로 읽는다. 설치·컴파일 없이 동작하며, 실측 Downloads PDF 68개 중 67개에서 텍스트 추출.
+- PDF 본문·제목은 macOS PDFKit을 JXA(`osascript -l JavaScript`)로 읽는다. 설치·컴파일 없이 동작한다(스캔 이미지 PDF는 텍스트가 없어 이름·메타데이터만 쓴다).
 - macOS 파일 이름은 한글이 NFD(자모 분해)라 판단 전에 NFC로 정규화한다. 실제 이동은 원래 경로로 한다.
 - 이름 후보 순서: 파일 이름 → 메타데이터 제목 → 본문 첫 줄 → 짧은 원래 이름 → `제목없음`.
 - `ro eval`에는 3개 대신 1개 묶음 항목(읽기 전용·본문 미저장·엔진 미호출·검토 보류·복원)을 추가했다.
-- 실측(2026-10-22, 읽기 전용 scan): Downloads 153건 → 문서 84, 이미지 19, 웹페이지 18, 압축·설치 10, 계약·서류 8, 표·데이터 6, 기타 5(검토 필요), 학습·자료 1, 스크린샷 1, 재무 1.
   키워드 분류는 본문 약한 일치(예: 진행 보고 문서가 본문의 '계약서'로 계약·서류)로 빗나갈 수 있어, 적용 전 `show`로 확인하고 `edit`로 고친다.
 - 검토 후 수정(2026-10-22): URL 인코딩 이름 디코딩, 버전 번호 점 유지(`v2.0`), 빈 괄호 제거, 원본이 사본보다 먼저 깨끗한 이름을 받음, 겹친 사본 표시(`(1) (1)`) 제거.
   복구·백업 코드·OTP·시드 이름은 목록에서 빼고 내용도 읽지 않는다. 분류 기준(본문 키워드 2개면 세분)은 그대로 둔다.

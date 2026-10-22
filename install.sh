@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# ro 원클릭 설치. 팀원은 아래 한 줄만 실행한다(비공개 저장소라 gh 로그인이 필요):
-#   gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
+# ro 원클릭 설치. 아래 한 줄만 실행한다.
+#   공개 저장소:   curl -fsSL https://raw.githubusercontent.com/rhochoi/ro.bot/main/install.sh | bash
+#   비공개 저장소: gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
 #
-# 하는 일: gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정 → uv 설치(없을 때, 확인 후)
+# 하는 일: 저장소가 공개면 로그인 없이 진행, 아니면 gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정
+#          → uv 설치(없을 때, 확인 후)
 #          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor.
 # 다시 실행하면 최신 버전으로 재설치한다. 기억·로그(~/.ro)는 건드리지 않는다.
 # 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략)
@@ -29,15 +31,20 @@ confirm() {
 main() {
   [ "$(uname -s)" = Darwin ] || warn "macOS가 아닙니다. 펫(ro pet) 등 일부 기능은 macOS 전용입니다."
 
-  command -v gh >/dev/null || die "gh가 필요합니다: https://cli.github.com 에서 설치 후 다시 실행하세요."
-  if ! gh auth status >/dev/null 2>&1; then
-    say "GitHub 로그인이 필요합니다(비공개 저장소)."
-    gh auth login </dev/tty
+  # 로그인 없이 읽히면 공개 저장소다(암호를 묻지 않게 프롬프트를 끈다). 그때는 gh가 필요 없다.
+  if GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/$REPO.git" HEAD >/dev/null 2>&1; then
+    say "GitHub에서 바로 받을 수 있습니다(로그인 불필요)."
+  else
+    command -v gh >/dev/null || die "gh가 필요합니다: https://cli.github.com 에서 설치 후 다시 실행하세요."
+    if ! gh auth status >/dev/null 2>&1; then
+      say "GitHub 로그인이 필요합니다(비공개 저장소)."
+      gh auth login </dev/tty
+    fi
+    gh api "repos/$REPO" --silent 2>/dev/null \
+      || die "$REPO 에 접근할 수 없습니다. 저장소 초대를 수락했는지 확인하세요."
+    say "git이 GitHub 자격 증명으로 gh를 쓰도록 설정합니다(gh auth setup-git)."
+    gh auth setup-git
   fi
-  gh api "repos/$REPO" --silent 2>/dev/null \
-    || die "$REPO 에 접근할 수 없습니다. 저장소 초대를 수락했는지 확인하세요."
-  say "git이 GitHub 자격 증명으로 gh를 쓰도록 설정합니다(gh auth setup-git)."
-  gh auth setup-git
 
   if ! command -v uv >/dev/null; then
     confirm "uv(파이썬 도구 설치기)가 없습니다. https://astral.sh/uv 공식 설치 스크립트로 설치할까요?" \
@@ -76,6 +83,7 @@ main() {
 
 다음 단계:
   ro map                         내 프로젝트 지도 만들기(~/.ro에만 저장)
+  ro organize scan               다운로드 폴더 정리안 보기(승인한 것만 옮김)
   ro ask "이 프로젝트 구조 설명해줘"
   ro pet                         데스크톱 펫 + 메뉴바 비서
   ro update                      나중에 업데이트

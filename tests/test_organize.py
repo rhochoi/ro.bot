@@ -76,10 +76,10 @@ class OrganizeTest(unittest.TestCase):
         t = organize.pick_title
         self.assertEqual(t(Path("2026%EB%85%84%EB%8F%84_%EC%A0%9C%EC%A1%B0.hwpx")), "2026년도 제조")  # URL 인코딩
         self.assertEqual(t(Path("filename*=UTF-8''%EA%B0%9C%EC%9D%B8%EC%A0%95%EB%B3%B4.pdf")), "개인정보")
-        self.assertEqual(t(Path("kirkwood_kit_v2.0.zip")), "kirkwood kit v2.0")  # 버전 점 유지
+        self.assertEqual(t(Path("tool_kit_v2.0.zip")), "tool kit v2.0")  # 버전 점 유지
         self.assertEqual(t(Path("Future.Game_Intro.pdf")), "Future Game Intro")
         self.assertEqual(t(Path("보호법(법률)(제20897호)(20251002).pdf")), "보호법(법률)(제20897호)")  # 빈 괄호
-        self.assertEqual(t(Path("Korean-Event (1) (1).xlsx")), "Korean-Event")  # 겹친 사본 표시
+        self.assertEqual(t(Path("report (1) (1).xlsx")), "report")  # 겹친 사본 표시
         self.assertEqual(t(Path("Xcopy.pdf")), "Xcopy")
 
     def test_date_priority(self):
@@ -121,11 +121,11 @@ class OrganizeTest(unittest.TestCase):
         self.assertFalse(self.dest.exists())
 
     def test_original_gets_clean_name_before_copy(self):
-        self.w("게임 가이드북 (1).pdf")
-        self.w("게임 가이드북.pdf")
+        self.w("사용 안내서 (1).pdf")
+        self.w("사용 안내서.pdf")
         items = self.scan()
-        self.assertTrue(items["게임 가이드북.pdf"]["dest"].endswith("_게임 가이드북.pdf"))
-        self.assertTrue(items["게임 가이드북 (1).pdf"]["dest"].endswith("_게임 가이드북_2.pdf"))
+        self.assertTrue(items["사용 안내서.pdf"]["dest"].endswith("_사용 안내서.pdf"))
+        self.assertTrue(items["사용 안내서 (1).pdf"]["dest"].endswith("_사용 안내서_2.pdf"))
 
     def test_sensitive_names_skipped_and_not_read(self):
         for n in ("recovery-codes.txt", "github backup codes.txt", "OTP 설정.pdf", "wallet seed.txt",
