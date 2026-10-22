@@ -194,6 +194,16 @@ class PetTest(unittest.TestCase):
             self.assertIsNone(rt.snapshot()["organize"]["undo"])
             self.assertFalse(rt.queue_organize_undo()["ok"])
 
+    def test_bubble_fits_overlay_window(self):
+        # 오버레이 창(360×520)을 넘지 않게: 툴바·입력창 사이의 내용(팔레트·카드·기록)은 스크롤 영역 안에 있다
+        html = pet.PET_HTML
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="bubbleScroll"', 'id="actPalette"', 'id="orgCard"',
+                                          'id="writeCard"', 'id="logsBox"', 'id="askForm"')]
+        self.assertEqual(order, sorted(order))
+        between = html[html.index('id="logsBox"'):html.index('id="askForm"')]
+        self.assertEqual(between.count("</div>"), 2)  # logsBox를 닫고 스크롤 영역을 닫은 뒤 입력창
+        self.assertIn("max-height: 100%;", html[html.index(".bubble.hidden"):html.index(".bubble-scroll {")])
+
     def test_http_server_localhost_only_and_token_protected(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
