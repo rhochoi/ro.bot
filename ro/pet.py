@@ -314,13 +314,13 @@ class PetRuntime:
         restored = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
         moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored]
         moved = {e["id"] for e in moves}  # 이미 옮긴(되돌리지 않은) 항목은 다시 세지 않는다
-        ready = Counter(i["category"] for i in plan["items"] if not i["review"] and i["id"] not in moved)
+        ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and i["id"] not in moved)
         last = moves[-1]["batch"] if moves else None
         return {
             "created": plan["created"],
             "dest_root": plan["dest_root"].replace(str(Path.home()), "~", 1),
             "counts": [[c, ready[c]] for c in organize.CATEGORIES if ready[c]],
-            "review": sum(i["review"] for i in plan["items"]),
+            "review": sum(i["review"] for i in plan["items"] if i.get("action", "move") == "move"),
             "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves)} if last else None,
         }
 

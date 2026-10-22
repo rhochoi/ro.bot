@@ -183,6 +183,102 @@ class OrganizeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             organize.scan(self.dest, self.dest, extractor=lambda ps: {})
 
+    # --- 정리 통합 C2: 파일마다 행동 하나 ---
+
+    def zip_of(self, name, entries):
+        z = self.root / name
+        with zipfile.ZipFile(z, "w") as zf:
+            for n, text in entries.items():
+                zf.writestr(n, text)
+        os.utime(z, (OLD, OLD))
+        return z
+
+    def test_one_action_per_file(self):
+        self.w("a.pdf", "dup", OLD - 100)
+        self.w("b.pdf", "dup")
+        self.w("pic.png", "IMG")
+        self.zip_of("pic.zip", {"pic.png": "IMG"})
+        self.w("기획안_v4.docx", "4")
+        self.w("기획안_v13.docx", "13")
+        self.w("메모.txt", "m")
+        items = self.scan()
+        got = {n: (i["action"], i["kind"]) for n, i in items.items()}
+        self.assertEqual(got, {
+            "a.pdf": ("move", "classified"), "b.pdf": ("quarantine", "duplicate"),
+            "pic.png": ("move", "classified"), "pic.zip": ("quarantine", "extracted"),
+            "기획안_v4.docx": ("quarantine", "version"), "기획안_v13.docx": ("move", "classified"),
+            "메모.txt": ("move", "classified")})
+        self.assertTrue(items["b.pdf"]["keep"].endswith("a.pdf"))
+        self.assertTrue(items["기획안_v4.docx"]["keep"].endswith("기획안_v13.docx"))
+
+    def test_duplicate_keeps_copy_inside_subfolder(self):
+        self.w("증빙.pdf", "same", OLD - 1000)  # 더 오래됐어도 최상위의 흩어진 사본을 치운다
+        self.w("감사 증빙/증빙.pdf", "same")
+        items = self.scan()
+        self.assertEqual(set(items), {"증빙.pdf"})  # 하위 폴더 파일은 제안 대상이 아니다
+        self.assertEqual(items["증빙.pdf"]["action"], "quarantine")
+        self.assertTrue(items["증빙.pdf"]["keep"].endswith("감사 증빙/증빙.pdf"))
+
+    def test_finance_is_protected(self):
+        self.w("KCC 경비 내역 .xlsx", "old")  # 표·데이터로 분류돼도 이름으로 보호
+        self.w("KCC 경비 내역  (1).xlsx", "new", OLD + 60)
+        self.w("3월 영수증.pdf", "same", OLD - 100)
+        self.w("3월 영수증 (1).pdf", "same")
+        items = self.scan()
+        self.assertEqual((items["KCC 경비 내역 .xlsx"]["action"], items["KCC 경비 내역 .xlsx"]["kind"]),
+                         ("keep", "important"))
+        dup = items["3월 영수증 (1).pdf"]
+        self.assertEqual((dup["action"], dup["kind"], dup["review"]), ("quarantine", "duplicate", True))
+
+    def test_stale_is_tag_unless_flag(self):
+        old = time.time() - 400 * 86400
+        self.w("옛자료.pdf", "o", old)
+        self.w("옛 경비.pdf", "e", old)
+        items = self.scan()
+        self.assertEqual(items["옛자료.pdf"]["action"], "move")
+        self.assertIn("오래됨 400일", items["옛자료.pdf"]["tags"])
+        plan = organize.scan(self.root, self.dest, today=TODAY, extractor=lambda ps: {}, stale=True)
+        got = {Path(i["path"]).name: i["action"] for i in plan["items"]}
+        self.assertEqual(got, {"옛자료.pdf": "quarantine", "옛 경비.pdf": "move"})
+
+    def test_apply_moves_only_move_items(self):
+        self.w("pic.png", "IMG")
+        z = self.zip_of("pic.zip", {"pic.png": "IMG"})
+        items = self.scan()
+        _, done, skipped = organize.apply([items["pic.zip"]["id"]], home=self.ro, log_dir=self.log)
+        self.assertEqual(done, [])
+        self.assertIn("치울 후보", skipped[0][1])
+        with self.assertRaises(ValueError):  # 카테고리 일괄 선택에도 치울 후보는 들어가지 않는다
+            organize.apply(category="압축·설치", home=self.ro, log_dir=self.log)
+        self.assertTrue(z.exists())
+        it = organize.edit(items["pic.zip"]["id"], category="압축·설치", home=self.ro, log_dir=self.log)
+        self.assertEqual(it["action"], "move")  # 위치를 정하면 이동 항목이 된다
+        _, done, _ = organize.apply([it["id"]], home=self.ro, log_dir=self.log)
+        self.assertEqual(len(done), 1)
+
+    def test_legacy_plan_without_action_still_applies(self):
+        self.w("data.xlsx", "d")
+        self.scan()
+        path = self.ro / "organize" / "plan.json"
+        plan = json.loads(path.read_text())
+        for i in plan["items"]:
+            for k in ("action", "kind", "keep", "tags"):
+                i.pop(k)
+        path.write_text(json.dumps(plan, ensure_ascii=False))
+        _, done, _ = organize.apply(category="표·데이터", home=self.ro, log_dir=self.log)
+        self.assertEqual(len(done), 1)
+
+    def test_show_lists_sections(self):
+        self.w("pic.png", "IMG")
+        self.zip_of("pic.zip", {"pic.png": "IMG"})
+        self.w("KCC 경비 내역 .xlsx", "old")
+        self.w("KCC 경비 내역  (1).xlsx", "new", OLD + 60)
+        self.scan()
+        out = organize.show(organize.load_plan(self.ro))
+        self.assertIn("## 치울 후보 (1,", out)
+        self.assertIn("## 보관 (1)", out)
+        self.assertIn("이동 2건 · 치울 후보 1건", out)
+
 
 if __name__ == "__main__":
     unittest.main()
