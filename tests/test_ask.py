@@ -32,14 +32,15 @@ class AskTest(unittest.TestCase):
         got = ask.select_projects("이거 뭐야", self.projects, cwd=str(self.d / "beta"))
         self.assertEqual([p["name"] for p in got], ["beta"])
 
-    def test_select_by_keywords_needs_two_hits(self):
+    def test_select_by_keywords(self):
         a = proj(self.d / "alpha", "alpha", summary={
             "purpose": "시리얼 장치 로그 수집", "structure": ["firmware/"], "scripts": [], "guide": "", "recent": []})
         b = proj(self.d / "beta", "beta", summary={
             "purpose": "쇼핑몰 프론트", "structure": ["pages/"], "scripts": [], "guide": "", "recent": []})
         got = ask.select_projects("시리얼 장치 연결이 안 돼", [a, b])
         self.assertEqual([p["name"] for p in got], ["alpha"])
-        self.assertEqual(ask.select_projects("시리얼 말고 다른 얘기", [a, b]), [])
+        self.assertEqual([p["name"] for p in ask.select_projects("시리얼 말고 다른 얘기", [a, b])], ["alpha"])  # 한 단어만 겹쳐도 후보
+        self.assertEqual(ask.select_projects("전혀 다른 얘기", [a, b]), [])
         # 회귀: 키워드도 부분 문자열로 세면 "app"·"form"이 "application"·"platform"에 걸린다
         c = proj(self.d / "beta", "gamma", summary={
             "purpose": "application platform", "structure": [], "scripts": [], "guide": "", "recent": []})

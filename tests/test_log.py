@@ -42,3 +42,15 @@ class LogTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LogDeleteTest(unittest.TestCase):
+    def test_delete_before_and_all(self):
+        with tempfile.TemporaryDirectory() as d:
+            for day in ("2026-01-01", "2026-02-01", "2026-03-01"):
+                log.append("note", "x", log_dir=d, at=__import__("time").mktime(
+                    __import__("time").strptime(day, "%Y-%m-%d")) + 3600)
+            self.assertEqual(log.delete("2026-02-01", d), 1)
+            self.assertEqual(len(list(Path(d).glob("*.jsonl"))), 2)
+            self.assertEqual(log.delete(log_dir=d), 2)
+            self.assertEqual(log.delete(log_dir=d), 0)

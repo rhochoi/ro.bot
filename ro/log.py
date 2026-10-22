@@ -88,3 +88,13 @@ def read_all(log_dir=LOG_DIR):
     for path in sorted(Path(log_dir).expanduser().glob("*.jsonl")):
         events += read(path.stem, log_dir)
     return events
+
+
+def delete(before=None, log_dir=LOG_DIR):
+    """기록 삭제(사용자 요청 전용). before(YYYY-MM-DD)를 주면 그 날짜 이전만, 없으면 전부. 삭제한 파일 수 반환."""
+    n = 0
+    for path in Path(log_dir).expanduser().glob("*.jsonl"):
+        if before is None or path.stem < before:
+            path.unlink()
+            n += 1
+    return n

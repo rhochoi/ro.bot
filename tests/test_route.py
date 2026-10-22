@@ -51,7 +51,9 @@ class RouteTest(unittest.TestCase):
 
     def test_missing_engine(self):
         with mock.patch.dict(os.environ, {"PATH": ""}):
-            self.assertFalse(route.run("codex", "x")["ok"])
+            res = route.run("codex", "x")
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["reason"], "not_installed")
 
     def test_keywords_need_word_boundary(self):
         # 회귀: 부분 문자열 매칭으로 "guide"/"quick"이 ui, "latest"가 implement로 갔다

@@ -33,7 +33,8 @@ ro --version   # 설치된 버전
 ## 사용 (저장소 루트에서)
 
 - `python -m ro map` 프로젝트·도구 지도 생성 (`~/.ro/map.json`)
-- `python -m ro ask "질문" [--dry-run]` 컨텍스트 선택 → 엔진 호출 → 기록
+- `python -m ro ask "질문" [--dry-run|--yes|--json|-c]` 컨텍스트 선택 → 전송 내용 확인 → 엔진 호출 → 기록. 지도(`map`)가 없으면 스캔하지 않고 안내만 한다. `--yes` 없이는 확인 없이 보내지 않는다. `-c`는 후속 질문, `--json`은 앱 연동용 이벤트 출력
+- `ro collect allow|deny|status|run` 활동 수집(허용한 소스만), `ro feedback y|n ...`, `ro log delete --yes`
 - `python -m ro organize scan|show|edit|apply|undo` 다운로드 폴더 분류·이름 정리 (승인한 것만 이동, 되돌리기 가능. `docs/ORGANIZE-DESIGN.md`)
 - `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서 (말풍선의 `정리` 버튼: 정리안 보기 → 카테고리별 승인 → 되돌리기)
 - `python -m ro tidy scan --root ~/Downloads` 중복·오래된 파일 후보 보고(읽기 전용) → `tidy apply ID...` 격리(영구 삭제 없음) → `tidy undo` 복원 · `tidy status` 이력
