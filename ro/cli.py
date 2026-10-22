@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, route
+from . import config, fixtures, setup as setup_mod, fsutil, ambient, ask, bench, harden, learn, log, mapper, route
 
 DEFAULT_OUT = "~/.ro/map.json"
 
@@ -61,6 +61,15 @@ def main(argv=None):
     fb.add_argument("--engine", required=True, choices=route.ENGINES)
     fb.add_argument("--category", required=True)
     fb.add_argument("--projects", default="", help="쉼표로 구분")
+    su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더, 선호 엔진")
+    ssub = su.add_subparsers(dest="setup_cmd", required=True)
+    ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
+    ss.add_argument("--json", action="store_true")
+    sr = ssub.add_parser("roots", help="스캔 폴더 관리")
+    sr.add_argument("action", choices=["list", "add", "remove"])
+    sr.add_argument("paths", nargs="*")
+    se = ssub.add_parser("engine", help="선호 엔진 지정(auto=자동 라우팅)")
+    se.add_argument("name")
     co = sub.add_parser("collect", help="활동 수집기(allow|deny|status|run) — 허용한 소스만 읽음")
     co.add_argument("rest", nargs=argparse.REMAINDER)
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
@@ -184,7 +193,7 @@ def main(argv=None):
             emit(args, {"event": "error", "reason": "needs_setup", "message": msg}, msg, err=True)
             raise SystemExit(2)
         pl = ask.plan(args.question, mapdata, cwd=os.getcwd(), use_context=not args.no_context,
-                      engine=args.engine, rules=learn.load_rules(), project=args.project,
+                      engine=args.engine or config.load().get("engine") or None, rules=learn.load_rules(), project=args.project,
                       history=ask.load_history() if args.cont else None)
         head = (f"엔진: {pl['engine']} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
                 f" / 컨텍스트 {len(pl['context'])}자")
@@ -228,6 +237,23 @@ def main(argv=None):
                 if ans in ("y", "n"):
                     ask.feedback(pl, ans == "y")
         raise SystemExit(0 if res["ok"] else 1)
+    elif args.cmd == "setup":
+        try:
+            if args.setup_cmd == "status":
+                st = setup_mod.status()
+                print(json.dumps(st, ensure_ascii=False) if args.json else setup_mod.render(st))
+            elif args.setup_cmd == "roots":
+                if args.action == "add":
+                    roots = setup_mod.add_roots(args.paths)
+                elif args.action == "remove":
+                    roots = setup_mod.remove_roots(args.paths)
+                else:
+                    roots = mapper.default_roots()
+                print("\n".join(roots) or "(없음)")
+            else:
+                print(f"선호 엔진: {setup_mod.set_engine(args.name)}")
+        except ValueError as e:
+            raise SystemExit(str(e))
     elif args.cmd == "feedback":
         ask.feedback({"engine": args.engine, "category": args.category,
                       "projects": [x for x in args.projects.split(",") if x]}, args.verdict == "y")
@@ -237,8 +263,9 @@ def main(argv=None):
         collectors.main(args.rest)
     elif args.cmd == "route":
         engine, category, reason = route.choose(args.task, learn.load_rules())
-        if args.engine:
-            engine, reason = args.engine, "수동 지정"
+        pref = args.engine or config.load().get("engine")
+        if pref:
+            engine, reason = pref, "수동 지정" if args.engine else "설정의 선호 엔진"
         mode = "write" if args.write else "read"
         print(f"엔진: {engine} / 카테고리: {category} / 모드: {mode} / 근거: {reason}")
         if args.dry_run:

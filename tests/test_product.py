@@ -179,6 +179,46 @@ class CliTest(unittest.TestCase):
         _, out, _ = self.call("collect", "status")
         self.assertFalse(json.loads(out)["shell"])
 
+    def test_setup_flow_and_config(self):
+        code, out, _ = self.call("setup", "status", "--json")
+        st = json.loads(out)
+        self.assertFalse(st["roots_configured"])
+        self.assertIn("~/Developer", [c["path"] for c in st["root_candidates"] if c["exists"]])
+        self.assertTrue(st["engines"]["claude"]["installed"])
+        self.assertFalse(st["collect"]["shell"])
+        self.assertTrue(st["not_collected"])
+        self.assertIn("화면 캡처", self.call("setup", "status")[1])
+        # 폴더 선택: 너무 넓은 폴더·없는 폴더는 거절
+        self.assertNotEqual(self.call("setup", "roots", "add", str(self.home))[0], 0)
+        self.assertNotEqual(self.call("setup", "roots", "add", str(self.home / "없음"))[0], 0)
+        self.call("setup", "roots", "add", str(self.home / "Developer"))
+        cfg = json.loads((self.home / ".ro" / "config.json").read_text())
+        self.assertEqual(cfg["roots"], ["~/Developer"])
+        self.assertEqual(stat.S_IMODE((self.home / ".ro" / "config.json").stat().st_mode), 0o600)
+        self.assertIn("프로젝트 1개", self.call("map")[1])  # 설정된 폴더(Developer)만 스캔
+        self.assertEqual(json.loads(self.call("setup", "status", "--json")[1])["map_exists"], True)
+        self.call("setup", "roots", "remove", "~/Developer")
+        self.assertEqual(json.loads((self.home / ".ro" / "config.json").read_text())["roots"], [])
+
+    def test_engine_preference_and_collect_in_config(self):
+        self.call("map")
+        self.assertNotEqual(self.call("setup", "engine", "gpt")[0], 0)
+        self.call("setup", "engine", "agy")
+        _, out, _ = self.call("ask", "블로그 배포?", "--json")
+        self.assertEqual(json.loads(out)["engine"], "agy")
+        self.call("setup", "engine", "auto")
+        self.call("collect", "allow", "shell")
+        cfg = json.loads((self.home / ".ro" / "config.json").read_text())
+        self.assertTrue(cfg["collect"]["shell"])
+        self.assertEqual(cfg["engine"], "")
+        self.assertFalse((self.home / ".ro" / "collect.json").exists())
+
+    def test_legacy_collect_json_still_read(self):
+        (self.home / ".ro").mkdir()
+        (self.home / ".ro" / "collect.json").write_text(json.dumps({"shell": True}))
+        _, out, _ = self.call("collect", "status")
+        self.assertTrue(json.loads(out)["shell"])
+
 
 if __name__ == "__main__":
     unittest.main()

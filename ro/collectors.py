@@ -1,7 +1,7 @@
 """Phase 2 수집기: git → 셸 → 엔진 세션 기록을 활동 이벤트(kind="activity")로 기록한다.
 
 원칙
-- 허용 목록: ~/.ro/collect.json에 명시한 소스만 읽는다(기본은 아무것도 안 읽음).
+- 허용 목록: ~/.ro/config.json의 collect(구버전 collect.json도 읽음)에 명시한 소스만 읽는다(기본은 아무것도 안 읽음).
 - 최소 수집: 셸은 프로그램·하위 명령만(인자 버림), 세션은 메타데이터만(대화 내용·계정 식별자 없음),
   git은 본인 커밋의 제목만. 기록 직전 log.redact + 제어문자 제거 + 길이 제한.
 - 증분·멱등: 커서(~/.ro/collect_state.json)로 이미 읽은 것은 다시 기록하지 않는다.
@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import ambient, fsutil, log
+from . import ambient, config, fsutil, log
 
 HOME = "~/.ro"
 FIRST_RUN_DAYS = 30
@@ -54,7 +54,9 @@ def _save(name, data, home=HOME):
 
 def load_config(home=HOME):
     cfg = {"git": [], "shell": False, "sessions": {e: False for e in SESSION_ENGINES}}
-    stored = _load("collect.json", {}, home)
+    stored = config.load(home).get("collect")
+    if not isinstance(stored, dict):
+        stored = _load("collect.json", {}, home)  # 구버전 설정 이관
     cfg["git"] = [str(p) for p in stored.get("git", [])]
     cfg["shell"] = bool(stored.get("shell", False))
     cfg["sessions"].update({e: bool(v) for e, v in stored.get("sessions", {}).items() if e in SESSION_ENGINES})
@@ -78,7 +80,7 @@ def set_allow(source, target=None, enabled=True, home=HOME):
         cfg["sessions"][target] = enabled
     else:
         raise ValueError(f"알 수 없는 소스: {source}")
-    _save("collect.json", cfg, home)
+    config.update(home, collect=cfg)
     return cfg
 
 
