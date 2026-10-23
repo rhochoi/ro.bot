@@ -77,6 +77,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         setupStatusItem()
         setupFloatingPanel()
         setMode(mode)
+        ensureIconVisible(announceSuccess: false)  // 지난번 메뉴 막대 모드로 시작했는데 아이콘이 가려진 경우
         setupWanderTimer()
         setupBackdropTimer()
     }
@@ -360,17 +361,25 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             self.webView.evaluateJavaScript("window.onHostDocked && window.onHostDocked();", completionHandler: nil)
             self.bounceIcon()
             // 아이템이 많으면 노치 뒤로 숨는다. 가려졌으면 알리고 데스크톱으로 되돌린다
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self = self, self.mode == .menubar,
-                      let win = self.statusItem.button?.window else { return }
-                if win.occlusionState.contains(.visible) {
-                    self.showToast("메뉴 막대로 옮겼어요", "아이콘을 끌어 내리면 다시 꺼낼 수 있어요")
-                } else {
-                    self.setMode(.desktop)
-                    self.showToast("메뉴 막대가 가득 찼어요", "아이콘이 노치 뒤로 가려져 데스크톱에 남겨 두었어요")
-                }
-            }
+            self.ensureIconVisible(announceSuccess: true)
         })
+    }
+
+    // 아이템이 많으면 아이콘이 노치 뒤로 숨는다. 가려졌으면 알리고 데스크톱으로 되돌린다.
+    // 전체 화면 앱 때문에 메뉴 막대가 숨은 경우는 가려진 것으로 보지 않는다
+    private func ensureIconVisible(announceSuccess: Bool) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self, self.mode == .menubar,
+                  let win = self.statusItem.button?.window else { return }
+            if win.occlusionState.contains(.visible) {
+                if announceSuccess {
+                    self.showToast("메뉴 막대로 옮겼어요", "아이콘을 끌어 내리면 다시 꺼낼 수 있어요")
+                }
+            } else if NSMenu.menuBarVisible() {
+                self.setMode(.desktop)
+                self.showToast("메뉴 막대가 가득 찼어요", "아이콘이 노치 뒤로 가려져 데스크톱에 남겨 두었어요")
+            }
+        }
     }
 
     // 착지 바운스 1회: 살짝 올라간 아이콘을 잠깐 보여 준 뒤 제자리로

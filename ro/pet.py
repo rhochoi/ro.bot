@@ -1618,6 +1618,7 @@ PET_HTML = r"""<!DOCTYPE html>
         <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트">상호작용 ▾</button>
         <button id="matBtn" class="chip-btn" title="재질 전환 (점토 / 리퀴드 글라스 / 젤리)">점토</button>
         <button id="themeBtn" class="chip-btn" title="색상 전환 (먹 / 분필)">먹</button>
+        <button id="moreBtn" class="chip-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="chip-btn" title="대화창 닫기 (Esc)">닫기</button>
       </div>
     </div>
@@ -1967,6 +1968,14 @@ stage.addEventListener("mousedown", (e) => {
   if (e.target === stage && !bubble.classList.contains("hidden")) {
     setBubbleOpen(false);
   }
+});
+
+/* ⋯: 네이티브 메뉴(데스크톱에 꺼내기 포함). 브라우저에는 호스트가 없어 숨긴다 */
+const moreBtn = document.getElementById("moreBtn");
+if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost) moreBtn.style.display = "";
+moreBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  notifyHost({ type: "menu" });
 });
 
 document.getElementById("closeBtn").addEventListener("click", (e) => {

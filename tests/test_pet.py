@@ -458,6 +458,18 @@ class PetTest(unittest.TestCase):
         self.assertIn('headerTitle.stringValue = "오늘 \\(today)건 기록"', src)
         self.assertIn('type: "status", today:', pet.PET_HTML)
 
+    def test_panel_more_menu_and_icon_visibility_guard(self):
+        html = pet.PET_HTML
+        self.assertIn('id="moreBtn" class="chip-btn" style="display:none;"', html)  # 브라우저에선 숨김
+        more = html[html.index('const moreBtn = document.getElementById("moreBtn");'):]
+        self.assertIn('notifyHost({ type: "menu" });', more[:400])
+        # isNativeHost는 뒤에서 선언되므로 여기서 쓰면 TDZ 오류가 난다
+        self.assertLess(html.index('const moreBtn'), html.index("const isNativeHost"))
+        self.assertNotIn("isNativeHost", more[:300])
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("ensureIconVisible(announceSuccess: false)", src)  # 시작할 때도 노치 확인
+        self.assertIn("} else if NSMenu.menuBarVisible() {", src)  # 전체 화면은 가려진 것으로 보지 않는다
+
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]
