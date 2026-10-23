@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import Darwin
 import WebKit
@@ -34,6 +35,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var lastBackdropLum: Double = 0.5
     private var lastBackdropSampleTime: TimeInterval = 0
     private var cgWinImgFn: CGWinImgFn? = nil
+    private var hotKeyRef: EventHotKeyRef? = nil
 
     // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자+점프/흔들기 여유 공간(176x168)을 확보해 잘림 방지
     private let compactSize = NSSize(width: 176, height: 168)
@@ -56,6 +58,27 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         setupFloatingPanel()
         setupWanderTimer()
         setupBackdropTimer()
+        setupGlobalHotKey()
+    }
+
+    /// 어느 앱에서든 ⌥R로 명령 팔레트를 연다(Carbon 핫키: 접근성 권한 불필요).
+    private func setupGlobalHotKey() {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData = userData else { return noErr }
+            let delegate = Unmanaged<PetAppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { delegate.openPalette() }
+            return noErr
+        }, 1, &spec, me, nil)
+        let id = EventHotKeyID(signature: OSType(0x726f6274), id: 1)
+        RegisterEventHotKey(UInt32(kVK_ANSI_R), UInt32(optionKey), id, GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
+
+    @objc private func openPalette() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        webView.evaluateJavaScript("window.openPaletteFromHost && window.openPaletteFromHost();", completionHandler: nil)
     }
 
     // 중복 실행 방지: 현재 프로세스 외에 다른 ro-pet-host가 떠 있으면 즉시 종료시킨다
@@ -328,6 +351,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let talkItem = NSMenuItem(title: "말 걸기 (대화창 열기/닫기)", action: #selector(toggleBubble), keyEquivalent: "r")
         talkItem.target = self
         menu.addItem(talkItem)
+        let paletteItem = NSMenuItem(title: "명령 팔레트 (⌥R)", action: #selector(openPalette), keyEquivalent: "")
+        paletteItem.target = self
+        menu.addItem(paletteItem)
 
         let moodMenu = NSMenu()
         let moods: [(String, String)] = [
