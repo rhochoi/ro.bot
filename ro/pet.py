@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, fsutil, harden, learn, log, mapper, route
+from . import ask, fsutil, harden, learn, log, mapper, recall, records, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -132,6 +132,19 @@ def layer_widths(today_events_count, project_count=0, mood="idle"):
             "base_u": MAX_U if mood in ("recording", "focus", "resolved") else BASE_U}
 
 
+BASE_PX_MIN = 60
+BASE_PX_STEP = 3
+BASE_PX_MAX = 140
+
+
+def ambient_state(today_count, hour, focus=False, held=0, attention=False):
+    """패널을 열지 않아도 몸이 상태를 말한다: 바닥 층 길이=60+3×오늘 기록 수(최대 140)."""
+    band = "아침" if hour < 12 else ("오후" if hour < 18 else "저녁")
+    return {"base_px": min(BASE_PX_MAX, BASE_PX_MIN + BASE_PX_STEP * today_count),
+            "band": band, "label": f"{band} · {today_count}건",
+            "focus": bool(focus), "held": int(held) if focus else 0, "attention": bool(attention)}
+
+
 def layer_offsets(mood="idle"):
     """팔다리 대신 층이 밀리고 들려서 감정을 만드는 오프셋(px 단위 기준)."""
     if mood == "anxious":
@@ -228,6 +241,8 @@ class PetRuntime:
         self._dismissed_fail_ts = None
         self.current_action = None
         self.action_until = 0.0
+        self.focus_on = False
+        self._focus_base = 0
 
     def trigger_action(self, action, duration=4.0):
         """12가지 모션 상호작용(숨쉬기, 두리번, 걷기, 생각, 깜짝, 졸음, 시선, 쓰다듬기, 잡기, 흔들기, 착지, 성공, 실패)을 즉시 발동한다."""
@@ -249,6 +264,47 @@ class PetRuntime:
         now = now or time.time()
         with self._lock:
             self.recording_until = now + RECORDING_WINDOW_SEC
+
+    def _projects(self):
+        return (ask.load_map(self.map_path) or {}).get("projects", [])
+
+    def set_focus(self, on):
+        today = time.strftime("%Y-%m-%d")
+        with self._lock:
+            self.focus_on = bool(on)
+            self._focus_base = len([e for e in records.live(log.read_all(self.log_dir))
+                                    if str(e.get("ts", ""))[:10] == today])
+        return {"ok": True, "focus": self.focus_on}
+
+    def recall_question(self, question):
+        return recall.answer(question, log.read_all(self.log_dir), self._projects(), home=self.home)
+
+    def capture(self, kind, name, text, size):
+        return records.capture(kind, name, text, size, self._projects(), log_dir=self.log_dir)
+
+    def capture_undo(self, target_id):
+        return records.revoke(str(target_id or ""), log_dir=self.log_dir)
+
+    def capture_project(self, target_id, project):
+        names = {p["name"] for p in self._projects()}
+        if project not in names:
+            return {"ok": False, "error": "알 수 없는 프로젝트예요."}
+        events = log.read_all(self.log_dir)
+        if str(target_id) not in {records.eid(e) for e in events}:
+            return {"ok": False, "error": "해당 기록을 찾을 수 없어요."}
+        records._write({"batch": f"m{int(time.time())}", "ts": time.time(), "assign": {str(target_id): project}},
+                       self.home)
+        return {"ok": True}
+
+    def organize_plan(self):
+        return records.plan(records.live(log.read_all(self.log_dir)), self._projects(), home=self.home)
+
+    def organize_apply(self, picks):
+        picks = picks if isinstance(picks, dict) else {}
+        return records.apply(log.read_all(self.log_dir), self._projects(), picks, home=self.home)
+
+    def organize_undo(self):
+        return records.undo(home=self.home)
 
     def clear_notice(self):
         """직전 답변 표시나 실패 알림을 닫고 기본 상태 화면으로 돌아간다."""
@@ -302,8 +358,8 @@ class PetRuntime:
         """현재 ~/.ro 로그·학습 후보·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
         now = now or time.time()
         day = time.strftime("%Y-%m-%d", time.localtime(now))
-        today_events = log.read(day, self.log_dir)
-        all_events = log.read_all(self.log_dir)
+        all_events = records.live(log.read_all(self.log_dir))
+        today_events = [e for e in all_events if str(e.get("ts", ""))[:10] == day]
         cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
         findings, _ = harden.audit(self.home, fix=False)
         mapdata = ask.load_map(self.map_path)
@@ -356,6 +412,7 @@ class PetRuntime:
 
         recent_logs = [
             {
+                "id": records.eid(e),
                 "ts": e.get("ts", "")[11:19],
                 "kind": e.get("kind", ""),
                 "summary": log.redact(str(e.get("summary", ""))),
@@ -385,6 +442,10 @@ class PetRuntime:
             "material_label": MATERIAL_LABELS[material],
             "status_line": log.redact(status_line),
             "layers": layer_widths(len(today_events), len(projects), mood),
+            "ambient": ambient_state(
+                len(today_events), time.localtime(now).tm_hour, focus=self.focus_on,
+                held=max(0, len(today_events) - self._focus_base),
+                attention=bool(write_pending or findings or last_route_failed or cands)),
             "offsets": layer_offsets(mood),
             "counts": {
                 "today_events": len(today_events),
@@ -392,6 +453,7 @@ class PetRuntime:
                 "pending_rules": len(cands),
                 "audit_findings": len(findings),
             },
+            "project_names": [p["name"] for p in projects][:40],
             "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
             "audit_findings": [log.redact(f) for f in findings[:3]],
@@ -1736,6 +1798,107 @@ PET_HTML = r"""<!DOCTYPE html>
     color: #16161a;
     box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.16);
   }
+  :root {
+    --spring: linear(0, 0.031, 0.107, 0.208, 0.319, 0.429, 0.534, 0.628, 0.71, 0.78, 0.838, 0.884, 0.921, 0.949, 0.97, 0.985, 0.996, 1.003, 1.008, 1.01, 1);
+  }
+  [hidden] { display: none !important; }
+  /* E · 앰비언트: 바닥 층 길이가 오늘 기록 수를 말한다 */
+  .ro-bot { width: max(calc(23 * var(--u)), var(--base-px, 0px)); }
+  .mood-idle .pill-base, .mood-discovery .pill-base, .mood-anxious .pill-base {
+    width: var(--base-px, calc(23 * var(--u))) !important;
+  }
+  .pill-base { transition: width 400ms var(--spring), transform 0.28s cubic-bezier(.22, 1, .36, 1), background-color 0.2s ease; }
+  .pet-wrap.focus-mode .eye-l, .pet-wrap.focus-mode .eye-r {
+    width: calc(2.2 * var(--u)) !important;
+    height: 2.5px !important;
+  }
+  .attn-dot {
+    position: absolute; top: -3px; right: -3px; width: 9px; height: 9px;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--panel-bg);
+  }
+  .mute-badge {
+    position: absolute; top: -17px; right: -20px; display: flex; align-items: center; gap: 3px;
+    background: var(--panel-fg); color: var(--panel-bg); border-radius: 999px;
+    padding: 1px 6px; font-size: 10px; font-weight: 800;
+  }
+  /* A · 끌어다 놓기 */
+  .pet-wrap.drop-ready::before {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 2px solid var(--accent); animation: dropPulse 1s ease-in-out infinite; pointer-events: none;
+  }
+  @keyframes dropPulse { 0%, 100% { opacity: 0.55; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1.03); } }
+  .toast {
+    background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
+    padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; position: relative; overflow: hidden;
+  }
+  .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
+  .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
+  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+  .toast-row select {
+    background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
+    font: inherit; font-weight: 800; padding: 3px 8px;
+  }
+  .toast-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); width: 100%;
+    transform-origin: left; animation: toastBar 6s linear forwards; }
+  .toast:hover .toast-bar, .toast:focus-within .toast-bar { animation-play-state: paused; }
+  @keyframes toastBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  .mini-btn {
+    border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg);
+    border-radius: 999px; font: inherit; font-size: 10.5px; font-weight: 700; padding: 3px 9px; cursor: pointer;
+  }
+  .mini-btn.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
+  body.theme-chalk .mini-btn.primary { background: var(--chalk); color: var(--ink); border-color: var(--chalk); }
+  /* C · 근거 붙은 답 · D · 정리 카드 */
+  .rc-card, .org-card {
+    background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
+    padding: 10px 11px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .rc-q { align-self: flex-end; background: var(--ink); color: var(--chalk); border-radius: 999px; padding: 4px 10px; font-size: 11px; }
+  body.theme-chalk .rc-q { background: var(--chalk); color: var(--ink); }
+  .rc-head { font-size: 14px; font-weight: 800; }
+  .rc-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
+  .rc-n {
+    display: inline-block; min-width: 15px; text-align: center; margin-left: 5px; border-radius: 5px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 9.5px; font-weight: 800; color: var(--muted);
+  }
+  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 10.5px; }
+  .rc-ev summary { cursor: pointer; font-weight: 700; color: var(--muted); }
+  .rc-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--divider); }
+  .rc-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rc-row .d { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rc-foot { font-size: 10px; color: var(--muted); }
+  .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
+  body.theme-chalk .org-bar { background: var(--chalk); }
+  .org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
+  .org-row { display: flex; flex-direction: column; gap: 3px; }
+  .org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
+  .org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
+  .org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+  .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
+  /* B · ⌥R 명령 팔레트 */
+  .palette {
+    position: absolute; inset: 0; z-index: 6; border-radius: 20px; padding: 10px;
+    background: rgba(20, 19, 17, 0.38); display: flex; align-items: flex-start;
+  }
+  .pal-box {
+    width: 100%; background: var(--panel-bg); color: var(--panel-fg); border: 1px solid var(--panel-border);
+    border-radius: 14px; box-shadow: 0 12px 28px rgba(15, 14, 13, 0.3); overflow: hidden;
+  }
+  .pal-input-row { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-bottom: 1px solid var(--divider); }
+  .pal-slash { color: var(--accent-text); font-weight: 800; }
+  .pal-input { flex: 1; border: none; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12.5px; user-select: text; -webkit-user-select: text; }
+  .pal-list { max-height: 270px; overflow-y: auto; padding: 4px 5px; }
+  .pal-sec { font-size: 9.5px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
+  .pal-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 9px; font-size: 11.5px; cursor: pointer; }
+  .pal-item[aria-selected="true"] { background: var(--panel-soft); }
+  .pal-item b { font-weight: 800; min-width: 44px; }
+  .pal-item span { color: var(--muted); font-size: 10.5px; }
+  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 9.5px; color: var(--muted); }
+  kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
+  /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
+  .tab-pane.active { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+  .tab-pane.active > * { flex-shrink: 0; }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -1848,6 +2011,11 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- C · 근거 붙은 답 -->
+      <div id="recallCard" class="rc-card" style="display:none;" aria-live="polite"></div>
+      <!-- D · 미리 보고 되돌리는 정리 -->
+      <div id="orgCard" class="org-card" style="display:none;" aria-live="polite"></div>
+
       <!-- 최근 활동 섹션 -->
       <div class="section-row">
         <span class="section-label">최근 활동</span>
@@ -1868,6 +2036,13 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 3. 설정 (Settings) 탭 -->
     <div id="paneSettings" class="tab-pane">
       <div class="settings-stream">
+        <!-- 집중 모드 -->
+        <div class="setting-block">
+          <div class="block-title">집중 모드</div>
+          <div class="options-row">
+            <button id="focusBtn" class="opt-btn" aria-pressed="false">눈 감고 알림 모아두기</button>
+          </div>
+        </div>
         <!-- 표정 6종 -->
         <div class="setting-block">
           <div class="block-title">표정 (6종)</div>
@@ -1938,6 +2113,23 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- A · 기록 토스트 -->
+    <div id="toast" class="toast" role="status" aria-live="polite" style="display:none;"></div>
+
+    <!-- B · ⌥R 명령 팔레트 -->
+    <div id="palette" class="palette" hidden>
+      <div class="pal-box" role="dialog" aria-modal="true" aria-label="명령 팔레트">
+        <div class="pal-input-row">
+          <span class="pal-slash" aria-hidden="true">/</span>
+          <input id="palInput" class="pal-input" type="text" role="combobox" aria-expanded="true"
+                 aria-controls="palList" aria-label="명령을 고르거나 그냥 물어보세요" autocomplete="off"
+                 placeholder="명령을 고르거나 그냥 물어보세요">
+        </div>
+        <div id="palList" class="pal-list" role="listbox" aria-label="명령 목록"></div>
+        <div class="pal-foot"><span><kbd>↑↓</kbd> 이동</span><span><kbd>↵</kbd> 실행</span><span><kbd>esc</kbd> 닫기</span></div>
+      </div>
+    </div>
+
     <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
       <div class="input-bar">
@@ -1959,6 +2151,8 @@ PET_HTML = r"""<!DOCTYPE html>
   <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 표정 전환 · 드래그: 이동">
     <div id="roBot" class="ro-bot">
       <div id="layerHead" class="pill pill-head">
+        <span id="attnDot" class="attn-dot" aria-hidden="true" hidden></span>
+        <span id="muteBadge" class="mute-badge" hidden><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1H3z"/><line x1="2" y1="2" x2="14" y2="14"/></svg><span>0</span></span>
         <div id="eyesWrap" class="eyes">
           <div id="eyeL" class="eye eye-l"></div>
           <div id="eyeR" class="eye eye-r"></div>
@@ -2637,19 +2831,21 @@ function applyState(st) {
       const stepIndex = String(total - idx).padStart(2, "0");
       const row = document.createElement("div");
       row.className = "timeline-row";
+      row.dataset.id = item.id || "";
       row.innerHTML = `
         <span class="step-badge">${stepIndex}</span>
         <div class="timeline-body">
           <div class="timeline-meta">
-            <span class="timeline-tag">${item.kind}</span>
-            <span class="timeline-time">${item.ts}</span>
+            <span class="timeline-tag">${esc(item.kind)}</span>
+            <span class="timeline-time">${esc(item.ts)}</span>
           </div>
-          <div class="timeline-text">${item.summary}</div>
+          <div class="timeline-text">${esc(item.summary)}</div>
         </div>
       `;
       timelineList.appendChild(row);
     });
   }
+  applyAmbient(st);
 }
 
 async function refreshState() {
@@ -2712,6 +2908,306 @@ document.getElementById("fbNo").addEventListener("click", async () => {
   await apiPost("/api/feedback", { accepted: false });
   await refreshState();
 });
+
+/* ===== UX 확장: 앰비언트(E) · 근거 있는 답(C) · 정리(D) · ⌥R 팔레트(B) · 끌어다 놓기(A) ===== */
+const attnDot = document.getElementById("attnDot");
+const muteBadge = document.getElementById("muteBadge");
+const toastEl = document.getElementById("toast");
+const recallCard = document.getElementById("recallCard");
+const orgCard = document.getElementById("orgCard");
+const palette = document.getElementById("palette");
+const palInput = document.getElementById("palInput");
+const palList = document.getElementById("palList");
+const focusBtn = document.getElementById("focusBtn");
+let ambient = null;
+let dropActive = false;
+let projectNames = [];
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
+  }
+  kids.flat().forEach(c => c != null && el.append(c));
+  return el;
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* E · 앰비언트 몸 */
+function applyAmbient(st) {
+  projectNames = st.project_names || projectNames;
+  ambient = st.ambient || null;
+  if (!ambient) return;
+  petWrap.style.setProperty("--base-px", ambient.base_px + "px");
+  petWrap.classList.toggle("focus-mode", ambient.focus);
+  petWrap.classList.toggle("drop-ready", dropActive);
+  attnDot.hidden = !ambient.attention;
+  muteBadge.hidden = !(ambient.focus && ambient.held > 0);
+  muteBadge.querySelector("span").textContent = ambient.held;
+  muteBadge.setAttribute("aria-label", `알림 ${ambient.held}건 모아둠`);
+  focusBtn.setAttribute("aria-pressed", ambient.focus ? "true" : "false");
+  petWrap.setAttribute("aria-label", `ro · ${ambient.focus ? "집중 모드" : ambient.label}${ambient.attention ? " · 확인 필요" : ""}`);
+  if (!currentAction && Date.now() >= previewLockUntil) {
+    petCaption.textContent = dropActive ? "놓으면 기록해요" : (ambient.focus ? "집중 모드" : ambient.label);
+  }
+}
+focusBtn.addEventListener("click", async () => {
+  await apiPost("/api/focus", { on: !(ambient && ambient.focus) });
+  await refreshState();
+});
+
+/* A · 토스트 */
+let toastTimer = null;
+function hideToast() {
+  clearTimeout(toastTimer);
+  toastEl.style.display = "none";
+  toastEl.replaceChildren();
+}
+function showToast(nodes, ms) {
+  clearTimeout(toastTimer);
+  toastEl.replaceChildren(...nodes);
+  toastEl.style.display = "flex";
+  if (ms) toastTimer = setTimeout(hideToast, ms);
+}
+function showCaptured(res) {
+  if (!res.ok) {
+    showToast([h("div", { class: "toast-head", text: res.error || "기록하지 못했어요" })], 4000);
+    return;
+  }
+  const sel = h("select", { "aria-label": "프로젝트 분류" },
+    h("option", { value: "", text: "분류 없음" }),
+    projectNames.map(n => h("option", { value: n, text: n })));
+  sel.value = res.project || "";
+  sel.addEventListener("change", async () => {
+    if (sel.value) await apiPost("/api/capture_project", { id: res.id, project: sel.value });
+  });
+  const undo = h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
+    const r = await apiPost("/api/capture_undo", { id: res.id });
+    showToast([h("div", { class: "toast-head", text: r.ok ? "되돌렸어요" : (r.error || "되돌리지 못했어요") })], 2200);
+    await refreshState();
+  } });
+  showToast([
+    h("div", { class: "toast-head" }, h("span", { text: "기록했어요" }), undo),
+    h("div", { class: "toast-file", text: res.summary }),
+    h("div", { class: "toast-row" }, h("span", { text: "분류" }), sel,
+      h("span", { text: res.project ? "내용을 보고 Ro가 골랐어요" : "분류를 골라주세요" })),
+    h("div", { class: "toast-bar", "aria-hidden": "true" }),
+  ], 6000);
+}
+async function capture(kind, name, text, size) {
+  const res = await apiPost("/api/capture", { kind, name, text: String(text || "").slice(0, 4000), size });
+  setBubbleOpen(true);
+  switchTab("home");
+  showCaptured(res);
+  await refreshState();
+}
+const TEXT_EXT = /\.(md|txt|csv|json|py|js|ts|tsx|log|ya?ml|toml|html|css|swift|sh|rs|go)$/i;
+async function handleDrop(dt) {
+  const file = dt.files && dt.files[0];
+  if (file) {
+    const readable = file.type.startsWith("text/") || TEXT_EXT.test(file.name);
+    const text = readable ? await file.slice(0, 20000).text() : `${file.name} (${Math.round(file.size / 1024)}KB)`;
+    return capture("file", file.name, text, file.size);
+  }
+  const uri = (dt.getData("text/uri-list") || "").split("\n").find(l => l && !l.startsWith("#"));
+  const plain = (dt.getData("text/plain") || "").trim();
+  const link = uri || (/^https?:\/\/\S+$/.test(plain) ? plain : "");
+  if (link) {
+    let host = "링크";
+    try { host = new URL(link).host; } catch (e) {}
+    return capture("link", host, link, 0);
+  }
+  if (plain) return capture("text", "끌어다 놓은 텍스트", plain, plain.length);
+}
+function setDropActive(on) {
+  if (dropActive === on) return;
+  dropActive = on;
+  petWrap.classList.toggle("drop-ready", on);
+  if (on) petCaption.textContent = "놓으면 기록해요";
+}
+window.addEventListener("dragenter", (e) => { e.preventDefault(); setDropActive(true); });
+window.addEventListener("dragover", (e) => { e.preventDefault(); setDropActive(true); });
+window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) setDropActive(false); });
+window.addEventListener("drop", (e) => { e.preventDefault(); setDropActive(false); handleDrop(e.dataTransfer); });
+
+/* C · 근거 붙은 답 */
+function openRecord(id) {
+  switchTab("timeline");
+  const row = timelineList.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (row) {
+    row.scrollIntoView({ block: "center" });
+    row.classList.add("flash");
+    setTimeout(() => row.classList.remove("flash"), 1600);
+  }
+}
+async function runRecall(q) {
+  pushRecent(q);
+  const r = await apiPost("/api/recall", { question: q });
+  setBubbleOpen(true);
+  switchTab("home");
+  orgCard.style.display = "none";
+  const items = (r.items || []).map(i => h("li", {}, h("span", { text: i.text }), h("sup", { class: "rc-n", text: i.n })));
+  const ev = (r.evidence || []).length ? h("details", { class: "rc-ev" },
+    h("summary", { text: `근거 · 기록 ${r.evidence.length}건` }),
+    r.evidence.map(e => h("div", { class: "rc-row" },
+      h("span", { class: "rc-n", text: e.n }), h("span", { class: "t", text: e.summary }),
+      h("span", { class: "d", text: e.ts }),
+      h("button", { class: "mini-btn", type: "button", "aria-label": `기록 ${e.n} 열기`, text: "↗", onclick: () => openRecord(e.id) })))) : null;
+  const chips = h("div", { class: "chip-row" },
+    r.found ? h("button", { class: "mini-btn", type: "button", text: (r.followups || [])[0] || "오늘 이어서 할 일은?",
+      onclick: () => runRecall("오늘 뭐 했지?") }) : null,
+    r.found ? h("button", { class: "mini-btn", type: "button", text: "메모로 저장", onclick: () =>
+      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null);
+  recallCard.replaceChildren(
+    h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: r.headline }),
+    items.length ? h("ul", { class: "rc-list" }, items) : null, ev, chips,
+    h("div", { class: "rc-foot", text: r.note || "" }));
+  recallCard.style.display = "flex";
+  answerCard.style.display = "none";
+}
+
+/* D · 미리 보고 되돌리는 정리 */
+async function showOrganize() {
+  const p = await apiPost("/api/organize_plan", {});
+  setBubbleOpen(true);
+  switchTab("home");
+  recallCard.style.display = "none";
+  const max = Math.max(1, ...p.groups.map(g => g.count));
+  const picks = {};
+  const amb = p.ambiguous.length ? h("div", { class: "org-amb" },
+    h("div", { class: "org-line" }, h("span", {}, h("i", { class: "org-dot" }), `확인 필요`), h("span", { text: `${p.ambiguous.length}건 골라주기` })),
+    p.ambiguous.slice(0, 8).map(a => {
+      const s = h("select", { "aria-label": `${a.summary} 분류` }, h("option", { value: "", text: "고르기" }),
+        a.candidates.map(c => h("option", { value: c, text: c })));
+      s.addEventListener("change", () => { picks[a.id] = s.value; });
+      return h("label", {}, h("div", { text: a.summary }), s);
+    })) : null;
+  const apply = h("button", { class: "mini-btn primary", type: "button", text: "적용하기", onclick: async () => {
+    const r = await apiPost("/api/organize_apply", { picks });
+    if (!r.ok) { orgCard.replaceChildren(h("div", { class: "rc-head", text: r.error || "적용하지 못했어요" })); return; }
+    orgCard.replaceChildren(h("div", { class: "rc-head", text: `적용했어요 · ${r.applied}건` }),
+      h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
+        const u = await apiPost("/api/organize_undo", {});
+        orgCard.replaceChildren(h("div", { class: "rc-head", text: u.ok ? `되돌렸어요 · ${u.reverted}건` : (u.error || "되돌리지 못했어요") }));
+      } }),
+      h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
+  } });
+  const cancel = h("button", { class: "mini-btn", type: "button", text: "취소", onclick: () => { orgCard.style.display = "none"; } });
+  orgCard.replaceChildren(
+    h("div", { class: "rc-head", text: "이렇게 묶을게요" }),
+    h("div", { class: "rc-foot", text: `기록 ${p.total}건 → 프로젝트 ${p.groups.length}개. 아직 아무것도 바뀌지 않았어요.` }),
+    ...p.groups.map(g => h("div", { class: "org-row" },
+      h("div", { class: "org-line" }, h("span", { text: g.project }), h("span", { text: `${g.count}건` })),
+      h("div", { class: "org-bar", style: `width:${Math.round(g.count / max * 100)}%` }))),
+    amb,
+    h("div", { class: "chip-row" }, apply, cancel),
+    h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
+  orgCard.style.display = "flex";
+}
+
+/* B · ⌥R 팔레트 */
+const COMMANDS = [
+  { id: "record", label: "/기록", desc: "지금 한 일 한 줄로 남기기", arg: true },
+  { id: "organize", label: "/정리", desc: "흩어진 기록을 프로젝트별로" },
+  { id: "today", label: "/오늘", desc: "오늘 요약 보기" },
+  { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true },
+  { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기" },
+];
+const RECALL_INTENT = /(뭐\s*했|무엇을\s*했|했[어지니]|기록|오늘|어제|그제|이번\s*주|지난\s*주|찾)/;
+let palIndex = 0, palRows = [], lastFocus = null;
+function recentList() {
+  try { return JSON.parse(localStorage.getItem("ro.recent") || "[]"); } catch (e) { return []; }
+}
+function pushRecent(q) {
+  try { localStorage.setItem("ro.recent", JSON.stringify([q, ...recentList().filter(x => x !== q)].slice(0, 5))); } catch (e) {}
+}
+function parsePalette(raw) {
+  const t = raw.replace(/^\s+/, "");
+  const m = t.match(/^\/(\S*)\s*(.*)$/s);
+  return m ? { slash: true, name: m[1], arg: m[2].trim() } : { slash: false, text: t.trim() };
+}
+function buildRows() {
+  const p = parsePalette(palInput.value);
+  const rows = [];
+  if (p.slash) {
+    COMMANDS.filter(c => c.label.slice(1).startsWith(p.name)).forEach(c => rows.push({ sec: "명령", cmd: c, arg: p.arg }));
+  } else if (!p.text) {
+    COMMANDS.forEach(c => rows.push({ sec: "명령", cmd: c }));
+    recentList().forEach(q => rows.push({ sec: "최근에 물어본 것", ask: q }));
+  } else {
+    rows.push({ sec: "질문", ask: p.text });
+  }
+  return rows;
+}
+function renderPalette() {
+  palRows = buildRows();
+  palIndex = Math.min(palIndex, Math.max(0, palRows.length - 1));
+  palList.replaceChildren();
+  let sec = null;
+  palRows.forEach((r, i) => {
+    if (r.sec !== sec) { sec = r.sec; palList.append(h("div", { class: "pal-sec", role: "presentation", text: sec })); }
+    const item = h("div", { class: "pal-item", role: "option", id: `palOpt${i}`, "aria-selected": i === palIndex ? "true" : "false",
+      onmousedown: (e) => { e.preventDefault(); palIndex = i; runPalette(); } },
+      r.cmd ? [h("b", { text: r.cmd.label }), h("span", { text: r.cmd.desc })] : [h("b", { text: r.sec === "질문" ? "질문" : "다시" }), h("span", { text: r.ask })]);
+    palList.append(item);
+  });
+  palInput.setAttribute("aria-activedescendant", palRows.length ? `palOpt${palIndex}` : "");
+}
+function openPalette() {
+  if (!palette.hidden) return;
+  lastFocus = document.activeElement;
+  palette.hidden = false;
+  palInput.value = "";
+  palIndex = 0;
+  renderPalette();
+  palInput.focus();
+}
+function closePalette() {
+  if (palette.hidden) return;
+  palette.hidden = true;
+  if (lastFocus && lastFocus.focus) lastFocus.focus();
+}
+window.openPaletteFromHost = function() { setBubbleOpen(true); openPalette(); };
+async function runPalette() {
+  const r = palRows[palIndex];
+  if (!r) return;
+  if (r.cmd) {
+    const c = r.cmd;
+    if (c.arg && !r.arg) { palInput.value = c.label + " "; renderPalette(); return; }
+    closePalette();
+    if (c.id === "record") await capture("text", "직접 기록", r.arg, r.arg.length);
+    else if (c.id === "organize") await showOrganize();
+    else if (c.id === "today") await runRecall("오늘 뭐 했지?");
+    else if (c.id === "find") await runRecall(`${r.arg} 기록 찾아줘`);
+    else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+    return;
+  }
+  closePalette();
+  if (RECALL_INTENT.test(r.ask)) { await runRecall(r.ask); return; }
+  pushRecent(r.ask);
+  askInput.value = r.ask;
+  askForm.requestSubmit();
+}
+palInput.addEventListener("input", () => { palIndex = 0; renderPalette(); });
+window.addEventListener("keydown", (e) => {
+  if (e.altKey && e.code === "KeyR" && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (palette.hidden) window.openPaletteFromHost(); else closePalette();
+    return;
+  }
+  if (palette.hidden) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closePalette(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); palIndex = (palIndex + 1) % Math.max(1, palRows.length); renderPalette(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palIndex = (palIndex - 1 + palRows.length) % Math.max(1, palRows.length); renderPalette(); }
+  else if (e.key === "Enter") { e.preventDefault(); runPalette(); }
+  else if (e.key === "Tab") { e.preventDefault(); }
+}, true);
 
 refreshState();
 window._poll = setInterval(refreshState, 450);
@@ -2784,6 +3280,23 @@ def make_handler(runtime):
                 self._send_json(200, runtime.decide_rule(data.get("action"), data.get("id")))
             elif parsed.path == "/api/write_gate":
                 self._send_json(200, runtime.resolve_write_approval(bool(data.get("approve"))))
+            elif parsed.path == "/api/recall":
+                self._send_json(200, runtime.recall_question(data.get("question", "")))
+            elif parsed.path == "/api/capture":
+                self._send_json(200, runtime.capture(data.get("kind", ""), data.get("name", ""),
+                                                     data.get("text", ""), data.get("size", 0)))
+            elif parsed.path == "/api/capture_undo":
+                self._send_json(200, runtime.capture_undo(data.get("id")))
+            elif parsed.path == "/api/capture_project":
+                self._send_json(200, runtime.capture_project(data.get("id"), data.get("project")))
+            elif parsed.path == "/api/organize_plan":
+                self._send_json(200, runtime.organize_plan())
+            elif parsed.path == "/api/organize_apply":
+                self._send_json(200, runtime.organize_apply(data.get("picks")))
+            elif parsed.path == "/api/organize_undo":
+                self._send_json(200, runtime.organize_undo())
+            elif parsed.path == "/api/focus":
+                self._send_json(200, runtime.set_focus(bool(data.get("on"))))
             elif parsed.path == "/api/clear":
                 self._send_json(200, runtime.clear_notice())
             elif parsed.path == "/api/action":
@@ -2820,7 +3333,7 @@ def ensure_mac_binary(force_build=False):
     bin_path = cache_dir / "ro-pet-host"
     if not force_build and bin_path.exists() and bin_path.stat().st_mtime >= src.stat().st_mtime:
         return bin_path
-    cmd = ["swiftc", "-O", str(src), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit"]
+    cmd = ["swiftc", "-O", str(src), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit", "-framework", "Carbon"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"macOS 펫 오버레이 컴파일 실패:\n{r.stderr}")
