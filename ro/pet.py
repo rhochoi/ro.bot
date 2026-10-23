@@ -2485,7 +2485,7 @@ function renderOrganize(o) {
   orgSummary.textContent = parts.length
     ? `${parts.join(" · ")} — 누르면 승인 요청이 올라갑니다.` + (o.review ? " 검토 항목은 터미널 ro organize edit로." : "")
     : "옮기거나 치울 항목이 없습니다.";
-  if (o.trashed) orgSummary.textContent += ` 격리 보관 중 ${fmtBytes(o.trashed)}(삭제 전이라 공간은 그대로).`;
+  if (o.trashed) orgSummary.textContent += ` 격리 보관 중 ${fmtBytes(o.trashed)} — 공간을 비우려면 터미널에서 ro organize trash --empty(7일 지난 것만).`;
   o.counts.forEach(([cat, n]) => orgChip(orgCats, `${cat} ${n}`, `${cat} ${n}건 이동 승인 요청`, { category: cat }));
   quar.forEach(([kind, label, n, size]) => orgChip(orgQuar, `${label} ${n} · ${fmtBytes(size)}`,
     `${label} ${n}건을 격리(삭제 아님, 되돌리기 가능) 승인 요청`, { kind }, "quar"));

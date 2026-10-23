@@ -53,5 +53,33 @@ class CliOrganizeTest(unittest.TestCase):
         self.assertIn("organize", self.ro("--help").stdout)
 
 
+    def test_trash_empty_refuses_without_terminal(self):
+        import json
+        import zipfile
+        (self.root / "pic.png").write_text("IMG")
+        with zipfile.ZipFile(self.root / "pic.zip", "w") as zf:
+            zf.writestr("pic.png", "IMG")
+        for p in self.root.iterdir():
+            os.utime(p, (1, 1))
+        self.assertEqual(self.ro("organize", "scan").returncode, 0)
+        self.assertEqual(self.ro("organize", "apply", "--kind", "extracted").returncode, 0)
+        j = self.home / ".ro" / "cleanup" / "journal.jsonl"
+        rows = [json.loads(x) for x in j.read_text().splitlines()]
+        for r in rows:
+            r["ts"] = "2020-01-01T00:00:00+0000"  # 7일 넘게 지난 배치
+        j.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        trashed = list((self.home / ".ro" / "cleanup" / "trash").rglob("*.zip"))
+        self.assertEqual(len(trashed), 1)
+
+        r = self.ro("organize", "trash")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("← 비울 수 있음", r.stdout)
+        env = {**os.environ, "HOME": str(self.home)}
+        r = subprocess.run([sys.executable, "-m", "ro", "organize", "trash", "--empty"], cwd=REPO, env=env,
+                           input="yes\n", capture_output=True, text=True, timeout=60)  # 파이프로 yes를 넣어도 거부
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("터미널에서 직접 확인", r.stderr)
+        self.assertTrue(trashed[0].exists())
+
 if __name__ == "__main__":
     unittest.main()

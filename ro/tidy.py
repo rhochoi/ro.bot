@@ -200,7 +200,7 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
 def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
     """배치(기본: 가장 최근)를 원위치로 복원. 반환: (batch, 복원 목록, 건너뜀)."""
     entries = read_journal(home)
-    restored_ids = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
+    restored_ids = {(e["batch"], e["id"]) for e in entries if e["op"] in ("restore", "purge")}  # 비운 것은 되돌리지 않는다
     moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored_ids]
     if not moves:
         raise ValueError("되돌릴 항목이 없습니다")

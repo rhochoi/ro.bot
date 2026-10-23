@@ -35,7 +35,7 @@ ro --version   # 설치된 버전
 - `python -m ro map` 프로젝트·도구 지도 생성 (`~/.ro/map.json`)
 - `python -m ro ask "질문" [--dry-run|--yes|--json|-c]` 컨텍스트 선택 → 전송 내용 확인 → 엔진 호출 → 기록. 지도(`map`)가 없으면 스캔하지 않고 안내만 한다. `--yes` 없이는 확인 없이 보내지 않는다. `-c`는 후속 질문, `--json`은 앱 연동용 이벤트 출력
 - `ro collect allow|deny|status|run` 활동 수집(허용한 소스만), `ro feedback y|n ...`, `ro log delete --yes`
-- `python -m ro organize scan|show|edit|apply|undo` 다운로드 정리 한 번에: 파일마다 분류 이동·치울 후보(중복·풀린 압축·옛 버전)·보관 중 하나를 제안 → 승인한 것만 적용(삭제 없음, `undo` 한 번에 복원). `ro tidy`는 이 명령의 별칭 (`docs/CLEANUP-DESIGN.md`)
+- `python -m ro organize scan|show|edit|apply|undo` 다운로드 정리 한 번에: 파일마다 분류 이동·치울 후보(중복·풀린 압축·옛 버전)·보관 중 하나를 제안 → 승인한 것만 적용(삭제 없음, `undo` 한 번에 복원). 격리 폴더 보기·비우기는 `ro organize trash [--empty]`(7일 지난 배치만, 터미널에서 `yes` 확인). `ro tidy`는 이 명령의 별칭 (`docs/CLEANUP-DESIGN.md`)
 - `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서 (말풍선의 `정리` 버튼: 정리안 보기 → 카테고리별 승인 → 되돌리기)
 - `python -m ro learn` / `route` / `log` / `audit` / `eval` / `ambient` 상세는 `docs/BLUEPRINT.md`
 - 테스트: `python -m unittest discover -s tests -t .`
