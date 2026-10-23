@@ -14,13 +14,20 @@ from . import fsutil
 LOG_DIR = "~/.ro/log"
 SECRET_KEY = re.compile(r"pass(word)?|secret|token|api[_-]?key|credential|private[_-]?key", re.I)
 SECRET_VALUE = re.compile(
-    r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}"
-    r"|xox[abp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+    r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
+    r"|AIza[0-9A-Za-z_-]{30,}|xox[abp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+)"  # JWT
 )
 MASK = "[REDACTED]"
 # 자유 문장 속 비밀: "password=..." "token: ..." "Bearer ..." (키 이름은 남기고 값만 가린다)
+# 값이 따옴표로 묶이면 따옴표 안 전체(공백 포함)를 가린다.
 SECRET_ASSIGN = re.compile(
-    r"\b(pass(?:word|wd)?|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)(?!\[REDACTED\])\S+", re.I)
+    r"\b(pass(?:word|wd)?|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)(?!\[REDACTED\])"
+    r"(\"[^\"]*\"|'[^']*'|\S+)", re.I)
+# "비밀번호는 hunter2"처럼 조사로 이어진 값: 숫자·기호가 섞인 낱말만 비밀로 본다("비밀번호는 어떻게"는 그대로)
+SECRET_KO = re.compile(
+    r"(비밀\s*번호|패스워드|암호|토큰)(\s*[:=]\s*|\s*(?:은|는|이|가)\s+(?=\"|'|\S*[0-9!@#$%^&*_-]))"
+    r"(?!\[REDACTED\])(\"[^\"]*\"|'[^']*'|\S+)")
 BEARER = re.compile(r"\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/-]+=*", re.I)
 
 
@@ -32,7 +39,8 @@ def redact(obj):
     if isinstance(obj, str):
         obj = SECRET_VALUE.sub(MASK, obj)
         obj = BEARER.sub("Bearer " + MASK, obj)
-        return SECRET_ASSIGN.sub(lambda m: m[1] + m[2] + MASK, obj)
+        obj = SECRET_ASSIGN.sub(lambda m: m[1] + m[2] + MASK, obj)
+        return SECRET_KO.sub(lambda m: m[1] + m[2] + MASK, obj)
     return obj
 
 

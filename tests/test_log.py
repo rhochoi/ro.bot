@@ -40,6 +40,18 @@ class LogTest(unittest.TestCase):
         self.assertEqual(log.redact(log.redact("password=x")), "password=" + log.MASK)
 
 
+    def test_redact_more_secret_formats_without_false_positives(self):
+        r = log.redact
+        for s in ("AIzaSyA-1234567890abcdefghijklmnopqrstu", "github_pat_11ABCDEFG0123456789_abcdefghijklmn",
+                  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefg"):
+            self.assertEqual(r(f"키 {s} 끝"), f"키 {log.MASK} 끝")
+        self.assertEqual(r('PASSWORD="hunter 2" ok'), f"PASSWORD={log.MASK} ok")
+        self.assertEqual(r("비밀번호는 hunter2"), f"비밀번호는 {log.MASK}")
+        self.assertEqual(r("토큰: abc"), f"토큰: {log.MASK}")
+        for plain in ("비밀번호는 어떻게 바꿔?", "암호화는 뭐야", "password 재설정 방법", "tokens: 5 used"):
+            self.assertEqual(r(plain), plain)
+
+
 if __name__ == "__main__":
     unittest.main()
 

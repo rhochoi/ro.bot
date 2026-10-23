@@ -117,5 +117,11 @@ class AskTest(unittest.TestCase):
                          str(self.d / "beta"))
 
 
+    def test_prompt_masks_secrets_in_question(self):
+        p = ask.plan("이 키 왜 안돼 sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV", self.map, use_context=False)
+        self.assertNotIn("ABCDEFGH", p["prompt"])
+        self.assertIn(log.MASK, p["prompt"])
+
+
 if __name__ == "__main__":
     unittest.main()
