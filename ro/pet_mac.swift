@@ -50,6 +50,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private let compactSize = NSSize(width: 176, height: 168)
     private let expandedSize = NSSize(width: 360, height: 520)
     private let edgeMargin: CGFloat = 6.0
+    // 화면 위 이 거리 안으로 끌고 오면 메뉴 막대에 Ro 자리가 열린다
+    private let dockZone: CGFloat = 80.0
+    private var toastPanel: NSPanel?
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -232,6 +235,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         var lastDxSign = 0
         var shakeCount = 0
         var lastReversalTime = Date().timeIntervalSince1970
+        // 메뉴 막대로 보내기는 데스크톱 펫(말풍선 닫힘)을 끌 때만
+        let canDock = fromPet && mode == .desktop && !bubbleOpen
+        var inZone = false
+        var lastProgress: CGFloat = 0
         isDragging = true
 
         if fromPet {
@@ -283,10 +290,31 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 self.panel.setFrameOrigin(clamped)
                 self.updateBackdropTheme(force: false)
             }
+            if canDock && moved {
+                let top = (self.panel.screen ?? NSScreen.main)?.visibleFrame.maxY ?? curMouse.y
+                let d = max(0, top - curMouse.y)
+                let nowIn = d < self.dockZone
+                if nowIn != inZone {
+                    inZone = nowIn
+                    self.statusItem.isVisible = nowIn  // 막대에 자리를 열고 닫는다
+                }
+                let progress = nowIn ? min(1, 1 - d / self.dockZone) : 0
+                if abs(progress - lastProgress) > 0.02 || (progress == 0) != (lastProgress == 0) {
+                    lastProgress = progress
+                    self.webView.evaluateJavaScript(
+                        "window.onHostDockProgress && window.onHostDockProgress(\(String(format: "%.3f", progress)));",
+                        completionHandler: nil
+                    )
+                }
+            }
             if (NSEvent.pressedMouseButtons & 1) == 0 {
                 timer.invalidate()
                 self.dragTimer = nil
                 self.isDragging = false
+                if inZone {
+                    self.dockToMenubar(returnOrigin: startOrigin)
+                    return
+                }
                 self.updateBackdropTheme(force: true)
                 if fromPet {
                     self.webView.evaluateJavaScript(
@@ -304,9 +332,92 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
-    private func make16pxIcon() -> NSImage {
+    // 놓는 순간 펫 창을 아이콘 자리로 빨아들이고 숨긴다. 다시 꺼내면 끌기 전 자리로 돌아온다
+    private func dockToMenubar(returnOrigin: NSPoint) {
+        guard let iconFrame = statusItem.button?.window?.frame else {
+            setMode(.menubar)
+            return
+        }
+        let size = panel.frame.size
+        let target = NSPoint(x: iconFrame.midX - size.width / 2, y: iconFrame.midY - size.height / 2)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.28
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.panel.animator().setFrameOrigin(target)
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            self.setMode(.menubar)
+            self.panel.setFrameOrigin(self.clampOrigin(returnOrigin, size: size))
+            self.webView.evaluateJavaScript("window.onHostDocked && window.onHostDocked();", completionHandler: nil)
+            self.bounceIcon()
+            // 아이템이 많으면 노치 뒤로 숨는다. 가려졌으면 알리고 데스크톱으로 되돌린다
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self = self, self.mode == .menubar,
+                      let win = self.statusItem.button?.window else { return }
+                if win.occlusionState.contains(.visible) {
+                    self.showToast("메뉴 막대로 옮겼어요", "아이콘을 끌어 내리면 다시 꺼낼 수 있어요")
+                } else {
+                    self.setMode(.desktop)
+                    self.showToast("메뉴 막대가 가득 찼어요", "아이콘이 노치 뒤로 가려져 데스크톱에 남겨 두었어요")
+                }
+            }
+        })
+    }
+
+    // 착지 바운스 1회: 살짝 올라간 아이콘을 잠깐 보여 준 뒤 제자리로
+    private func bounceIcon() {
+        guard let btn = statusItem.button else { return }
+        btn.image = make16pxIcon(lift: 1.5)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.statusItem.button?.image = self?.make16pxIcon()
+        }
+    }
+
+    // 펫 창이 숨은 상태에서도 보이도록 메뉴 막대 아래에 잠깐 띄우는 알림
+    private func showToast(_ title: String, _ detail: String) {
+        toastPanel?.orderOut(nil)
+        let label = NSTextField(labelWithAttributedString: {
+            let s = NSMutableAttributedString(string: title + "\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 13)])
+            s.append(NSAttributedString(string: detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor
+            ]))
+            return s
+        }())
+        label.sizeToFit()
+        let size = NSSize(width: label.frame.width + 32, height: label.frame.height + 22)
+        let box = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        box.material = .popover
+        box.state = .active
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 12
+        label.frame.origin = NSPoint(x: 16, y: 11)
+        box.addSubview(label)
+
+        let vf = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let anchorX = statusItem.isVisible ? (statusItem.button?.window?.frame.midX ?? vf.midX) : vf.midX
+        let x = min(max(anchorX - size.width / 2, vf.minX + 8), vf.maxX - size.width - 8)
+        let toast = NSPanel(contentRect: NSRect(x: x, y: vf.maxY - size.height - 8, width: size.width, height: size.height),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        toast.isOpaque = false
+        toast.backgroundColor = .clear
+        toast.hasShadow = true
+        toast.level = .statusBar
+        toast.ignoresMouseEvents = true
+        toast.contentView = box
+        toast.orderFrontRegardless()
+        toastPanel = toast
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self, weak toast] in
+            toast?.orderOut(nil)
+            if self?.toastPanel === toast { self?.toastPanel = nil }
+        }
+    }
+
+    private func make16pxIcon(lift: CGFloat = 0) -> NSImage {
         let size = NSSize(width: 16, height: 16)
         let img = NSImage(size: size, flipped: true) { _ in
+            let shift = NSAffineTransform()
+            shift.translateX(by: 0, yBy: -lift)  // flipped 좌표라 음수가 위쪽
+            shift.concat()
             let ink = NSColor(calibratedRed: 0x1A/255.0, green: 0x19/255.0, blue: 0x17/255.0, alpha: 1.0)
 
             let head = NSBezierPath(roundedRect: NSRect(x: 1, y: 0.8, width: 11.5, height: 5.0), xRadius: 2.5, yRadius: 2.5)

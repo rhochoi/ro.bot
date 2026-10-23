@@ -432,6 +432,20 @@ class PetTest(unittest.TestCase):
         self.assertIn('if (isNativeHost) notifyHost({ type: "menu" });', pet.PET_HTML)
         self.assertIn("else cycleMoodPreview();", pet.PET_HTML)  # 브라우저는 기존 동작
 
+    def test_drag_up_docks_into_menubar(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("private let dockZone: CGFloat = 80.0", src)
+        self.assertIn("let canDock = fromPet && mode == .desktop && !bubbleOpen", src)
+        self.assertIn("self.statusItem.isVisible = nowIn", src)  # 구역에 들면 자리가 열린다
+        self.assertIn("let progress = nowIn ? min(1, 1 - d / self.dockZone) : 0", src)
+        self.assertIn("self.dockToMenubar(returnOrigin: startOrigin)", src)
+        self.assertIn("ctx.duration = 0.28", src)
+        self.assertIn("win.occlusionState.contains(.visible)", src)  # 노치 뒤로 숨으면 되돌린다
+        html = pet.PET_HTML
+        self.assertIn("window.onHostDockProgress = function(p)", html)
+        self.assertIn("scale(calc(1.04 - 0.82 * var(--dock, 0)))", html)  # 1.04 → 0.22
+        self.assertIn('"놓으면 메뉴 막대로"', html)
+
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]

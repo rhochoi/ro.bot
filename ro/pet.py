@@ -1446,6 +1446,15 @@ PET_HTML = r"""<!DOCTYPE html>
     top: 40%;
   }
 
+  /* 메뉴 막대 쪽으로 끌 때: 위로 떠오르며 아이콘 크기로 줄고, 눈은 위를 본다 (--dock 0→1) */
+  .pet-wrap.docking {
+    transform: translateY(-6px) scale(calc(1.04 - 0.82 * var(--dock, 0)));
+    transform-origin: 50% 20%;
+    transition: transform 90ms linear;
+  }
+  .pet-wrap.docking .eyes { top: 18%; }
+  .pet-wrap.docking .pet-label { opacity: calc(1 - 2 * var(--dock, 0)); }
+
   /* B-4. 흔들기 (shake): 층들이 좌우로 요동치고 작은 눈으로 어긋남 */
   .action-shake .ro-bot {
     animation: shakeJitter 0.11s infinite linear;
@@ -1709,7 +1718,7 @@ PET_HTML = r"""<!DOCTYPE html>
   </div>
 
   <!-- RO 캐릭터: 층 셋, 눈 둘 (왼쪽 정렬) -->
-  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 대화창 · 우클릭: 표정 전환 · 드래그: 이동">
+  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 대화창 · 우클릭: 메뉴 · 드래그: 이동 (위로 끌면 메뉴 막대로)">
     <div id="roBot" class="ro-bot">
       <div id="layerHead" class="pill pill-head">
         <div id="eyesWrap" class="eyes">
@@ -2073,6 +2082,25 @@ window.onHostDragStart = function(fromPet) {
 
 window.onHostDragShake = function() {
   window.triggerAction("shake", 1200);
+};
+
+/* 메뉴 막대로 보내기: 위쪽 80px 구역 안에서의 진행률(0~1)을 호스트가 넘긴다 */
+let dockCaption = null;
+window.onHostDockProgress = function(p) {
+  petWrap.style.setProperty("--dock", p);
+  petWrap.classList.toggle("docking", p > 0);
+  if (p > 0 && dockCaption === null) {
+    dockCaption = petCaption.textContent;
+    petCaption.textContent = "놓으면 메뉴 막대로";
+  } else if (p === 0 && dockCaption !== null) {
+    petCaption.textContent = dockCaption;
+    dockCaption = null;
+  }
+};
+
+window.onHostDocked = function() {
+  window.onHostDockProgress(0);
+  window.triggerAction(null);
 };
 
 window.onHostDragEnd = function(moved) {
