@@ -37,7 +37,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자+점프/흔들기 여유 공간(176x168)을 확보해 잘림 방지
     private let compactSize = NSSize(width: 176, height: 168)
-    private let expandedSize = NSSize(width: 360, height: 520)
+    private let expandedSize = NSSize(width: 360, height: 530)
     private let edgeMargin: CGFloat = 6.0
 
     init(url: String, wander: Bool) {
@@ -441,6 +441,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         updateBackdropTheme(force: true)
+        webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
     }
 
     private func setupWanderTimer() {
@@ -500,6 +501,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     @objc private func toggleWander() {
         wanderEnabled.toggle()
         wanderItem.title = wanderEnabled ? "산책 모드: 켜짐" : "산책 모드: 꺼짐"
+        webView?.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
     }
 
     @objc private func resetPosition() {
@@ -532,6 +534,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)
+        } else if type == "toggleWander" {
+            let enabled = (dict["enabled"] as? Bool) ?? !wanderEnabled
+            wanderEnabled = enabled
+            wanderItem?.title = wanderEnabled ? "산책 모드: 켜짐" : "산책 모드: 꺼짐"
         }
     }
 }
