@@ -15,11 +15,22 @@ final class FloatingPetPanel: NSPanel {
     }
 }
 
+// 데스크톱 펫과 메뉴 막대 아이콘은 같은 Ro다. 한 번에 한 곳에만 보인다
+enum PetMode: String {
+    case desktop
+    case menubar
+}
+
 final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var panel: FloatingPetPanel!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
     private var wanderItem: NSMenuItem!
+    private var modeItem: NSMenuItem!
+    private var mainMenu: NSMenu!
+    // 번들 없는 swiftc 실행 파일이라 .standard 도메인이 실행 파일 이름에 묶이므로 suite를 고정한다
+    private let defaults = UserDefaults(suiteName: "ro.pet") ?? .standard
+    private var mode: PetMode = .desktop
     private var urlString: String = "http://127.0.0.1:8765/"
     private var wanderEnabled: Bool = false
     private var bubbleOpen: Bool = false
@@ -52,8 +63,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     func applicationDidFinishLaunching(_ notification: Notification) {
         killOtherInstances()
         NSApp.setActivationPolicy(.accessory)
+        mode = PetMode(rawValue: defaults.string(forKey: "ro.mode") ?? "") ?? .desktop
         setupStatusItem()
         setupFloatingPanel()
+        setMode(mode)
         setupWanderTimer()
         setupBackdropTimer()
     }
@@ -204,7 +217,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let newFrame = NSRect(origin: newOrigin, size: compactSize)
             panel.setFrame(newFrame, display: true)
             webView.frame = NSRect(origin: .zero, size: compactSize)
-            panel.orderFrontRegardless()
+            revealPet()
         }
         updateBackdropTheme(force: true)
     }
@@ -319,6 +332,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "ro.pet"  // ⌘-드래그로 바꾼 막대 안 위치를 기억한다
         if let btn = statusItem.button {
             btn.image = make16pxIcon()
             btn.toolTip = "ro — 층 셋, 눈 둘. 기록하고, 풀어낸다."
@@ -395,6 +409,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         wanderItem.target = self
         menu.addItem(wanderItem)
 
+        modeItem = NSMenuItem(title: "", action: #selector(toggleMode), keyEquivalent: "")
+        modeItem.target = self
+        menu.addItem(modeItem)
+
         let resetItem = NSMenuItem(title: "우측 하단으로 부르기", action: #selector(resetPosition), keyEquivalent: "0")
         resetItem.target = self
         menu.addItem(resetItem)
@@ -412,7 +430,39 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         quitItem.target = self
         menu.addItem(quitItem)
 
+        mainMenu = menu
         statusItem.menu = menu
+    }
+
+    // 모드 전환은 여기 한 곳에서만 한다: 펫 창, 상태 아이콘, 저장
+    private func setMode(_ next: PetMode) {
+        mode = next
+        defaults.set(next.rawValue, forKey: "ro.mode")
+        statusItem.isVisible = (next == .menubar)
+        modeItem.title = (next == .menubar) ? "데스크톱에 꺼내기" : "메뉴 막대로 보내기"
+        if next == .menubar {
+            if bubbleOpen {
+                webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
+                setBubbleState(false)
+            }
+            panel.orderOut(nil)
+        } else {
+            panel.orderFrontRegardless()
+            updateBackdropTheme(force: true)
+        }
+    }
+
+    // 메뉴 막대 모드에서는 말풍선이 열려 있을 때만 창을 보인다
+    private func revealPet() {
+        if mode == .desktop || bubbleOpen {
+            panel.orderFrontRegardless()
+        } else {
+            panel.orderOut(nil)
+        }
+    }
+
+    @objc private func toggleMode() {
+        setMode(mode == .desktop ? .menubar : .desktop)
     }
 
     @objc private func openScreenCaptureSettings() {
@@ -436,7 +486,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces]  // 전체 화면 앱 위에는 띄우지 않는다
         panel.isMovableByWindowBackground = false
 
         let config = WKWebViewConfiguration()
@@ -449,7 +499,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
-        panel.orderFrontRegardless()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -458,7 +507,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     private func setupWanderTimer() {
         wanderTimer = Timer.scheduledTimer(withTimeInterval: 3.2, repeats: true) { [weak self] _ in
-            guard let self = self, self.wanderEnabled, !self.bubbleOpen, !self.isDragging else { return }
+            guard let self = self, self.mode == .desktop, self.wanderEnabled, !self.bubbleOpen, !self.isDragging else { return }
             let vf = self.currentVisibleFrame()
             var frame = self.panel.frame
             let step: CGFloat = 14.0 * self.wanderDirection
@@ -481,7 +530,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지
     private func setupBackdropTimer() {
         backdropTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            guard let self = self, !self.isDragging else { return }
+            guard let self = self, self.panel.isVisible, !self.isDragging else { return }
             self.updateBackdropTheme(force: false)
         }
     }
@@ -494,19 +543,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     @objc private func previewMood(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.setMoodPreview && window.setMoodPreview('\(code)', 10000);", completionHandler: nil)
     }
 
     @objc private func triggerActionFromMenu(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.triggerAction && window.triggerAction('\(code)', 4500);", completionHandler: nil)
     }
 
     @objc private func selectMaterial(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.setMaterialFromHost && window.setMaterialFromHost('\(code)');", completionHandler: nil)
     }
 
@@ -516,6 +565,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     @objc private func resetPosition() {
+        if mode == .menubar {
+            setMode(.desktop)
+        }
         if bubbleOpen {
             webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
             setBubbleState(false)
@@ -542,6 +594,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let target = NSPoint(x: panel.frame.origin.x + dx, y: panel.frame.origin.y - dy)
             panel.setFrameOrigin(clampOrigin(target, size: panel.frame.size))
             updateBackdropTheme(force: false)
+        } else if type == "menu" {
+            // 데스크톱 모드에선 상태 아이콘이 숨으므로 펫 우클릭이 같은 메뉴로 가는 길이다
+            mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)

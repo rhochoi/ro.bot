@@ -420,6 +420,18 @@ class PetTest(unittest.TestCase):
         self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
         self.assertIn("Privacy_ScreenCapture", src)
 
+    def test_menubar_mode_state_and_pet_menu(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn('UserDefaults(suiteName: "ro.pet")', src)  # 다음 실행도 같은 모드
+        self.assertIn('defaults.set(next.rawValue, forKey: "ro.mode")', src)
+        self.assertIn("statusItem.isVisible = (next == .menubar)", src)  # 한 번에 한 곳에만
+        self.assertIn('statusItem.autosaveName = "ro.pet"', src)
+        self.assertNotIn(".fullScreenAuxiliary", src)  # 전체 화면 앱 위에는 띄우지 않는다
+        self.assertIn("self.mode == .desktop, self.wanderEnabled", src)  # 숨은 펫은 산책하지 않는다
+        self.assertIn("mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)", src)
+        self.assertIn('if (isNativeHost) notifyHost({ type: "menu" });', pet.PET_HTML)
+        self.assertIn("else cycleMoodPreview();", pet.PET_HTML)  # 브라우저는 기존 동작
+
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]

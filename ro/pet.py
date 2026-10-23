@@ -1949,7 +1949,8 @@ moodPill.addEventListener("click", (e) => {
 
 petWrap.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  cycleMoodPreview();
+  if (isNativeHost) notifyHost({ type: "menu" });  // 네이티브 메뉴(표정 미리보기 포함)
+  else cycleMoodPreview();
 });
 
 /* 말풍선 바깥 투명 영역 클릭 시 말풍선 닫기 */
