@@ -11,8 +11,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from . import (ambient, ask, collectors, distill, learn, log, mapper, pet, revise, route, stats,
-               tidy)
+from . import (ambient, ask, collectors, distill, learn, log, mapper, organize, pet, revise, route,
+               stats, tidy)
 
 HOME = "~/.ro"
 
@@ -123,6 +123,127 @@ def _checks():
                 tidy.undo(None, t / "ro", str(t / "log"))
                 return {p.name for p in root.iterdir()} == before
 
+    def organize_safe():
+        # scan은 읽기 전용·본문 미저장·엔진 호출 없음, apply→undo는 원래 이름·위치로 복원한다.
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            (root / "2026-01-02 영수증.txt").write_text("SECRETBODY 결제")
+            (root / "memo.xyz").write_text("x")
+            for f in root.iterdir():
+                os.utime(f, (1, 1))
+            before = {p.name: p.read_text() for p in root.iterdir()}
+            dest = t / "home" / "Documents" / "정리됨"
+            with mock.patch("pathlib.Path.home", return_value=t / "home"), \
+                    mock.patch.object(route, "run", side_effect=AssertionError("엔진 호출")):
+                plan = organize.scan(root, dest)
+                organize.save_plan(plan, t / "ro")
+                unchanged = {p.name: p.read_text() for p in root.iterdir()} == before and not dest.exists()
+                no_body = "SECRETBODY" not in (t / "ro" / "cleanup" / "plan.json").read_text()
+                ids = [i["id"] for i in plan["items"]]
+                _, done, skipped = organize.apply(ids, home=t / "ro", log_dir=str(t / "log"))
+                moved = len(done) == 1 and len(skipped) == 1  # 검토 필요 항목은 옮기지 않음
+                organize.undo(None, t / "ro", str(t / "log"))
+            return unchanged and no_body and moved \
+                and {p.name: p.read_text() for p in root.iterdir()} == before
+
+    def cleanup_unified_safe():
+        # 정리 통합: 파일마다 제안 하나, 재무 옛 버전은 보관, 격리→이동을 한 배치로 적용해도 undo 한 번에 원상복구,
+        # 예전 tidy 격리 배치도 organize undo로 되돌린다. 영구 삭제 경로는 없다.
+        import zipfile
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            (root / "a.pdf").write_text("dup")
+            (root / "b.pdf").write_text("dup")
+            (root / "pic.png").write_text("IMG")
+            with zipfile.ZipFile(root / "pic.zip", "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            (root / "경비 내역.xlsx").write_text("old")
+            (root / "경비 내역 (1).xlsx").write_text("new")
+            for i, f in enumerate(sorted(root.iterdir())):
+                os.utime(f, (100 + i, 100 + i))
+            os.utime(root / "a.pdf", (1, 1))  # 중복의 원본
+            (root / "sub").mkdir()
+            (root / "sub" / "old.bin").write_text("x" * 5000)
+            os.utime(root / "sub" / "old.bin", (1, 1))
+            before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            ro_home, logs = t / "ro", str(t / "log")
+            with mock.patch("pathlib.Path.home", return_value=t / "home"), \
+                    mock.patch.object(route, "run", side_effect=AssertionError("엔진 호출")):
+                plan = organize.scan(root, t / "home" / "Documents" / "정리됨", extractor=lambda ps: {})
+                organize.save_plan(plan, ro_home)
+                by = {Path(i["path"]).name: i for i in plan["items"]}
+                one_each = len({i["path"] for i in plan["items"]}) == len(plan["items"])
+                kept = [n for n, i in by.items() if i["action"] == "keep"]
+                judged = (by["b.pdf"]["action"], by["pic.zip"]["action"]) == ("quarantine", "quarantine") and \
+                    len(kept) == 1 and kept[0].startswith("경비 내역")  # 재무 옛 버전은 치우지 않고 보관
+                _, done, _ = organize.apply([i["id"] for i in plan["items"]], home=ro_home, log_dir=logs)
+                applied = len(done) == len(plan["items"]) - 1  # 보관 1건만 남는다
+                organize.undo(None, ro_home, logs)
+                tplan = tidy.scan(root, min_size=1)
+                tidy.save_plan(tplan, ro_home)
+                old = [i["id"] for i in tplan["items"] if i["path"].endswith("old.bin")]
+                tidy.apply(old, ro_home, logs)
+                organize.undo(None, ro_home, logs)  # 예전 tidy 배치
+            after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            return one_each and judged and applied and old and after == before
+
+    def purge_needs_terminal_yes():
+        # 격리 비우기(영구 삭제): 최근 배치는 남기고, 비대화 실행·yes 아닌 답에는 아무것도 지우지 않으며,
+        # 비운 배치는 되돌리기 대상에서 빠진다.
+        import json as _json
+        import zipfile
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            ro_home, logs = t / "ro", str(t / "log")
+            files = []
+            with mock.patch("pathlib.Path.home", return_value=t / "home"):
+                for name in ("old", "new"):  # 배치 둘: 하나는 오래된 것으로 만든다
+                    (root / f"{name}.png").write_text(name)
+                    with zipfile.ZipFile(root / f"{name}.zip", "w") as zf:
+                        zf.writestr(f"{name}.png", name)
+                    for p in root.iterdir():
+                        os.utime(p, (1, 1))
+                    plan = organize.scan(root, t / "home" / "Documents" / "정리됨", extractor=lambda ps: {})
+                    organize.save_plan(plan, ro_home)
+                    organize.apply(kind="extracted", home=ro_home, log_dir=logs)
+                    if name == "old":
+                        j = ro_home / "cleanup" / "journal.jsonl"
+                        rows = [_json.loads(x) for x in j.read_text().splitlines()]
+                        aged = Path(rows[0]["dst"]).parent.with_name("20200101-000000")
+                        Path(rows[0]["dst"]).parent.rename(aged)
+                        for r in rows:  # 7일보다 오래된 배치인 척: 시각·배치·격리 경로를 함께 바꾼다
+                            r["ts"], r["batch"] = "2020-01-01T00:00:00+0000", "20200101-000000"
+                            r["dst"] = str(aged / Path(r["dst"]).name)
+                        j.write_text("".join(_json.dumps(r) + "\n" for r in rows))
+                        files.append(Path(rows[0]["dst"]))
+                trash = ro_home / "cleanup" / "trash"
+                before = sorted(trash.rglob("*.zip"))
+                tty, pipe = mock.Mock(isatty=lambda: True), mock.Mock(isatty=lambda: False)
+                import contextlib
+                import io
+
+                def run(**kw):  # 목록 출력은 eval 화면에 섞지 않는다
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        organize.trash_cli("7d", True, home=ro_home, log_dir=logs, **kw)
+                try:
+                    run(stdin=pipe, stdout=tty)
+                    refused = False
+                except SystemExit:
+                    refused = True
+                run(stdin=tty, stdout=tty, ask=lambda _: "y")
+                kept_after_no = sorted(trash.rglob("*.zip")) == before
+                run(stdin=tty, stdout=tty, ask=lambda _: "yes")
+                left = sorted(trash.rglob("*.zip"))
+                undoable = {e["batch"] for e in organize.pending(ro_home)}
+            return refused and kept_after_no and len(before) == 2 and len(left) == 1 \
+                and not files[0].exists() and "20200101-000000" not in undoable and len(undoable) == 1
+
     def revise_needs_approval():
         import datetime
         import shutil
@@ -197,6 +318,34 @@ def _checks():
             return (local_only and st["mood"] == "anxious"
                     and "ABCDEFGH" not in json.dumps(st, ensure_ascii=False))
 
+    def pet_organize_needs_approval():
+        # 펫의 정리 요청은 승인 대기열에만 오르고, 승인 전에는 파일이 그대로다.
+        with tempfile.TemporaryDirectory() as h, mock.patch.dict(os.environ, {"HOME": str(Path(h).resolve())}):
+            t = Path(h).resolve()
+            dl = t / "Downloads"
+            dl.mkdir()
+            f = dl / "영수증.txt"
+            f.write_text("결제")
+            import zipfile
+            (dl / "pic.png").write_text("IMG")
+            z = dl / "pic.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
+            rt = pet.PetRuntime(home=str(t / ".ro"), log_dir=str(t / ".ro" / "log"), map_path=str(t / "m.json"))
+            rt.organize_root, rt.organize_dest = dl, t / "Documents" / "정리됨"
+            rt.organize_scan()
+            queued = rt.queue_organize_apply("재무")["ok"]
+            st = rt.snapshot()
+            moves_wait = queued and f.exists() and st["mood"] == "anxious" \
+                and st["write_pending"]["kind"] == "organize_apply" and not rt.organize_dest.exists()
+            rt.resolve_write_approval(False)
+            q_queued = rt.queue_organize_apply(kind="extracted")["ok"]  # 치울 후보 격리도 같은 게이트
+            trash = t / ".ro" / "cleanup" / "trash"
+            return moves_wait and q_queued and z.exists() and not trash.exists() \
+                and rt.snapshot()["write_pending"].get("qkind") == "extracted"
+
     return [
         ("비밀 마스킹", redaction),
         ("수집기는 허용한 소스만 읽음", collect_needs_allow),
@@ -209,10 +358,14 @@ def _checks():
         ("증류: 승인 전 기록 없음·원문 미전송·읽기 모드", distill_needs_approval_and_no_raw),
         ("라우팅 개정안: 승인 전 routing.toml 불변", revise_needs_approval),
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
+        ("분류 정리: 읽기 전용 스캔·본문 미저장·엔진 미호출·검토 항목 보류·복원 가능", organize_safe),
+        ("정리 통합: 파일당 제안 하나·재무 보관·격리+이동 한 배치 복원·예전 tidy 배치 복원", cleanup_unified_safe),
+        ("격리 비우기: 최근 배치 보존·비대화 거부·yes 전 무변경·비운 배치 되돌리기 제외", purge_needs_terminal_yes),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),
         ("Pet은 로컬 전용·비밀 마스킹·쓰기 승인 게이트 유지", pet_safety_invariants),
+        ("Pet 파일 정리·격리는 승인 전 이동 없음", pet_organize_needs_approval),
     ]
 
 

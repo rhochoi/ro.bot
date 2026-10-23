@@ -71,7 +71,7 @@ class AllowListTest(Base):
             collectors.set_allow("git", str(self.home))  # git 저장소 아님
         with self.assertRaises(ValueError):
             collectors.set_allow("sessions", "agy")
-        self.assertEqual(oct((self.home / ".ro" / "collect.json").stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct((self.home / ".ro" / "config.json").stat().st_mode & 0o777), "0o600")
 
 
 class ShellTest(Base):

@@ -1,12 +1,13 @@
 """기록 보조: 끌어다 놓기 캡처(A)와 미리 보는 정리·24시간 되돌리기(D).
 
 원칙
-- 로그는 덧붙이기만 한다. 되돌리기·분류는 별도 기록(revoke 이벤트, organize/journal.jsonl)으로 남긴다.
+- 로그는 덧붙이기만 한다. 되돌리기·분류는 별도 기록(revoke 이벤트, records/journal.jsonl)으로 남긴다.
 - 파일 원본은 읽지도 옮기지도 않는다: 이름·크기·앞부분 요약 3줄만 받는다. 경로는 받지 않는다.
 - 정리는 미리보기(plan)만 계산하고, apply 때만 분류 기록을 쓴다. 적용 후 24시간 안에는 통째로 되돌린다.
 """
 import hashlib
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -100,7 +101,7 @@ def revoke(target_id, log_dir=log.LOG_DIR):
 # --- 정리(D) -------------------------------------------------------------
 
 def _journal(home):
-    return Path(home).expanduser() / "organize" / "journal.jsonl"
+    return Path(home).expanduser() / "records" / "journal.jsonl"   # ro organize(파일 정리)의 ~/.ro/organize와 섞이지 않게 분리
 
 
 def read_journal(home=HOME):
@@ -119,7 +120,8 @@ def read_journal(home=HOME):
 def _write(entry, home):
     p = _journal(home)
     fsutil.ensure_dir(p.parent)
-    with open(p, "a", encoding="utf-8") as f:
+    fd = os.open(p, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)   # 로그와 같은 권한(harden 감사 통과)
+    with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 

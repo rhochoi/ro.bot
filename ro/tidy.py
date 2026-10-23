@@ -1,15 +1,17 @@
-"""Phase 4 정리: 중복·오래된 파일을 읽기 전용으로 보고하고, 승인한 항목만 격리(이동)한다.
+"""Phase 4 정리: 중복·풀린 압축 원본·옛 버전·오래된 파일을 읽기 전용으로 보고하고, 승인한 항목만 격리(이동)한다.
 
 원칙
 - scan은 읽기 전용이다. 계획(~/.ro/tidy/plan.json)만 쓴다.
 - apply는 id를 직접 지정해야 하고, 영구 삭제는 하지 않는다 — ~/.ro/tidy/trash/로 옮기고
   되돌림 로그(journal.jsonl)에 남긴다. undo로 원위치 복원(내용 해시 확인).
 - 비밀 파일·숨김 항목·프로젝트 폴더(.git·package.json 등)·심볼릭 링크는 건드리지 않는다. 홈 디렉터리 자체나 홈 밖은 루트가 될 수 없다.
-- 계획과 달라진 파일(크기·수정시각·해시)은 적용하지 않는다.
+- 계획과 달라진 파일(크기·수정시각·해시)은 적용하지 않는다. 남겨 둔 쪽(중복 원본·최신 버전·풀린 파일)이
+  사라졌거나 바뀌었으면 그 항목도 적용하지 않는다.
+- 중복·풀린 압축 원본·옛 버전 판정 규칙은 공용 탐지기 ro/detect.py에 있다.
 
-  python -m ro.tidy scan --root DIR [--stale-days 180] [--min-size 4096]
-  python -m ro.tidy apply ID [ID...] | undo [BATCH]
-  python -m ro.tidy status
+  ro tidy scan --root DIR [--stale-days 180] [--min-size 4096]
+  ro tidy apply ID [ID...] | undo [BATCH]
+  ro tidy status
 """
 import argparse
 import hashlib
@@ -21,7 +23,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import fsutil, log
+from . import detect, fsutil, log
+from .detect import norm_key as _k
 from .mapper import SKIP_DIRS, is_secret
 
 HOME = "~/.ro"
@@ -35,14 +38,6 @@ STALE_DAYS = 180
 
 def _dir(home):
     return Path(home).expanduser() / "tidy"
-
-
-def _sha(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def check_root(root):
@@ -79,28 +74,36 @@ def scan(root, stale_days=STALE_DAYS, min_size=MIN_SIZE, now=None):
     root = check_root(root)
     now = now or time.time()
     by_size = defaultdict(list)
-    for p, st in walk(root):
+    files = list(walk(root))
+    for p, st in files:
         if st.st_size >= min_size:
             by_size[st.st_size].append((p, st))
-    items, claimed = [], set()
-    for size, group in by_size.items():
-        if len(group) < 2:
-            continue
-        by_hash = defaultdict(list)
-        for p, st in group:
-            by_hash[_sha(p)].append((p, st))
-        for sha, same in by_hash.items():
-            if len(same) < 2:
-                continue
-            same.sort(key=lambda x: (x[1].st_mtime, len(str(x[0])), str(x[0])))
-            keeper = same[0][0]  # 가장 오래된 것을 원본으로 남긴다
-            claimed.add(keeper)  # 원본은 오래됐다는 이유로도 제안하지 않는다(내용이 사라지지 않게)
-            for p, st in same[1:]:
-                claimed.add(p)
-                items.append(_item("duplicate", p, st, sha, f"{keeper} 와 내용 동일"))
+    items, claimed = [], set()  # 유니코드 정규화한 경로 문자열(한글 NFD/NFC 차이)
+    for keeper, copies, sha in detect.duplicate_groups([x for g in by_size.values() for x in g]):
+        claimed.add(_k(keeper))  # 원본은 오래됐다는 이유로도 제안하지 않는다(내용이 사라지지 않게)
+        for p, st in copies:
+            claimed.add(_k(p))
+            items.append(_item("duplicate", p, st, sha, f"{keeper} 와 내용 동일", keeper))
     for size, group in by_size.items():
         for p, st in group:
-            if p not in claimed and now - st.st_mtime > stale_days * 86400:
+            if _k(p) not in claimed and p.suffix.lower() == ".zip":
+                found = detect.extracted(p, root)
+                if found:
+                    base, hits = found
+                    claimed.add(_k(p))
+                    claimed.update(_k(h) for h in hits)  # 풀린 파일은 압축을 치우면 유일한 사본이 되므로 다른 이유로 제안하지 않는다
+                    where = "같은 폴더" if base == p.parent else f"{base.name}/ 폴더"
+                    items.append(_item("extracted", p, st, None, f"압축 안 파일이 모두 {where}에 풀려 있음(CRC 일치)",
+                                       base))
+    for keeper, olds in detect.version_groups([(p, st) for p, st in files if _k(p) not in claimed]):
+        claimed.add(_k(keeper[0]))  # 최신본은 오래됐다는 이유로도 제안하지 않는다
+        for p, st in olds:
+            claimed.add(_k(p))
+            if st.st_size >= min_size:
+                items.append(_item("version", p, st, None, f"{keeper[0].name} 의 옛 버전", keeper[0]))
+    for size, group in by_size.items():
+        for p, st in group:
+            if _k(p) not in claimed and now - st.st_mtime > stale_days * 86400:
                 items.append(_item("stale", p, st, None, f"{int((now - st.st_mtime) / 86400)}일간 수정 없음"))
     items.sort(key=lambda i: -i["size"])
     total = len(items)
@@ -109,9 +112,12 @@ def scan(root, stale_days=STALE_DAYS, min_size=MIN_SIZE, now=None):
     return plan
 
 
-def _item(kind, p, st, sha, reason):
-    return {"id": hashlib.sha1(f"{kind}:{p}".encode()).hexdigest()[:8], "kind": kind, "path": str(p),
-            "size": st.st_size, "mtime": int(st.st_mtime), "sha": sha, "reason": reason}
+def _item(kind, p, st, sha, reason, keep=None):
+    it = {"id": hashlib.sha1(f"{kind}:{p}".encode()).hexdigest()[:8], "kind": kind, "path": str(p),
+          "size": st.st_size, "mtime": int(st.st_mtime), "sha": sha, "reason": reason}
+    if keep is not None:
+        it["keep"] = str(keep)  # 남겨 두는 쪽: 적용 직전에 아직 있는지 다시 확인한다
+    return it
 
 
 def save_plan(plan, home=HOME):
@@ -122,7 +128,7 @@ def load_plan(home=HOME):
     try:
         return json.loads((_dir(home) / "plan.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        raise ValueError("계획이 없습니다. 먼저 `python -m ro.tidy scan --root DIR`를 실행하세요.")
+        raise ValueError("계획이 없습니다. 먼저 `ro tidy scan --root DIR`를 실행하세요.")
 
 
 def _journal(home):
@@ -169,9 +175,11 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
             st = src.stat()
             if st.st_size != it["size"] or int(st.st_mtime) != it["mtime"]:
                 raise ValueError("계획 이후 파일이 바뀜")
-            sha = it["sha"] or _sha(src)
-            if it["sha"] and _sha(src) != it["sha"]:
+            sha = it["sha"] or detect.sha256(src)
+            if it["sha"] and detect.sha256(src) != it["sha"]:
                 raise ValueError("내용 해시가 달라짐")
+            if not detect.kept_ok(it, src, root):
+                raise ValueError("남겨 둔 쪽이 사라지거나 바뀜 — 다시 scan 하세요")
             dst = trash / f"{cid}-{src.name}"
             if dst.exists():
                 raise ValueError("격리 위치가 이미 있음")
@@ -192,7 +200,7 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
 def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
     """배치(기본: 가장 최근)를 원위치로 복원. 반환: (batch, 복원 목록, 건너뜀)."""
     entries = read_journal(home)
-    restored_ids = {(e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
+    restored_ids = {(e["batch"], e["id"]) for e in entries if e["op"] in ("restore", "purge")}  # 비운 것은 되돌리지 않는다
     moves = [e for e in entries if e["op"] == "move" and (e["batch"], e["id"]) not in restored_ids]
     if not moves:
         raise ValueError("되돌릴 항목이 없습니다")
@@ -208,7 +216,7 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
                 raise ValueError("원래 루트 밖")
             if src.exists():
                 raise ValueError("원위치에 이미 파일이 있음")
-            if _sha(dst) != e["sha"]:
+            if detect.sha256(dst) != e["sha"]:
                 raise ValueError("격리본 해시 불일치")
             src.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(dst), str(src))

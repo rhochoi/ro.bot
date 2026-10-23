@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# ro 원클릭 설치. 팀원은 아래 한 줄만 실행한다(비공개 저장소라 gh 로그인이 필요):
-#   gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
+# ro 원클릭 설치. 아래 한 줄만 실행한다.
+#   공개 저장소:   curl -fsSL https://raw.githubusercontent.com/rhochoi/ro.bot/main/install.sh | bash
+#   비공개 저장소: gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
 #
-# 하는 일: gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정 → uv 설치(없을 때, 확인 후)
-#          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor.
-# 다시 실행하면 최신 버전으로 재설치한다. 기억·로그(~/.ro)는 건드리지 않는다.
-# 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략)
+# 하는 일: 저장소가 공개면 로그인 없이 진행, 아니면 gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정
+#          → uv 설치(없을 때, 확인 후)
+#          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor → (macOS) 펫 띄우기.
+# 다시 실행하면 최신 버전으로 재설치하고 펫을 새로 띄운다. 기억·로그(~/.ro)는 건드리지 않는다.
+# 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략), RO_PET=0(펫 자동 실행 끄기)
 set -euo pipefail
 
 REPO="rhochoi/ro.bot"
@@ -26,23 +28,42 @@ confirm() {
   case "$ans" in ""|y|Y|yes|예|네) return 0 ;; *) return 1 ;; esac
 }
 
+# 설치가 끝나면 펫을 띄운다. 터미널을 닫아도 남도록 분리해서 실행하고, 이전 펫은 ro pet이 스스로 정리한다.
+launch_pet() {
+  if [ "${RO_PET:-1}" = 0 ]; then
+    say "펫 자동 실행을 건너뜁니다(RO_PET=0). 띄우려면: ro pet"
+    return 0
+  fi
+  [ "$(uname -s)" = Darwin ] || return 0
+  (umask 077; mkdir -p "$HOME/.ro"; PYTHONUNBUFFERED=1 nohup ro pet >"$HOME/.ro/pet.log" 2>&1 </dev/null &)
+  say "펫을 띄웠습니다. 화면 오른쪽 아래와 메뉴바 아이콘을 보세요(처음에는 수십 초 걸릴 수 있습니다)."
+  command -v swiftc >/dev/null \
+    || warn "swiftc가 없어 브라우저 창으로 열립니다. 데스크톱 펫을 쓰려면: xcode-select --install"
+}
+
 main() {
   [ "$(uname -s)" = Darwin ] || warn "macOS가 아닙니다. 펫(ro pet) 등 일부 기능은 macOS 전용입니다."
 
-  command -v gh >/dev/null || die "gh가 필요합니다: https://cli.github.com 에서 설치 후 다시 실행하세요."
-  if ! gh auth status >/dev/null 2>&1; then
-    say "GitHub 로그인이 필요합니다(비공개 저장소)."
-    gh auth login </dev/tty
+  # 로그인 없이 읽히면 공개 저장소다(암호를 묻지 않게 프롬프트를 끈다). 그때는 gh가 필요 없다.
+  if GIT_TERMINAL_PROMPT=0 git ls-remote "https://github.com/$REPO.git" HEAD >/dev/null 2>&1; then
+    say "GitHub에서 바로 받을 수 있습니다(로그인 불필요)."
+  else
+    command -v gh >/dev/null || die "gh가 필요합니다: https://cli.github.com 에서 설치 후 다시 실행하세요."
+    if ! gh auth status >/dev/null 2>&1; then
+      say "GitHub 로그인이 필요합니다(비공개 저장소)."
+      gh auth login </dev/tty
+    fi
+    gh api "repos/$REPO" --silent 2>/dev/null \
+      || die "$REPO 에 접근할 수 없습니다. 저장소 초대를 수락했는지 확인하세요."
+    say "git이 GitHub 자격 증명으로 gh를 쓰도록 설정합니다(gh auth setup-git)."
+    gh auth setup-git
   fi
-  gh api "repos/$REPO" --silent 2>/dev/null \
-    || die "$REPO 에 접근할 수 없습니다. 저장소 초대를 수락했는지 확인하세요."
-  say "git이 GitHub 자격 증명으로 gh를 쓰도록 설정합니다(gh auth setup-git)."
-  gh auth setup-git
 
   if ! command -v uv >/dev/null; then
     confirm "uv(파이썬 도구 설치기)가 없습니다. https://astral.sh/uv 공식 설치 스크립트로 설치할까요?" \
       || die "uv 없이 진행할 수 없습니다."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # 셸 설정 파일은 uv 설치기가 아니라 아래 PATH 단계에서만(필요할 때) 고친다
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
     export PATH="$HOME/.local/bin:$PATH"
     command -v uv >/dev/null || die "uv 설치 후에도 찾지 못했습니다. 새 터미널에서 다시 실행하세요."
   fi
@@ -54,7 +75,7 @@ main() {
 
   local src="git+https://github.com/$REPO.git"
   [ -n "${RO_REF:-}" ] && src="$src@$RO_REF"
-  say "ro 설치: $src (Python $PYTHON은 필요하면 uv가 받습니다)"
+  say "ro 설치: $src (Python ${PYTHON}은 필요하면 uv가 받습니다)"
   uv tool install --force --python "$PYTHON" "$src"
 
   local bin
@@ -71,12 +92,14 @@ main() {
 
   say "설치 완료: $(ro --version 2>/dev/null || echo ro)"
   ro doctor || warn "엔진이 하나도 없습니다. claude·codex·agy 중 쓰는 것을 설치하세요."
+  launch_pet
   cat <<'EOF'
 
 다음 단계:
   ro map                         내 프로젝트 지도 만들기(~/.ro에만 저장)
+  ro organize scan               다운로드 정리안: 분류 이동·치울 후보·보관(승인한 것만, undo 가능)
   ro ask "이 프로젝트 구조 설명해줘"
-  ro pet                         데스크톱 펫 + 메뉴바 비서
+  ro pet                         펫 다시 띄우기(끄기: 메뉴바 아이콘 → 종료)
   ro update                      나중에 업데이트
 EOF
 }

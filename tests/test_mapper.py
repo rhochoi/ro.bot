@@ -51,6 +51,35 @@ class MapperTest(unittest.TestCase):
         self.assertEqual(mapper._purpose(""), "")
         self.assertEqual(mapper._purpose("# T\n\n> 인용\n1. 단계\n- 목록\n| a | b |\n진짜 설명"), "진짜 설명")
 
+    def test_clip_keeps_words_lines_and_links_whole(self):
+        self.assertEqual(mapper.clip("짧다", 10), "짧다")
+        out = mapper.clip("로컬 우선 원칙을 지키는 개인 비서 프로젝트입니다", 20)
+        self.assertLessEqual(len(out), 20)
+        self.assertTrue(out.endswith("…"))
+        self.assertTrue("로컬 우선 원칙을 지키는 개인 비서 프로젝트입니다".startswith(out[:-1]))
+        self.assertEqual(out, "로컬 우선 원칙을 지키는 개인…")  # 단어 중간이 아니라 공백에서 끊었다
+        link = mapper.clip("OpenClaw 기반 비서 [OpenClaw](https://github.com/example/openclaw) 참고", 50)
+        self.assertNotIn("[", link)
+        self.assertLessEqual(len(link), 50)
+        lines = mapper.clip("1. 첫 줄 규칙\n2. 둘째 줄 규칙\n3. 셋째 줄이 아주 길게 이어지는 규칙", 30)
+        self.assertEqual(lines, "1. 첫 줄 규칙\n2. 둘째 줄 규칙\n…")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultRootsTest(unittest.TestCase):
+    def test_default_excludes_personal_folders_and_config_overrides(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from ro import mapper
+        for bad in ("~/Downloads", "~/Documents"):
+            self.assertNotIn(bad, mapper.DEFAULT_ROOTS)
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(mapper.default_roots(d), mapper.DEFAULT_ROOTS)
+            (Path(d) / "config.json").write_text(json.dumps({"roots": ["~/Work"]}))
+            self.assertEqual(mapper.default_roots(d), ["~/Work"])
+            (Path(d) / "config.json").write_text("깨짐")
+            self.assertEqual(mapper.default_roots(d), mapper.DEFAULT_ROOTS)

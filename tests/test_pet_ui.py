@@ -8,6 +8,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ro import log, mapper, pet
 
@@ -33,6 +34,13 @@ class PetUiTest(unittest.TestCase):
                                       {"name": "shader", "path": cls.tmp.name, "languages": [], "git": None}],
                          "tools": {}}, mp)
         rt = pet.PetRuntime(home=cls.tmp.name, log_dir=cls.tmp.name, map_path=mp)
+        cls.fs = tempfile.TemporaryDirectory()                          # 정리 대상은 ~/.ro(감사 대상) 밖에 둔다
+        cls.org_root = Path(cls.fs.name).resolve() / "downloads"
+        cls.org_root.mkdir()
+        (cls.org_root / "pic.png").write_text("IMG")
+        os.utime(cls.org_root / "pic.png", (1, 1))                       # 오래된 파일만 정리 대상이다
+        rt.organize_root = str(cls.org_root.resolve())
+        rt.organize_dest = str(Path(cls.fs.name).resolve() / "sorted")
         cls.server = pet.start_server(rt)
         cls.url = "http://127.0.0.1:%d/" % cls.server.server_address[1]
         cls.pw = sync_playwright().start()
@@ -44,6 +52,7 @@ class PetUiTest(unittest.TestCase):
         cls.pw.stop()
         cls.server.shutdown()
         cls.tmp.cleanup()
+        cls.fs.cleanup()
 
     def open_page(self, **ctx):
         page = self.browser.new_context(viewport={"width": 900, "height": 760}, **ctx).new_page()
@@ -152,20 +161,20 @@ class PetUiTest(unittest.TestCase):
         page.wait_for_function("document.querySelector('#recallCard .rc-head').innerText.includes('없어요')")
         self.assertEqual(page.locator("#recallCard summary").count(), 0)
 
-    def test_organize_preview_apply_undo(self):
+    def test_record_organize_preview_apply_undo(self):
         page = self.open_page(reduced_motion="reduce")
         self.palette_run(page, "/정리")
-        page.wait_for_selector("#orgCard .rc-head")
-        self.assertIn("아직 아무것도 바뀌지 않았어요", page.inner_text("#orgCard"))
-        self.assertIn("24시간", page.inner_text("#orgCard"))
-        self.assertNotIn("[object", page.inner_text("#orgCard"))
-        self.assertGreaterEqual(page.locator("#orgCard .org-row").count(), 1)
-        self.assertEqual(page.locator("#orgCard .org-amb select").count(), 1)
-        page.select_option("#orgCard .org-amb select", "shader")
-        page.click("#orgCard >> text=적용하기")
-        page.wait_for_function("document.querySelector('#orgCard').innerText.includes('적용했어요')")
-        page.click("#orgCard >> text=되돌리기")
-        page.wait_for_function("document.querySelector('#orgCard').innerText.includes('되돌렸어요')")
+        page.wait_for_selector("#recOrgCard .rc-head")
+        self.assertIn("아직 아무것도 바뀌지 않았어요", page.inner_text("#recOrgCard"))
+        self.assertIn("24시간", page.inner_text("#recOrgCard"))
+        self.assertNotIn("[object", page.inner_text("#recOrgCard"))
+        self.assertGreaterEqual(page.locator("#recOrgCard .rec-org-row").count(), 1)
+        self.assertEqual(page.locator("#recOrgCard .rec-org-amb select").count(), 1)
+        page.select_option("#recOrgCard .rec-org-amb select", "shader")
+        page.click("#recOrgCard >> text=적용하기")
+        page.wait_for_function("document.querySelector('#recOrgCard').innerText.includes('적용했어요')")
+        page.click("#recOrgCard >> text=되돌리기")
+        page.wait_for_function("document.querySelector('#recOrgCard').innerText.includes('되돌렸어요')")
 
     def test_ambient_base_length_and_focus_mode(self):
         page = self.open_page(reduced_motion="reduce")
@@ -190,11 +199,29 @@ class PetUiTest(unittest.TestCase):
                 page.wait_for_selector("#recallCard .rc-head")
                 page.locator("#recallCard summary").click()
                 self.palette_run(page, "/정리")
-                page.wait_for_selector("#orgCard .rc-head")
+                page.wait_for_selector("#recOrgCard .rc-head")
                 page.keyboard.press("Alt+KeyR")
                 page.wait_for_selector("#palette:not([hidden])")
                 self.assertEqual(self.axe_violations(page), [])
 
+    def test_file_organize_block_scans_and_queues_through_approval(self):
+        # organize는 홈 디렉터리 아래만 허용하므로, 서버 스레드가 보는 HOME만 임시 폴더로 바꾼다(브라우저는 그대로)
+        home = str(Path(self.fs.name).resolve())
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            page = self.open_page(reduced_motion="reduce")
+            page.click('[data-tab="settings"]')
+            self.assertIn("정리안이 없습니다", page.inner_text("#orgSummary"))
+            page.click("#orgScanBtn")
+            page.wait_for_function("document.querySelector('#orgMsg').innerText.includes('새로 만들었습니다')")
+            self.assertNotIn("정리안이 없습니다", page.inner_text("#orgSummary"))
+            self.assertEqual(self.axe_violations(page), [])
+            page.wait_for_selector("#orgCats button")
+            page.locator("#orgCats button").first.click()           # 카테고리 버튼 = 쓰기 승인 요청
+            page.click('[data-tab="home"]')
+            page.wait_for_function("document.querySelector('#writeCard').style.display === 'flex'")
+            self.assertIn("파일 정리", page.inner_text("#writeText"))
+            page.click("#writeRejectBtn")                            # 승인하지 않으면 아무것도 옮기지 않는다
+            self.assertTrue((self.org_root / "pic.png").exists())
 
 if __name__ == "__main__":
     unittest.main()

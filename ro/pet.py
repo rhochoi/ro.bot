@@ -24,11 +24,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, fsutil, harden, learn, log, mapper, recall, records, route
+from . import ask, fsutil, harden, learn, log, mapper, organize, recall, records, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -102,6 +103,8 @@ ACTION_DESCS = {
 }
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
+AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
+AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
@@ -239,6 +242,9 @@ class PetRuntime:
         self.write_pending = None
         self._last_event_count = None
         self._dismissed_fail_ts = None
+        self._disk_cache = None
+        self.organize_root = organize.ROOT
+        self.organize_dest = organize.DEST_ROOT
         self.current_action = None
         self.action_until = 0.0
         self.focus_on = False
@@ -296,14 +302,14 @@ class PetRuntime:
                        self.home)
         return {"ok": True}
 
-    def organize_plan(self):
+    def records_plan(self):
         return records.plan(records.live(log.read_all(self.log_dir)), self._projects(), home=self.home)
 
-    def organize_apply(self, picks):
+    def records_apply(self, picks):
         picks = picks if isinstance(picks, dict) else {}
         return records.apply(log.read_all(self.log_dir), self._projects(), picks, home=self.home)
 
-    def organize_undo(self):
+    def records_undo(self):
         return records.undo(home=self.home)
 
     def clear_notice(self):
@@ -344,6 +350,8 @@ class PetRuntime:
             log.append("write_gate", f"쓰기 거절: {item['task']}", {"engine": item["engine"]},
                        engine=item["engine"], log_dir=self.log_dir)
             return {"ok": True, "approved": False, "output": "쓰기 작업을 취소했습니다."}
+        if item.get("kind") in ("organize_apply", "organize_undo"):
+            return self._run_organize(item)
         res = route.run(item["engine"], item["task"], write=True, cwd=item["cwd"])
         log.append("route", item["task"][:80], {
             "engine": item["engine"], "category": item["category"], "mode": "write",
@@ -354,14 +362,140 @@ class PetRuntime:
                 self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
         return {"ok": res["ok"], "approved": True, "output": log.redact(res["output"])}
 
+    # ---------- 파일 정리(organize): scan은 바로, 이동·되돌리기는 쓰기 승인 게이트를 거친다 ----------
+    def organize_summary(self):
+        """현재 정리안의 카테고리별 건수(검토 필요 제외)와 되돌릴 수 있는 마지막 배치. 정리안이 없으면 None."""
+        try:
+            plan = organize.load_plan(self.home)
+        except ValueError:
+            return None
+        moves = organize.pending(self.home, sources=("cleanup", "organize"))  # tidy 기록은 펫 되돌리기에 넣지 않는다
+        moved = {e["id"] for e in moves}  # 이미 옮긴·격리한(되돌리지 않은) 항목은 다시 세지 않는다
+        ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and i["id"] not in moved)
+        # 치울 후보: 검토 필요(재무·계약 중복)는 펫에서 승인할 수 없으니 묶음에서 뺀다
+        q_n, q_bytes = Counter(), Counter()
+        for i in plan["items"]:
+            if i.get("action") == "quarantine" and not i["review"] and i["id"] not in moved:
+                q_n[i["kind"]] += 1
+                q_bytes[i["kind"]] += i["size"]
+        _, trashed = organize.trash_size(self.home)
+        last = moves[-1]["batch"] if moves else None
+        return {
+            "created": plan["created"],
+            "dest_root": plan["dest_root"].replace(str(Path.home()), "~", 1),
+            "counts": [[c, ready[c]] for c in organize.CATEGORIES if ready[c]],
+            "quarantine": [[k, organize.KIND_LABELS.get(k, k), q_n[k], q_bytes[k]] for k in q_n],
+            "reclaim": sum(q_bytes.values()),
+            "trashed": trashed,
+            "review": sum(i["review"] for i in plan["items"] if i.get("action", "move") == "move"),
+            "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves)} if last else None,
+        }
+
+    def organize_scan(self):
+        """읽기 전용 스캔으로 정리안을 새로 만든다. 파일은 옮기지 않는다."""
+        try:
+            plan = organize.scan(self.organize_root, self.organize_dest)
+        except (OSError, ValueError) as e:
+            return {"ok": False, "output": str(e)}
+        organize.save_plan(plan, self.home)
+        log.append("organize_scan", f"계획 {len(plan['items'])}건", {
+            "count": len(plan["items"]), "review": sum(i["review"] for i in plan["items"]), "via": "pet"},
+            log_dir=self.log_dir)
+        return {"ok": True, "organize": self.organize_summary()}
+
+    def _queue(self, item):
+        item = {"id": secrets.token_hex(4), "engine": "ro organize", "cwd": None, **item}
+        with self._lock:
+            self.write_pending = item
+        return {"ok": True, "pending": item}
+
+    def queue_organize_apply(self, category=None, kind=None):
+        """카테고리 이동(category) 또는 치울 후보 격리(kind)를 바로 하지 않고 쓰기 승인 대기열에 올린다."""
+        summary = self.organize_summary()
+        if kind:
+            group = next((g for g in (summary or {}).get("quarantine", []) if g[0] == kind), None)
+            if not group:
+                return {"ok": False, "output": "이 종류의 치울 후보가 없습니다. 정리안을 먼저 만드세요."}
+            _, label, n, size = group
+            return self._queue({"kind": "organize_apply", "category": None, "qkind": kind, "count": n,
+                                "plan_created": summary["created"],
+                                "task": f"치울 후보 격리: {label} {n}건({organize._mb(size)})을 ~/.ro/cleanup/trash로 "
+                                        "옮김 — 삭제 아님, 되돌리기 가능"})
+        n = dict(map(tuple, summary["counts"])).get(category, 0) if summary else 0
+        if not n:
+            return {"ok": False, "output": "이 카테고리에 옮길 항목이 없습니다. 정리안을 먼저 만드세요."}
+        return self._queue({"kind": "organize_apply", "category": category, "count": n,
+                            "plan_created": summary["created"],
+                            "task": f"파일 정리: {category} {n}건을 {summary['dest_root']}/{category}로 이동"})
+
+    def queue_organize_undo(self):
+        summary = self.organize_summary()
+        undo = summary and summary["undo"]
+        if not undo:
+            return {"ok": False, "output": "되돌릴 정리 기록이 없습니다."}
+        return self._queue({"kind": "organize_undo", "batch": undo["batch"], "count": undo["count"],
+                            "task": f"정리 되돌리기: {undo['count']}건을 원래 이름·위치로 (batch {undo['batch']})"})
+
+    def _run_organize(self, item):
+        try:
+            if item["kind"] == "organize_apply":
+                plan = organize.load_plan(self.home)
+                if plan["created"] != item["plan_created"]:
+                    raise ValueError("승인 요청 뒤에 정리안이 바뀌었습니다. 다시 요청하세요.")
+                batch, done, skipped = organize.apply(category=item.get("category"), kind=item.get("qkind"),
+                                                      home=self.home, log_dir=self.log_dir)
+                if item.get("qkind"):
+                    label = organize.KIND_LABELS.get(item["qkind"], item["qkind"])
+                    output = f"{label} {len(done)}건 격리 (되돌리기 가능, 삭제 아님)"
+                else:
+                    output = f"{item['category']} {len(done)}건 이동 (되돌리기 가능)"
+            else:
+                batch, done, skipped = organize.undo(item["batch"], self.home, self.log_dir)
+                output = f"{len(done)}건을 원래 자리로 되돌림"
+        except (OSError, ValueError) as e:
+            return {"ok": False, "approved": True, "output": str(e)}
+        if skipped:
+            output += f", 건너뜀 {len(skipped)}건"
+        with self._lock:
+            self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
+        return {"ok": True, "approved": True, "batch": batch, "output": output}
+
+    def _disk_signature(self):
+        """로그·학습 파일의 (이름, 크기, mtime, ctime). 바뀌지 않았으면 다시 읽을 필요가 없다."""
+        sig = []
+        for folder, pattern in ((self.log_dir, "*.jsonl"), (self.home, "*.json")):
+            for p in sorted(Path(folder).expanduser().glob(pattern)):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                sig.append((str(p), st.st_size, st.st_mtime_ns, st.st_ctime_ns))
+        return tuple(sig)
+
+    def _disk_state(self, day):
+        """450ms 폴링마다 전체 로그 파싱·pending.json 쓰기·감사를 반복하지 않도록 파일이 바뀔 때만 다시 계산한다."""
+        sig = self._disk_signature()
+        cached = self._disk_cache
+        mono = time.monotonic()
+        if cached and cached[0] == (day, sig) and mono - cached[1] < AUDIT_TTL_SEC:
+            return cached[2]
+        today_events = records.live(log.read(day, self.log_dir))
+        if cached and cached[0] == (day, sig):
+            cands = cached[2][1]  # 로그·학습 파일이 그대로면 감사만 TTL마다 다시 돈다
+        else:
+            all_events = log.read_all(self.log_dir)
+            cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
+        findings, _ = harden.audit(self.home, fix=False)
+        state = (today_events, cands, findings)
+        # propose가 pending.json을 다시 쓰므로 서명은 계산이 끝난 뒤에 잡는다
+        self._disk_cache = ((day, self._disk_signature()), mono, state)
+        return state
+
     def snapshot(self, now=None):
         """현재 ~/.ro 로그·학습 후보·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
         now = now or time.time()
         day = time.strftime("%Y-%m-%d", time.localtime(now))
-        all_events = records.live(log.read_all(self.log_dir))
-        today_events = [e for e in all_events if str(e.get("ts", ""))[:10] == day]
-        cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
-        findings, _ = harden.audit(self.home, fix=False)
+        today_events, cands, findings = self._disk_state(day)
         mapdata = ask.load_map(self.map_path)
         projects = (mapdata or {}).get("projects", [])
 
@@ -456,6 +590,7 @@ class PetRuntime:
             "project_names": [p["name"] for p in projects][:40],
             "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
+            "organize": self.organize_summary(),
             "audit_findings": [log.redact(f) for f in findings[:3]],
             "recent_logs": recent_logs,
             "last_answer": safe_answer,
@@ -475,6 +610,8 @@ class PetRuntime:
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
                       engine=engine, rules=rules, project=project)
         with self._lock:
+            if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
+                return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
             self.busy = True
             self.busy_task = log.redact(question[:60])
         try:
@@ -589,6 +726,11 @@ PET_HTML = r"""<!DOCTYPE html>
     font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif;
     color: var(--panel-fg);
     overflow: hidden;
+  }
+  /* 브라우저 모드(--browser): 투명 오버레이가 아니므로 배경을 깔아 카드·글자 대비를 지킨다 */
+  body.web { background: #DCD6CA; }
+  @media (prefers-color-scheme: dark) {
+    body.web { background: #2F2C28; }
   }
   .stage {
     position: relative;
@@ -996,7 +1138,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border-radius: 13px;
     font-size: 11px;
     line-height: 1.45;
-    max-height: 100px;
+    max-height: min(240px, 42vh);
     overflow-y: auto;
     white-space: pre-wrap;
     word-break: keep-all;
@@ -1802,6 +1944,13 @@ PET_HTML = r"""<!DOCTYPE html>
     --spring: linear(0, 0.031, 0.107, 0.208, 0.319, 0.429, 0.534, 0.628, 0.71, 0.78, 0.838, 0.884, 0.921, 0.949, 0.97, 0.985, 0.996, 1.003, 1.008, 1.01, 1);
   }
   [hidden] { display: none !important; }
+  .gate-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .fb-done { font-size: 10.5px; color: var(--muted); }
+  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
+  .org-cats:empty, .org-msg:empty { display: none; }
+  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; }
+  .mini-btn.quar { background: transparent; }
+  .bubble { max-width: 100%; }
   /* E · 앰비언트: 바닥 층 길이가 오늘 기록 수를 말한다 */
   .ro-bot { width: max(calc(23 * var(--u)), var(--base-px, 0px)); }
   .mood-idle .pill-base, .mood-discovery .pill-base, .mood-anxious .pill-base {
@@ -1849,7 +1998,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .mini-btn.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
   body.theme-chalk .mini-btn.primary { background: var(--chalk); color: var(--ink); border-color: var(--chalk); }
   /* C · 근거 붙은 답 · D · 정리 카드 */
-  .rc-card, .org-card {
+  .rc-card, .rec-org-card {
     background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
     padding: 10px 11px; display: flex; flex-direction: column; gap: 8px;
   }
@@ -1868,13 +2017,13 @@ PET_HTML = r"""<!DOCTYPE html>
   .rc-row .d { color: var(--muted); font-variant-numeric: tabular-nums; }
   .rc-foot { font-size: 10px; color: var(--muted); }
   .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
-  .org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
-  body.theme-chalk .org-bar { background: var(--chalk); }
-  .org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
-  .org-row { display: flex; flex-direction: column; gap: 3px; }
-  .org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
-  .org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
-  .org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+  .rec-org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
+  body.theme-chalk .rec-org-bar { background: var(--chalk); }
+  .rec-org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
+  .rec-org-row { display: flex; flex-direction: column; gap: 3px; }
+  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
+  .rec-org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
+  .rec-org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
   .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
   /* B · ⌥R 명령 팔레트 */
   .palette {
@@ -2006,8 +2155,8 @@ PET_HTML = r"""<!DOCTYPE html>
 
       <!-- 규칙 학습 게이트 카드 -->
       <div id="ruleCard" class="gate-box" style="display:none;">
-        <div class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
-        <div id="ruleText" class="gate-body"></div>
+        <div id="ruleTitle" class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
+        <div id="ruleText" class="gate-body gate-text"></div>
         <div class="gate-actions">
           <button id="ruleApproveBtn" class="action-btn primary">승인</button>
           <button id="ruleRejectBtn" class="action-btn ghost">거절</button>
@@ -2033,13 +2182,14 @@ PET_HTML = r"""<!DOCTYPE html>
             <button id="fbYes" class="fb-btn" title="첫 답변 수용">수용</button>
             <button id="fbNo" class="fb-btn" title="아쉬움">거절</button>
           </span>
+          <span id="fbDone" class="fb-done" style="display:none;"></span>
         </div>
       </div>
 
       <!-- C · 근거 붙은 답 -->
       <div id="recallCard" class="rc-card" style="display:none;" aria-live="polite"></div>
       <!-- D · 미리 보고 되돌리는 정리 -->
-      <div id="orgCard" class="org-card" style="display:none;" aria-live="polite"></div>
+      <div id="recOrgCard" class="rec-org-card" style="display:none;" aria-live="polite"></div>
 
       <!-- 최근 활동 섹션 -->
       <div class="section-row">
@@ -2061,6 +2211,19 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 3. 설정 (Settings) 탭 -->
     <div id="paneSettings" class="tab-pane">
       <div class="settings-stream">
+        <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 홈의 승인 카드에서 실행 -->
+        <div class="setting-block" id="fileOrgBlock">
+          <div class="block-title">파일 정리 (승인 전에는 옮기지 않음)</div>
+          <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
+          <div id="orgCats" class="org-cats"></div>
+          <div id="orgQuar" class="org-cats"></div>
+          <div class="options-row">
+            <button id="orgScanBtn" class="opt-btn">정리안 만들기</button>
+            <button id="orgUndoBtn" class="opt-btn" style="display:none;">되돌리기</button>
+          </div>
+          <div id="orgMsg" class="org-msg"></div>
+        </div>
+
         <!-- 집중 모드 -->
         <div class="setting-block">
           <div class="block-title">집중 모드</div>
@@ -2253,6 +2416,21 @@ const userQuestionPill = document.getElementById("userQuestionPill");
 const roMainBubble = document.getElementById("roMainBubble");
 const subStatusText = document.getElementById("subStatusText");
 const feedbackBtns = document.getElementById("feedbackBtns");
+const ruleTitle = document.getElementById("ruleTitle");
+const orgSummary = document.getElementById("orgSummary");
+const orgCats = document.getElementById("orgCats");
+const orgQuar = document.getElementById("orgQuar");
+const orgScanBtn = document.getElementById("orgScanBtn");
+const orgUndoBtn = document.getElementById("orgUndoBtn");
+const orgMsg = document.getElementById("orgMsg");
+const fbDone = document.getElementById("fbDone");
+let fbDoneUntil = 0;
+let askNotice = null;   // 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
+let askNoticeUntil = 0;
+let lastActKey = "";
+let lastTlKey = "";
+let orgKey = "";
+let pendingKind = null;
 
 const writeCard = document.getElementById("writeCard");
 const writeText = document.getElementById("writeText");
@@ -2503,7 +2681,12 @@ document.querySelectorAll(".act-btn").forEach((btn) => {
 });
 
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") setBubbleOpen(false);
+  if (e.key !== "Escape") return;
+  if (document.activeElement === askInput && askInput.value) {
+    askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
+    return;
+  }
+  setBubbleOpen(false);
 });
 
 const MOTION_DEMOS = ["press", "drag", "shake", "drop"];
@@ -2649,6 +2832,21 @@ let webLastDxSign = 0;
 let webShakeCount = 0;
 let webLastReversal = 0;
 
+/* 브라우저 모드: 창을 옮길 수 없으니 펫과 말풍선을 페이지 안에서 옮긴다(둘 다 화면 밖으로 나가지 않게) */
+let stageX = 0;
+let stageY = 0;
+function moveStageBy(dx, dy) {
+  const prev = [stageX, stageY];
+  stageX += dx;
+  stageY += dy;
+  stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
+  if (rects.some((r) => r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight)) {
+    [stageX, stageY] = prev;
+    stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  }
+}
+
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
   if (e.target.closest("button") || e.target.closest("input")) return;
@@ -2677,7 +2875,8 @@ window.addEventListener("mousemove", (e) => {
   if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
-    notifyHost({ type: "moveBy", dx, dy });
+    if (isNativeHost) notifyHost({ type: "moveBy", dx, dy });
+    else moveStageBy(dx, dy);
   }
 });
 
@@ -2774,7 +2973,12 @@ function applyState(st) {
   metricTime.textContent = lastTs || "--:--";
 
   // 3. 답변 카드 & 게이트 카드
-  if (st.last_answer) {
+  if (Date.now() < askNoticeUntil) {
+    answerCard.style.display = "flex";
+    userMsgRow.style.display = "flex";
+    userQuestionPill.textContent = askNotice.q;
+    roMainBubble.textContent = askNotice.msg;
+  } else if (st.last_answer) {
     answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = st.last_answer.question;
@@ -2782,13 +2986,19 @@ function applyState(st) {
     const projs = (st.last_answer.projects || []).join(", ") || "-";
     subStatusText.textContent = `${st.last_answer.engine} (${projs})`;
     feedbackBtns.style.display = st.last_answer.feedback_given ? "none" : "inline-flex";
+    fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
   } else {
     answerCard.style.display = "none";
   }
 
+  renderOrganize(st.organize);
+  const wasPending = pendingKind;
+  pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
+
   if (st.write_pending) {
     writeCard.style.display = "flex";
     writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
+    if (!wasPending) writeCard.scrollIntoView({ block: "nearest" });  // 새 승인 요청은 보이는 곳으로
   } else {
     writeCard.style.display = "none";
   }
@@ -2797,7 +3007,10 @@ function applyState(st) {
     const r = st.pending_rules[0];
     currentRuleId = r.id;
     ruleCard.style.display = "flex";
+    const total = (st.counts && st.counts.pending_rules) || st.pending_rules.length;
+    ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total} · 승인 전 미적용)`;
     ruleText.textContent = `${r.text} (${r.evidence})`;
+    ruleText.title = ruleText.textContent;
   } else {
     currentRuleId = null;
     ruleCard.style.display = "none";
@@ -2806,64 +3019,72 @@ function applyState(st) {
   // 4. 최근 활동 리스트 (기본 탭)
   const logs = st.recent_logs || [];
   logCountBadge.textContent = `${logs.length}건`;
-  activityList.innerHTML = "";
-  if (logs.length === 0) {
-    activityList.innerHTML = '<div style="font-size:10.5px;color:var(--muted);text-align:center;padding:12px 0;">오늘 아직 기록이 없습니다.</div>';
-  } else {
-    logs.slice().reverse().slice(0, 4).forEach((item) => {
-      const card = document.createElement("div");
-      card.className = "activity-card";
+  const actKey = JSON.stringify(logs.slice(-4));
+  if (actKey !== lastActKey) {  // 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+    lastActKey = actKey;
+    activityList.innerHTML = "";
+    if (logs.length === 0) {
+      activityList.innerHTML = '<div style="font-size:10.5px;color:var(--muted);text-align:center;padding:12px 0;">오늘 아직 기록이 없습니다.</div>';
+    } else {
+      logs.slice().reverse().slice(0, 4).forEach((item) => {
+        const card = document.createElement("div");
+        card.className = "activity-card";
 
-      const dot = document.createElement("span");
-      dot.className = `act-dot ${item.kind === "route" ? "route" : ""}`;
+        const dot = document.createElement("span");
+        dot.className = `act-dot ${item.kind === "route" ? "route" : ""}`;
 
-      const title = document.createElement("span");
-      title.className = "act-summary";
-      title.textContent = item.summary;
-      title.title = `${item.kind} · ${item.summary}`;
+        const title = document.createElement("span");
+        title.className = "act-summary";
+        title.textContent = item.summary;
+        title.title = `${item.kind} · ${item.summary}`;
 
-      const time = document.createElement("span");
-      time.className = "act-time";
-      time.textContent = (item.ts || "").slice(0, 5);
+        const time = document.createElement("span");
+        time.className = "act-time";
+        time.textContent = (item.ts || "").slice(0, 5);
 
-      card.appendChild(dot);
-      card.appendChild(title);
-      card.appendChild(time);
-      activityList.appendChild(card);
-    });
+        card.appendChild(dot);
+        card.appendChild(title);
+        card.appendChild(time);
+        activityList.appendChild(card);
+      });
+    }
   }
 
   // 5. 타임라인 리스트 (타임라인 탭)
   timelineCountText.textContent = `오늘 ${todayCount}건`;
-  timelineList.innerHTML = "";
-  if (logs.length === 0) {
-    timelineList.innerHTML = '<div style="font-size:11px;color:var(--muted);text-align:center;padding:24px 0;">기록된 내역이 없습니다.</div>';
-  } else {
-    const total = logs.length;
-    logs.slice().reverse().forEach((item, idx) => {
-      const stepIndex = String(total - idx).padStart(2, "0");
-      const row = document.createElement("div");
-      row.className = "timeline-row";
-      row.dataset.id = item.id || "";
-      row.innerHTML = `
-        <span class="step-badge">${stepIndex}</span>
-        <div class="timeline-body">
-          <div class="timeline-meta">
-            <span class="timeline-tag">${esc(item.kind)}</span>
-            <span class="timeline-time">${esc(item.ts)}</span>
+  const tlKey = JSON.stringify(logs);
+  if (tlKey !== lastTlKey) {
+    lastTlKey = tlKey;
+    timelineList.innerHTML = "";
+    if (logs.length === 0) {
+      timelineList.innerHTML = '<div style="font-size:11px;color:var(--muted);text-align:center;padding:24px 0;">기록된 내역이 없습니다.</div>';
+    } else {
+      const total = logs.length;
+      logs.slice().reverse().forEach((item, idx) => {
+        const stepIndex = String(total - idx).padStart(2, "0");
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+        row.dataset.id = item.id || "";
+        row.innerHTML = `
+          <span class="step-badge">${stepIndex}</span>
+          <div class="timeline-body">
+            <div class="timeline-meta">
+              <span class="timeline-tag">${esc(item.kind)}</span>
+              <span class="timeline-time">${esc(item.ts)}</span>
+            </div>
+            <div class="timeline-text">${esc(item.summary)}</div>
           </div>
-          <div class="timeline-text">${esc(item.summary)}</div>
-        </div>
-      `;
-      timelineList.appendChild(row);
-    });
+        `;
+        timelineList.appendChild(row);
+      });
+    }
   }
   applyAmbient(st);
 }
 
 async function refreshState() {
   try {
-    const res = await fetch("/api/state");
+    const res = await fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } });
     const st = await res.json();
     applyState(st);
   } catch (err) {}
@@ -2879,20 +3100,34 @@ askForm.addEventListener("submit", async (e) => {
   askInput.value = "";
   plusIcon.style.display = "block";
   sendIcon.style.display = "none";
+  askInput.disabled = true;
   askSubmit.disabled = true;
   previewLockUntil = 0;
+  askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
+  askNoticeUntil = Infinity;
   answerCard.style.display = "flex";
   userMsgRow.style.display = "flex";
   userQuestionPill.textContent = q;
-  roMainBubble.textContent = "기록을 살피며 풀어내는 중...";
+  roMainBubble.textContent = askNotice.msg;
   subStatusText.textContent = "풀어내는 중...";
   petWrap.className = "pet-wrap mood-focus";
+  let res = null;
   try {
-    await apiPost("/api/ask", { question: q });
+    res = await apiPost("/api/ask", { question: q });
+  } catch (err) {
+    res = null;
   } finally {
+    askInput.disabled = false;
     askSubmit.disabled = false;
-    await refreshState();
   }
+  askNoticeUntil = 0;
+  if (!res || !res.ok) {
+    // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
+    if (!askInput.value) askInput.value = q;
+    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
+    askNoticeUntil = Date.now() + 8000;
+  }
+  await refreshState();
 });
 
 document.getElementById("ruleApproveBtn").addEventListener("click", async () => {
@@ -2906,20 +3141,102 @@ document.getElementById("ruleRejectBtn").addEventListener("click", async () => {
   await refreshState();
 });
 document.getElementById("writeApproveBtn").addEventListener("click", async () => {
-  await apiPost("/api/write_gate", { approve: true });
+  const kind = pendingKind;
+  const r = await apiPost("/api/write_gate", { approve: true });
+  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
   await refreshState();
 });
 document.getElementById("writeRejectBtn").addEventListener("click", async () => {
-  await apiPost("/api/write_gate", { approve: false });
+  const kind = pendingKind;
+  const r = await apiPost("/api/write_gate", { approve: false });
+  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
   await refreshState();
 });
-document.getElementById("fbYes").addEventListener("click", async () => {
-  await apiPost("/api/feedback", { accepted: true });
+/* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
+function fmtBytes(n) {
+  return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
+}
+
+function orgChip(parent, text, title, body, cls) {
+  const b = document.createElement("button");
+  b.className = cls ? `mini-btn ${cls}` : "mini-btn";
+  b.textContent = text;
+  b.title = title;
+  b.addEventListener("click", async () => {
+    const r = await apiPost("/api/organize/apply", body);
+    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
+    await refreshState();
+  });
+  parent.appendChild(b);
+}
+
+function renderOrganize(o) {
+  const key = JSON.stringify(o || null);
+  if (key === orgKey) return;
+  orgKey = key;
+  orgCats.replaceChildren();
+  orgQuar.replaceChildren();
+  if (!o) {
+    orgSummary.textContent = "정리안이 없습니다. 먼저 정리안을 만드세요.";
+    orgUndoBtn.style.display = "none";
+    return;
+  }
+  const total = o.counts.reduce((a, c) => a + c[1], 0);
+  const quar = o.quarantine || [];
+  const qn = quar.reduce((a, g) => a + g[2], 0);
+  const parts = [];
+  if (total) parts.push(`정리 ${total}`);
+  if (qn) parts.push(`치울 후보 ${qn}(${fmtBytes(o.reclaim)})`);
+  if (o.review) parts.push(`검토 ${o.review}`);
+  orgSummary.textContent = parts.length
+    ? `${parts.join(" · ")} — 누르면 승인 요청이 올라갑니다.` + (o.review ? " 검토 항목은 터미널 ro organize edit로." : "")
+    : "옮기거나 치울 항목이 없습니다.";
+  if (o.trashed) orgSummary.textContent += ` 격리 보관 중 ${fmtBytes(o.trashed)} — 공간을 비우려면 터미널에서 ro organize trash --empty(7일 지난 것만).`;
+  o.counts.forEach(([cat, n]) => orgChip(orgCats, `${cat} ${n}`, `${cat} ${n}건 이동 승인 요청`, { category: cat }));
+  quar.forEach(([kind, label, n, size]) => orgChip(orgQuar, `${label} ${n} · ${fmtBytes(size)}`,
+    `${label} ${n}건을 격리(삭제 아님, 되돌리기 가능) 승인 요청`, { kind }, "quar"));
+  if (o.undo) {
+    orgUndoBtn.style.display = "inline-block";
+    orgUndoBtn.textContent = `되돌리기 (${o.undo.count}건)`;
+  } else {
+    orgUndoBtn.style.display = "none";
+  }
+}
+
+orgScanBtn.addEventListener("click", async () => {
+  orgScanBtn.disabled = true;
+  orgMsg.textContent = "정리안을 만드는 중... (파일은 옮기지 않습니다)";
+  try {
+    const r = await apiPost("/api/organize/scan", {});
+    orgMsg.textContent = r.ok ? "정리안을 새로 만들었습니다." : (r.output || "실패");
+  } finally {
+    orgScanBtn.disabled = false;
+    await refreshState();
+  }
+});
+orgUndoBtn.addEventListener("click", async () => {
+  const r = await apiPost("/api/organize/undo", {});
+  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
   await refreshState();
 });
-document.getElementById("fbNo").addEventListener("click", async () => {
-  await apiPost("/api/feedback", { accepted: false });
+async function sendFeedback(accepted) {
+  let res = null;
+  try {
+    res = await apiPost("/api/feedback", { accepted });
+  } catch (err) {}
+  // 눌렀는지 알 수 있게 잠깐 결과를 남긴다(버튼은 한 번만 누를 수 있다)
+  fbDone.textContent = res && res.ok ? (accepted ? "수용 반영 ✓" : "거절 반영 ✓") : "반영 실패 — 다시 눌러 주세요";
+  fbDoneUntil = Date.now() + 2500;
   await refreshState();
+}
+document.getElementById("fbYes").addEventListener("click", () => sendFeedback(true));
+document.getElementById("fbNo").addEventListener("click", () => sendFeedback(false));
+
+/* 마우스가 창 밖으로 나가면 시선을 가운데로 되돌린다 */
+document.documentElement.addEventListener("mouseleave", () => {
+  if (currentAction || RoMotion.busy()) return;
+  eyesWrap.style.transform = "";
+  layerHead.style.transform = "";
 });
 
 /* ===== 모션 엔진: 07 누름 · 08 잡기·끌기 · 09 흔들기 · 10 놓기 =====
@@ -3340,7 +3657,7 @@ const attnDot = document.getElementById("attnDot");
 const muteBadge = document.getElementById("muteBadge");
 const toastEl = document.getElementById("toast");
 const recallCard = document.getElementById("recallCard");
-const orgCard = document.getElementById("orgCard");
+const recOrgCard = document.getElementById("recOrgCard");
 const palette = document.getElementById("palette");
 const palInput = document.getElementById("palInput");
 const palList = document.getElementById("palList");
@@ -3476,7 +3793,7 @@ async function runRecall(q) {
   const r = await apiPost("/api/recall", { question: q });
   setBubbleOpen(true);
   switchTab("home");
-  orgCard.style.display = "none";
+  recOrgCard.style.display = "none";
   const items = (r.items || []).map(i => h("li", {}, h("span", { text: i.text }), h("sup", { class: "rc-n", text: i.n })));
   const ev = (r.evidence || []).length ? h("details", { class: "rc-ev" },
     h("summary", { text: `근거 · 기록 ${r.evidence.length}건` }),
@@ -3498,15 +3815,15 @@ async function runRecall(q) {
 }
 
 /* D · 미리 보고 되돌리는 정리 */
-async function showOrganize() {
-  const p = await apiPost("/api/organize_plan", {});
+async function showRecordOrganize() {
+  const p = await apiPost("/api/records/plan", {});
   setBubbleOpen(true);
   switchTab("home");
   recallCard.style.display = "none";
   const max = Math.max(1, ...p.groups.map(g => g.count));
   const picks = {};
-  const amb = p.ambiguous.length ? h("div", { class: "org-amb" },
-    h("div", { class: "org-line" }, h("span", {}, h("i", { class: "org-dot" }), `확인 필요`), h("span", { text: `${p.ambiguous.length}건 골라주기` })),
+  const amb = p.ambiguous.length ? h("div", { class: "rec-org-amb" },
+    h("div", { class: "rec-org-line" }, h("span", {}, h("i", { class: "rec-org-dot" }), `확인 필요`), h("span", { text: `${p.ambiguous.length}건 골라주기` })),
     p.ambiguous.slice(0, 8).map(a => {
       const s = h("select", { "aria-label": `${a.summary} 분류` }, h("option", { value: "", text: "고르기" }),
         a.candidates.map(c => h("option", { value: c, text: c })));
@@ -3514,26 +3831,26 @@ async function showOrganize() {
       return h("label", {}, h("div", { text: a.summary }), s);
     })) : null;
   const apply = h("button", { class: "mini-btn primary", type: "button", text: "적용하기", onclick: async () => {
-    const r = await apiPost("/api/organize_apply", { picks });
-    if (!r.ok) { orgCard.replaceChildren(h("div", { class: "rc-head", text: r.error || "적용하지 못했어요" })); return; }
-    orgCard.replaceChildren(h("div", { class: "rc-head", text: `적용했어요 · ${r.applied}건` }),
+    const r = await apiPost("/api/records/apply", { picks });
+    if (!r.ok) { recOrgCard.replaceChildren(h("div", { class: "rc-head", text: r.error || "적용하지 못했어요" })); return; }
+    recOrgCard.replaceChildren(h("div", { class: "rc-head", text: `적용했어요 · ${r.applied}건` }),
       h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
-        const u = await apiPost("/api/organize_undo", {});
-        orgCard.replaceChildren(h("div", { class: "rc-head", text: u.ok ? `되돌렸어요 · ${u.reverted}건` : (u.error || "되돌리지 못했어요") }));
+        const u = await apiPost("/api/records/undo", {});
+        recOrgCard.replaceChildren(h("div", { class: "rc-head", text: u.ok ? `되돌렸어요 · ${u.reverted}건` : (u.error || "되돌리지 못했어요") }));
       } }),
       h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
   } });
-  const cancel = h("button", { class: "mini-btn", type: "button", text: "취소", onclick: () => { orgCard.style.display = "none"; } });
-  orgCard.replaceChildren(
+  const cancel = h("button", { class: "mini-btn", type: "button", text: "취소", onclick: () => { recOrgCard.style.display = "none"; } });
+  recOrgCard.replaceChildren(
     h("div", { class: "rc-head", text: "이렇게 묶을게요" }),
     h("div", { class: "rc-foot", text: `기록 ${p.total}건 → 프로젝트 ${p.groups.length}개. 아직 아무것도 바뀌지 않았어요.` }),
-    ...p.groups.map(g => h("div", { class: "org-row" },
-      h("div", { class: "org-line" }, h("span", { text: g.project }), h("span", { text: `${g.count}건` })),
-      h("div", { class: "org-bar", style: `width:${Math.round(g.count / max * 100)}%` }))),
+    ...p.groups.map(g => h("div", { class: "rec-org-row" },
+      h("div", { class: "rec-org-line" }, h("span", { text: g.project }), h("span", { text: `${g.count}건` })),
+      h("div", { class: "rec-org-bar", style: `width:${Math.round(g.count / max * 100)}%` }))),
     amb,
     h("div", { class: "chip-row" }, apply, cancel),
     h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
-  orgCard.style.display = "flex";
+  recOrgCard.style.display = "flex";
 }
 
 /* B · ⌥R 팔레트 */
@@ -3607,7 +3924,7 @@ async function runPalette() {
     if (c.arg && !r.arg) { palInput.value = c.label + " "; renderPalette(); return; }
     closePalette();
     if (c.id === "record") await capture("text", "직접 기록", r.arg, r.arg.length);
-    else if (c.id === "organize") await showOrganize();
+    else if (c.id === "organize") await showRecordOrganize();
     else if (c.id === "today") await runRecall("오늘 뭐 했지?");
     else if (c.id === "find") await runRecall(`${r.arg} 기록 찾아줘`);
     else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
@@ -3635,6 +3952,11 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "Tab") { e.preventDefault(); }
 }, true);
 
+if (!isNativeHost) {
+  // 브라우저에서는 처음부터 대화창을 연다: 봇만 덩그러니 있으면 무엇을 할지 알기 어렵다
+  document.body.classList.add("web");
+  setBubbleOpen(true);
+}
 refreshState();
 window._poll = setInterval(refreshState, 450);
 </script>
@@ -3661,7 +3983,39 @@ def make_handler(runtime):
             self.end_headers()
             self.wfile.write(body)
 
+        def _host_ok(self):
+            # DNS 리바인딩 차단: 다른 도메인 이름으로 들어온 요청은 토큰이 박힌 페이지조차 내주지 않는다
+            port = self.server.server_address[1]
+            if self.headers.get("Host", "") in (f"127.0.0.1:{port}", f"localhost:{port}"):
+                return True
+            self._send_json(403, {"ok": False, "error": "invalid host"})
+            return False
+
+        def _token_ok(self):
+            if hmac.compare_digest(self.headers.get("X-Ro-Token", ""), runtime.token):
+                return True
+            self._send_json(403, {"ok": False, "error": "invalid token"})
+            return False
+
+        def _guarded(self, fn):
+            # 처리 중 예외가 나도 연결을 끊지 말고 JSON 500으로 알린다(본문에는 예외 종류만, 경로·내용은 싣지 않음)
+            try:
+                fn()
+            except Exception as e:
+                try:
+                    self._send_json(500, {"ok": False, "error": f"server error: {type(e).__name__}"})
+                except OSError:
+                    pass
+
         def do_GET(self):
+            self._guarded(self._get)
+
+        def do_POST(self):
+            self._guarded(self._post)
+
+        def _get(self):
+            if not self._host_ok():
+                return
             parsed = urlparse(self.path)
             if parsed.path == "/":
                 body = render_html(runtime.token).encode("utf-8")
@@ -3672,20 +4026,13 @@ def make_handler(runtime):
                 self.end_headers()
                 self.wfile.write(body)
             elif parsed.path == "/api/state":
-                self._send_json(200, runtime.snapshot())
-            elif parsed.path == "/api/action":
-                from urllib.parse import parse_qs
-                qs = parse_qs(parsed.query)
-                act = qs.get("name", [""])[0] or qs.get("action", [""])[0]
-                dur = float(qs.get("duration", ["4.0"])[0])
-                self._send_json(200, runtime.trigger_action(act, dur))
+                if self._token_ok():
+                    self._send_json(200, runtime.snapshot())
             else:
                 self._send_json(404, {"error": "not found"})
 
-        def do_POST(self):
-            given = self.headers.get("X-Ro-Token", "")
-            if not hmac.compare_digest(given, runtime.token):
-                self._send_json(403, {"ok": False, "error": "invalid token"})
+        def _post(self):
+            if not (self._host_ok() and self._token_ok()):
                 return
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(min(length, 32768)).decode("utf-8", errors="replace")
@@ -3715,12 +4062,23 @@ def make_handler(runtime):
                 self._send_json(200, runtime.capture_undo(data.get("id")))
             elif parsed.path == "/api/capture_project":
                 self._send_json(200, runtime.capture_project(data.get("id"), data.get("project")))
-            elif parsed.path == "/api/organize_plan":
-                self._send_json(200, runtime.organize_plan())
-            elif parsed.path == "/api/organize_apply":
-                self._send_json(200, runtime.organize_apply(data.get("picks")))
-            elif parsed.path == "/api/organize_undo":
-                self._send_json(200, runtime.organize_undo())
+            elif parsed.path == "/api/records/plan":
+                self._send_json(200, runtime.records_plan())
+            elif parsed.path == "/api/records/apply":
+                self._send_json(200, runtime.records_apply(data.get("picks")))
+            elif parsed.path == "/api/records/undo":
+                self._send_json(200, runtime.records_undo())
+            elif parsed.path == "/api/organize/scan":
+                self._send_json(200, runtime.organize_scan())
+            elif parsed.path == "/api/organize/apply":
+                kind = str(data.get("kind") or "")
+                if kind and kind not in organize.QUARANTINE_KINDS:
+                    self._send_json(400, {"ok": False, "output": "알 수 없는 종류"})
+                else:
+                    self._send_json(200, runtime.queue_organize_apply(str(data.get("category") or "") or None,
+                                                                      kind or None))
+            elif parsed.path == "/api/organize/undo":
+                self._send_json(200, runtime.queue_organize_undo())
             elif parsed.path == "/api/focus":
                 self._send_json(200, runtime.set_focus(bool(data.get("on"))))
             elif parsed.path == "/api/clear":
@@ -3767,6 +4125,16 @@ def ensure_mac_binary(force_build=False):
     return bin_path
 
 
+def _is_pet_process(pid, key):
+    """PID가 재사용됐을 수 있으니 명령줄이 실제 ro pet / ro-pet-host일 때만 참."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    cmd = r.stdout.strip()
+    if key == "host_pid":
+        return "ro-pet-host" in cmd
+    args = [Path(a).name for a in cmd.split()]
+    return "ro" in args and "pet" in args  # `ro pet …` 또는 `python -m ro pet …`
+
+
 def stop_existing_pets(home=learn.HOME):
     """이미 실행 중인 이전 ro pet / ro-pet-host 프로세스를 모두 정리해 중복 실행(2마리 현상)을 막는다."""
     pid_file = Path(home).expanduser() / "pet.pid"
@@ -3776,7 +4144,8 @@ def stop_existing_pets(home=learn.HOME):
             info = json.loads(pid_file.read_text(encoding="utf-8"))
             for key in ("host_pid", "py_pid"):
                 old_pid = info.get(key)
-                if isinstance(old_pid, int) and old_pid > 1 and old_pid != my_pid:
+                if (isinstance(old_pid, int) and old_pid > 1 and old_pid != my_pid
+                        and _is_pet_process(old_pid, key)):
                     try:
                         os.kill(old_pid, signal.SIGTERM)
                     except OSError:

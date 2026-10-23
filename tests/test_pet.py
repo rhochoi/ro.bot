@@ -1,14 +1,16 @@
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import learn, log, pet
+from ro import learn, log, pet, organize
 
 
 class PetTest(unittest.TestCase):
@@ -137,6 +139,133 @@ class PetTest(unittest.TestCase):
                 self.assertTrue(app["approved"])
                 self.assertEqual(run.call_args.kwargs.get("write"), True)
 
+    def test_organize_summary_counts_only_move_items(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            (dl / "pic.png").write_text("IMG")
+            with zipfile.ZipFile(dl / "pic.zip", "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            self.assertTrue(rt.organize_scan()["ok"])
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["counts"], [["이미지", 1]])  # 풀린 압축 원본(치울 후보)은 이동 버튼에 안 들어간다
+            self.assertFalse(rt.queue_organize_apply("압축·설치")["ok"])
+            organize.apply(kind="extracted", home=str(ro), log_dir=str(ro / "log"))  # 격리도 되돌리기 대상이다
+            self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
+
+    def test_quarantine_groups_go_through_write_gate(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            (dl / "pic.png").write_text("IMG")
+            z = dl / "pic.zip"
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("pic.png", "IMG")
+            (dl / "3월 영수증.pdf").write_text("same")
+            (dl / "3월 영수증 (1).pdf").write_text("same")  # 재무 중복 = 검토 필요 → 펫 묶음에서 제외
+            for i, p in enumerate(sorted(dl.iterdir())):
+                os.utime(p, (1 + i, 1 + i))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            rt.organize_scan()
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["quarantine"], [["extracted", "풀린 압축", 1, z.stat().st_size]])
+            self.assertEqual((org["reclaim"], org["trashed"]), (z.stat().st_size, 0))
+            self.assertFalse(rt.queue_organize_apply(kind="duplicate")["ok"])  # 검토 필요뿐이면 요청 불가
+
+            res = rt.queue_organize_apply(kind="extracted")
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["pending"]["qkind"], "extracted")
+            self.assertIn("삭제 아님", res["pending"]["task"])
+            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertTrue(z.exists())  # 거절하면 그대로
+
+            rt.queue_organize_apply(kind="extracted")
+            with mock.patch("ro.route.run") as run:
+                out = rt.resolve_write_approval(True)
+                run.assert_not_called()
+            self.assertTrue(out["ok"], out)
+            self.assertIn("풀린 압축 1건 격리", out["output"])
+            self.assertFalse(z.exists())
+            org = rt.snapshot()["organize"]
+            self.assertEqual((org["quarantine"], org["undo"]["count"]), ([], 1))
+            self.assertGreater(org["trashed"], 0)  # 격리 보관 중 용량 표시
+
+    def test_organize_goes_through_write_gate(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
+            h = Path(d).resolve()
+            dl = h / "Downloads"
+            dl.mkdir()
+            f = dl / "2026-01-02 영수증.txt"
+            f.write_text("결제")
+            (dl / "memo.xyz").write_text("x")
+            for p in dl.iterdir():
+                os.utime(p, (1, 1))
+            ro = h / ".ro"
+            rt = pet.PetRuntime(home=str(ro), log_dir=str(ro / "log"), map_path=str(ro / "map.json"))
+            rt.organize_root, rt.organize_dest = dl, h / "Documents" / "정리됨"
+            moved = rt.organize_dest / "재무" / "2026-01-02_영수증.txt"
+
+            self.assertIsNone(rt.snapshot()["organize"])
+            self.assertFalse(rt.queue_organize_apply("재무")["ok"])  # 정리안 없으면 요청 불가
+            self.assertTrue(rt.organize_scan()["ok"])
+            org = rt.snapshot()["organize"]
+            self.assertEqual((org["counts"], org["review"]), ([["재무", 1]], 1))
+            self.assertFalse(moved.exists())  # scan은 옮기지 않는다
+
+            # 요청만으로는 옮기지 않고, 펫은 불안(승인 대기)
+            self.assertTrue(rt.queue_organize_apply("재무")["ok"])
+            st = rt.snapshot()
+            self.assertEqual((st["mood"], st["write_pending"]["kind"]), ("anxious", "organize_apply"))
+            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertTrue(f.exists())
+
+            # 요청 뒤 정리안이 바뀌면 승인해도 옮기지 않는다
+            rt.queue_organize_apply("재무")
+            time.sleep(1.1)
+            rt.organize_scan()
+            self.assertFalse(rt.resolve_write_approval(True)["ok"])
+            self.assertTrue(f.exists())
+
+            # 승인해야 이동
+            rt.queue_organize_apply("재무")
+            with mock.patch("ro.route.run") as run:
+                res = rt.resolve_write_approval(True)
+                run.assert_not_called()  # 정리는 엔진을 부르지 않는다
+            self.assertTrue(res["ok"], res)
+            self.assertTrue(moved.exists())
+            self.assertFalse(f.exists())
+            org = rt.snapshot()["organize"]
+            self.assertEqual(org["counts"], [])  # 옮긴 항목은 다시 요청 대상이 아니다
+            self.assertTrue(org["dest_root"].startswith("~"))
+
+            # 되돌리기도 승인 게이트를 거친다
+            self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
+            rt.queue_organize_undo()
+            self.assertTrue(moved.exists())
+            self.assertTrue(rt.resolve_write_approval(True)["ok"])
+            self.assertTrue(f.exists())
+            self.assertIsNone(rt.snapshot()["organize"]["undo"])
+            self.assertFalse(rt.queue_organize_undo()["ok"])
+
+    def test_bubble_fits_overlay_window(self):
+        # 오버레이 창(360×520)을 넘지 않게: 툴바·입력창 사이의 내용(팔레트·카드·기록)은 스크롤 영역 안에 있다
+        html = pet.PET_HTML
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="writeCard"', 'id="activityList"',
+                                          'id="paneSettings"', 'id="fileOrgBlock"', 'id="askForm"')]
+        self.assertEqual(order, sorted(order))
+        # 리디자인 패널은 탭 영역(가운데)이 스크롤되고 툴바·입력창은 고정된다
+        self.assertRegex(html, r"\.tab-pane\.active \{[^}]*overflow-y: auto;")
+        self.assertIn("max-width: 100%;", html[html.index(".bubble {"):])
+
     def test_http_server_localhost_only_and_token_protected(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
@@ -146,9 +275,24 @@ class PetTest(unittest.TestCase):
             srv = pet.start_server(rt, host="127.0.0.1", port=0)
             port = srv.server_address[1]
             try:
-                with urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3) as resp:
+                # 상태 조회도 토큰 필요(질문·경로·로그가 담겨 있다)
+                with self.assertRaises(HTTPError) as ctx0:
+                    urlopen(f"http://127.0.0.1:{port}/api/state", timeout=3)
+                self.assertEqual(ctx0.exception.code, 403)
+                req_state = Request(f"http://127.0.0.1:{port}/api/state", headers={"X-Ro-Token": rt.token})
+                with urlopen(req_state, timeout=3) as resp:
                     st = json.loads(resp.read().decode("utf-8"))
                     self.assertIn(st["mood"], pet.MOODS)
+
+                # DNS 리바인딩: 다른 Host 이름이면 토큰이 박힌 첫 페이지도 내주지 않는다
+                for path in ("/", "/api/state"):
+                    req_host = Request(f"http://127.0.0.1:{port}{path}",
+                                       headers={"Host": f"evil.example:{port}", "X-Ro-Token": rt.token})
+                    with self.assertRaises(HTTPError) as ctx_h:
+                        urlopen(req_host, timeout=3)
+                    self.assertEqual(ctx_h.exception.code, 403)
+                with urlopen(f"http://localhost:{port}/", timeout=3) as resp_l:
+                    self.assertIn(rt.token, resp_l.read().decode("utf-8"))
 
                 # 토큰 없이 POST 시 403 거부
                 req_bad = Request(f"http://127.0.0.1:{port}/api/feedback",
@@ -166,6 +310,13 @@ class PetTest(unittest.TestCase):
                                  method="POST")
                 with urlopen(req_ok, timeout=3) as resp2:
                     self.assertEqual(resp2.status, 200)
+
+                # 정리 요청도 토큰 없이는 거부
+                req_org = Request(f"http://127.0.0.1:{port}/api/organize/apply", data=b'{"category": "x"}',
+                                  headers={"Content-Type": "application/json"}, method="POST")
+                with self.assertRaises(HTTPError) as ctx2:
+                    urlopen(req_org, timeout=3)
+                self.assertEqual(ctx2.exception.code, 403)
             finally:
                 srv.shutdown()
                 srv.server_close()
@@ -212,11 +363,10 @@ class PetTest(unittest.TestCase):
             srv = pet.start_server(rt, host="127.0.0.1", port=0)
             port = srv.server_address[1]
             try:
-                # GET /api/action?name=alert
-                with urlopen(f"http://127.0.0.1:{port}/api/action?name=alert&duration=2.5", timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    self.assertTrue(data["ok"])
-                    self.assertEqual(data["action"], "alert")
+                # 상태를 바꾸는 GET은 없앴다(토큰 없이 모션을 바꿀 수 있었음)
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(f"http://127.0.0.1:{port}/api/action?name=alert&duration=2.5", timeout=3)
+                self.assertEqual(ctx.exception.code, 404)
 
                 # POST /api/action with token
                 req = Request(f"http://127.0.0.1:{port}/api/action",
@@ -230,6 +380,100 @@ class PetTest(unittest.TestCase):
             finally:
                 srv.shutdown()
                 srv.server_close()
+
+    def test_handler_exception_returns_json_500(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            srv = pet.start_server(rt, host="127.0.0.1", port=0)
+            port = srv.server_address[1]
+            try:
+                with mock.patch.object(rt, "snapshot", side_effect=RuntimeError("/Users/secret/path")):
+                    req = Request(f"http://127.0.0.1:{port}/api/state", headers={"X-Ro-Token": rt.token})
+                    with self.assertRaises(HTTPError) as ctx:
+                        urlopen(req, timeout=3)
+                self.assertEqual(ctx.exception.code, 500)
+                body = json.loads(ctx.exception.read().decode("utf-8"))
+                self.assertEqual(body, {"ok": False, "error": "server error: RuntimeError"})  # 예외 내용(경로)은 싣지 않는다
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_browser_mode_fallbacks(self):
+        html = pet.PET_HTML
+        init = html[html.index("if (!isNativeHost) {\n  // 브라우저에서는"):]
+        self.assertIn('document.body.classList.add("web");', init)  # 불투명 배경
+        self.assertIn("setBubbleOpen(true);", init)  # 대화창을 처음부터 연다
+        self.assertIn("body.web { background:", html)
+        self.assertIn("else moveStageBy(dx, dy);", html)  # 웹 드래그는 페이지 안에서 옮긴다
+        self.assertIn("max-height: min(240px, 42vh);", html)
+
+    def test_rule_counter_and_feedback_ack(self):
+        html = pet.PET_HTML
+        self.assertIn("ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total}", html)
+        self.assertIn('id="ruleText" class="gate-body gate-text"', html)
+        self.assertIn('"수용 반영 ✓"', html)
+
+    def test_menubar_icon_is_template_and_permission_hint(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("img.isTemplate = true", src)  # 다크 메뉴바에서도 보인다
+        self.assertIn("fill(using: .clear)", src)  # 눈은 템플릿 알파로 뚫는다
+        self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
+        self.assertIn("Privacy_ScreenCapture", src)
+
+    def test_ask_form_keeps_question_on_failure(self):
+        html = pet.PET_HTML
+        submit = html[html.index('askForm.addEventListener("submit"'):]
+        self.assertIn("askInput.disabled = true;", submit)
+        self.assertIn("if (!res || !res.ok) {", submit)  # 엔진 실패(ok: false)도 질문을 되돌린다
+        self.assertIn("if (!askInput.value) askInput.value = q;", submit)
+        keydown = html[html.index('window.addEventListener("keydown"'):]
+        self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))
+        self.assertIn("lastActKey", html)  # 폴링마다 목록 DOM을 다시 만들지 않는다
+        self.assertIn("lastTlKey", html)
+
+    def test_snapshot_rereads_disk_only_when_files_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            log.append("note", "첫 기록", log_dir=d)
+            with mock.patch.object(pet.log, "read_all", wraps=log.read_all) as read_all, \
+                 mock.patch.object(pet.harden, "audit", wraps=pet.harden.audit) as audit:
+                rt.snapshot()
+                rt.snapshot()
+                self.assertEqual((read_all.call_count, audit.call_count), (1, 1))
+                log.append("note", "두 번째", log_dir=d)
+                self.assertEqual(rt.snapshot()["counts"]["today_events"], 2)
+                self.assertEqual(read_all.call_count, 2)
+                # 파일이 그대로여도 감사는 TTL이 지나면 다시 돈다(로그 재파싱은 없음)
+                with mock.patch.object(pet.time, "monotonic", return_value=time.monotonic() + pet.AUDIT_TTL_SEC + 1):
+                    rt.snapshot()
+                self.assertEqual((read_all.call_count, audit.call_count), (2, 3))
+
+    def test_ask_rejects_while_busy(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            rt.busy = True
+            with mock.patch.object(pet.ask, "load_map", return_value={"projects": []}), \
+                 mock.patch.object(pet.ask, "plan", return_value={"engine": "codex", "prompt": "q", "cwd": d}), \
+                 mock.patch.object(pet.route, "run") as run:
+                res = rt.ask_question("두 번째 질문")
+            self.assertFalse(res["ok"])
+            self.assertTrue(res["busy"])
+            run.assert_not_called()
+            self.assertTrue(rt.busy)  # 먼저 돌던 질문의 busy를 풀지 않는다
+
+    def test_stop_existing_pets_skips_reused_pid(self):
+        with tempfile.TemporaryDirectory() as d:
+            other = subprocess.Popen(["sleep", "30"])
+            try:
+                (Path(d) / "pet.pid").write_text(json.dumps({"py_pid": other.pid, "host_pid": other.pid}))
+                with mock.patch.object(pet.sys, "platform", "linux"):  # 실제 ro-pet-host pkill은 건너뛴다
+                    pet.stop_existing_pets(home=d)
+                time.sleep(0.2)
+                self.assertIsNone(other.poll())  # ro 펫이 아닌 프로세스는 살아 있어야 한다
+            finally:
+                other.kill()
+                other.wait()
+        self.assertFalse(pet._is_pet_process(1, "py_pid"))
 
 
 if __name__ == "__main__":

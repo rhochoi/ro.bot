@@ -484,6 +484,7 @@ class LiveInputTest(MotionBase):
         pg.goto(self.url)
         pg.wait_for_selector("#petWrap")
         pg.wait_for_timeout(900)                                  # 시작 시 길이 전환이 끝나길 기다린다
+        pg.evaluate("setBubbleOpen(false)")                       # 브라우저 모드는 대화창을 열고 시작하니 닫고 시작한다
         return pg
 
     def center(self, pg):
