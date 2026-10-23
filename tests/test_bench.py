@@ -1,4 +1,6 @@
 import json
+import contextlib
+import io
 import tempfile
 import time
 import unittest
@@ -75,10 +77,11 @@ class BenchTest(unittest.TestCase):
             def shuffle(self, x):
                 x.reverse()  # none, ctx 순으로 제시
 
-        n = bench.judge(data, ask_fn=lambda _: "2", rng=Rng())
-        self.assertEqual(n, 1)
-        self.assertEqual(data["judgments"], [{"task": "t1", "winner": "ctx"}])
-        self.assertEqual(bench.judge(data, ask_fn=lambda _: "1", rng=Rng()), 0)  # 중복 판정 없음
+        with contextlib.redirect_stdout(io.StringIO()):  # 판정 화면 출력은 테스트 로그에 섞지 않는다
+            n = bench.judge(data, ask_fn=lambda _: "2", rng=Rng())
+            self.assertEqual(n, 1)
+            self.assertEqual(data["judgments"], [{"task": "t1", "winner": "ctx"}])
+            self.assertEqual(bench.judge(data, ask_fn=lambda _: "1", rng=Rng()), 0)  # 중복 판정 없음
         self.assertIn("수동 선호: ctx 1", bench.report(data))
 
     def test_example_tasks_valid(self):

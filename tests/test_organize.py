@@ -512,5 +512,18 @@ class OrganizeTest(unittest.TestCase):
         self.assertIn("이동 2건 · 치울 후보 1건", out)
 
 
+    def test_scan_reports_recent_skipped_and_apply_many_categories(self):
+        self.w("new.pdf", age=time.time())
+        self.w("메모.txt")
+        self.w("pic.png", "IMG")
+        plan = organize.scan(self.root, self.dest, today=TODAY, extractor=lambda ps: {})
+        organize.save_plan(plan, self.ro)
+        self.assertEqual(plan["recent_skipped"], 1)
+        self.assertIn("1개는", organize.show(plan))
+        cats = {Path(i["path"]).name: i["category"] for i in plan["items"]}
+        _, done, _ = organize.apply(category=[cats["메모.txt"], cats["pic.png"]], home=self.ro, log_dir=self.log)
+        self.assertEqual(sorted(Path(i["path"]).name for i in done), ["pic.png", "메모.txt"])
+
+
 if __name__ == "__main__":
     unittest.main()

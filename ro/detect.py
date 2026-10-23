@@ -17,7 +17,8 @@ from collections import defaultdict
 from pathlib import Path
 
 MAX_ZIP_ENTRIES = 5000  # 이보다 큰 압축은 대조 비용이 커서 판단하지 않는다
-VERSION_RE = re.compile(r"^(?P<base>.*?)[ _-]v(?P<n>\d+)$", re.I)  # 기획안_v13
+VERSION_RE = re.compile(r"^(?P<base>.*?)[ _-]v(?P<n>\d+(?:\.\d+)*)$", re.I)  # 기획안_v13, app_v1.2
+FINAL_RE = re.compile(r"^(?P<base>.+?)(?P<f>(?:[ _-](?:final|최종))+)$", re.I)  # 보고서_최종, report_final_final
 COPY_RES = (re.compile(r"^(?P<base>.*?)\s*\((?P<n>\d+)\)$"),  # 문서 (1)
             re.compile(r"^(?P<base>.*?)[_-](?P<n>\d{1,2})$"))  # 문서_1
 
@@ -119,11 +120,15 @@ def extracted_copy(zpath, root):
 
 
 def version_key(stem):
-    """(비교용 이름, 번호, 명시적 vN 여부). 표시가 없으면 번호 None."""
+    """(비교용 이름, 번호, 명시적 표시 여부). 명시적 표시(vN·v1.2·final 반복)는 번호가 튜플이라 1.10 > 1.9로 비교된다.
+    표시가 없으면 번호 None."""
     stem = unicodedata.normalize("NFC", stem)
     m = VERSION_RE.match(stem)
     if m:
-        return m["base"].strip().lower(), int(m["n"]), True
+        return m["base"].strip().lower(), tuple(int(x) for x in m["n"].split(".")), True
+    m = FINAL_RE.match(stem)
+    if m and m["base"].strip():
+        return m["base"].strip().lower(), (len(re.findall(r"final|최종", m["f"], re.I)),), True
     for r in COPY_RES:
         m = r.match(stem)
         if m and m["base"].strip():

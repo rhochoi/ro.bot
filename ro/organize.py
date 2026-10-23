@@ -290,7 +290,7 @@ def _dir(home):
     return Path(home).expanduser() / "organize"  # 예전 계획 위치(읽기만)
 
 
-def _candidates(root, dest_root, now):
+def _candidates(root, dest_root, now, recent=None):
     # 원본을 사본보다 먼저 처리해야 원본이 깔끔한 이름을 받고 사본이 _2를 받는다
     for p in sorted(root.iterdir(), key=lambda x: (bool(COPY_MARK.search(_nfc(x.stem))), x.name)):
         name = p.name
@@ -301,6 +301,8 @@ def _candidates(root, dest_root, now):
             continue
         st = p.stat()
         if now - st.st_mtime < RECENT_SECONDS:
+            if recent is not None:
+                recent.append(name)
             continue  # 다운로드·편집 중일 수 있다
         yield p, st
 
@@ -313,7 +315,8 @@ def scan(root=ROOT, dest_root=DEST_ROOT, extractor=extract, now=None, today=None
     if root == dest_root or dest_root in root.parents:
         raise ValueError(f"정리 결과 폴더 안은 스캔할 수 없습니다: {root}")
     now = now or time.time()
-    files = list(_candidates(root, dest_root, now))
+    recent = []
+    files = list(_candidates(root, dest_root, now, recent))
     texts = extractor([p for p, _ in files])
     items, taken = [], set()
     for p, st in files:
@@ -332,7 +335,7 @@ def scan(root=ROOT, dest_root=DEST_ROOT, extractor=extract, now=None, today=None
             "action": "move", "kind": "classified", "keep": None, "tags": []})
     _judge(root, files, items, now, stale, stale_days)
     return {"root": str(root), "dest_root": str(dest_root), "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "items": items}
+            "items": items, "recent_skipped": len(recent)}
 
 
 def movable(it):
@@ -517,11 +520,11 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
     dest_root = Path(plan["dest_root"])
     by_id = {i["id"]: i for i in plan["items"]}
     ids = list(ids)
-    if category:
-        ids += [i["id"] for i in plan["items"] if i["category"] == category and movable(i)]
-    if kind:
-        ids += [i["id"] for i in plan["items"] if i.get("action") == "quarantine" and i["kind"] == kind
-                and not i["review"]]
+    cats = [category] if isinstance(category, str) else list(category or ())  # --category를 여러 번 줄 수 있다
+    kinds = [kind] if isinstance(kind, str) else list(kind or ())
+    ids += [i["id"] for i in plan["items"] if i["category"] in cats and movable(i)]
+    ids += [i["id"] for i in plan["items"] if i.get("action") == "quarantine" and i["kind"] in kinds
+            and not i["review"]]
     if not ids:
         raise ValueError("적용할 id나 --category·--kind를 지정하세요")
     # 남길 쪽(중복 원본·최신 버전·풀린 파일)이 같은 배치의 이동으로 먼저 사라지지 않게 격리를 앞에 둔다
@@ -762,6 +765,9 @@ def show(plan, category=None, review=False, action=None, kind=None):
     lines.append(f"\n이동 {n_move}건 · 치울 후보 {len(q)}건({_mb(sum(i['size'] for i in q))}) · "
                  f"보관 {sum(i.get('action') == 'keep' for i in all_items)}건 · 검토 필요 {n_review}건 · "
                  f"정리 위치 {plan['dest_root']}")
+    if plan.get("recent_skipped"):
+        lines.append(f"방금({RECENT_SECONDS // 60}분 안에) 받거나 고친 파일 {plan['recent_skipped']}개는 "
+                     "다운로드·편집 중일 수 있어 건너뛰었습니다. 잠시 뒤 다시 scan 하세요.")
     return "\n".join(lines)
 
 
@@ -816,9 +822,9 @@ def main(argv=None):
     e.add_argument("--action", choices=ACTIONS, help="행동을 직접 정한다(재무·계약 중복은 quarantine으로 확정)")
     a = sub.add_parser("apply", help="지정한 항목만 이동(삭제 없음)")
     a.add_argument("ids", nargs="*")
-    a.add_argument("--category", choices=CATEGORIES, help="이 카테고리의 확정 항목 전부")
-    a.add_argument("--kind", choices=("duplicate", "extracted", "version", "stale"),
-                   help="이 종류의 치울 후보 전부(검토 필요 제외)")
+    a.add_argument("--category", choices=CATEGORIES, action="append", help="이 카테고리의 확정 항목 전부(여러 번 가능)")
+    a.add_argument("--kind", choices=("duplicate", "extracted", "version", "stale"), action="append",
+                   help="이 종류의 치울 후보 전부(검토 필요 제외, 여러 번 가능)")
     u = sub.add_parser("undo", help="원래 이름·위치로 되돌리기")
     u.add_argument("batch", nargs="?")
     sub.add_parser("status", help="이동·복원 이력")

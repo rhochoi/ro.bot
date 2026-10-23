@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, fsutil, harden, learn, log, mapper, organize, route
+from . import ask, config, fsutil, harden, learn, log, organize, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -540,23 +540,23 @@ class PetRuntime:
         if not question:
             return {"ok": False, "output": "질문을 입력해 주세요."}
         mapdata = ask.load_map(self.map_path)
-        if mapdata is None:
-            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
-            mapper.save_map(mapdata, self.map_path)
+        if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
+            return {"ok": False, "reason": "needs_setup",
+                    "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
         rules = learn.load_rules(self.home)
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
-                      engine=engine, rules=rules, project=project)
+                      engine=engine or config.load(self.home).get("engine") or None, rules=rules, project=project)
         with self._lock:
             if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
                 return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
             self.busy = True
             self.busy_task = log.redact(question[:60])
         try:
-            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"])
+            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"], model=pl.get("model", ""))
             log.append("route", question[:80], {
                 "engine": pl["engine"], "category": pl["category"], "mode": "read",
                 "ok": res["ok"], "code": res["code"], "duration": res["duration"],
-                "projects": pl["projects"], "context_chars": len(pl["context"]), "via": "pet",
+                "projects": pl["projects"], "model": pl.get("model", ""), "context_chars": len(pl["context"]), "via": "pet",
             }, engine=pl["engine"], log_dir=self.log_dir)
             ans = {
                 "question": log.redact(question),

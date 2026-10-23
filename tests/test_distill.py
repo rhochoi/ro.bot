@@ -82,20 +82,22 @@ class DistillTest(unittest.TestCase):
                    '"evidence": "x"}, {"text": "git을 자주 쓴다", "evidence": "4일"}]')
             return {"ok": True, "code": 0, "duration": 1, "output": out}
 
-        new, note, _ = distill.run(7, "codex", home=self.home, runner=runner)
+        new, note, _ = distill.run(7, "codex", home=self.home, runner=runner, log_dir=self.logdir)
         self.assertEqual(len(calls), 1)
         self.assertFalse(calls[0][2])  # 읽기 모드
         self.assertNotIn("커밋 제목", calls[0][1])  # 원문 미전송
         ext = [c for c in new if c["source"].startswith("ro distill(codex)")]
         self.assertEqual(len(ext), 2)
         self.assertTrue(all(c["trust"] == "낮음" and "\n" not in c["text"] and "sk-abc" not in c["text"] for c in ext))
-        again, note2, _ = distill.run(7, "codex", home=self.home, runner=runner)
+        again, note2, _ = distill.run(7, "codex", home=self.home, runner=runner, log_dir=self.logdir)
         self.assertEqual(len(calls), 1)  # 주 1회 한도
         self.assertIn("이미", note2)
+        logged = [json.loads(x)["kind"] for f in Path(self.logdir).glob("*.jsonl") for x in f.read_text().splitlines()]
+        self.assertIn("distill", logged)  # 주어진 log_dir에 남고 사용자 ~/.ro/log로 새지 않는다
 
     def test_external_failure_and_garbage(self):
         bad = lambda *a, **k: {"ok": True, "code": 0, "duration": 1, "output": "not json"}  # noqa: E731
-        new, _, _ = distill.run(7, "claude", home=self.home, runner=bad)
+        new, _, _ = distill.run(7, "claude", home=self.home, runner=bad, log_dir=self.logdir)
         self.assertFalse([c for c in new if "claude" in c["source"]])
 
     def test_empty_stats_skip_external(self):
