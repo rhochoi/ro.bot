@@ -489,6 +489,8 @@ PET_HTML = r"""<!DOCTYPE html>
     --chalk-soft: #EFE9DC;
     --chalk-muted: #7E786D;
     --accent: #FF4B1F;
+    --accent-strong: #D93A12;
+    --accent-text: #C73310;
     --accent-hover: #E03E15;
     --accent-soft: rgba(255, 75, 31, 0.12);
     --bot-fill: var(--ink);
@@ -498,7 +500,7 @@ PET_HTML = r"""<!DOCTYPE html>
     --panel-soft: #F4F0E8;
     --panel-border: rgba(26, 25, 23, 0.12);
     --divider: #EAE7E0;
-    --muted: #7E786D;
+    --muted: #6E695F;
     --bubble-fill: var(--ink);
     --bubble-fg: var(--chalk);
   }
@@ -513,6 +515,7 @@ PET_HTML = r"""<!DOCTYPE html>
     --divider: #33312E;
     --muted: #9E988C;
     --chalk-muted: #9E988C;
+    --accent-text: #FF6A42;
     --bubble-fill: #F3EFE6;
     --bubble-fg: #1A1917;
   }
@@ -643,7 +646,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .mood-tag:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .nav-tabs {
     display: flex;
@@ -811,7 +814,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .gate-head {
     font-size: 10px;
     font-weight: 800;
-    color: var(--accent);
+    color: var(--accent-text);
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
@@ -1100,7 +1103,7 @@ PET_HTML = r"""<!DOCTYPE html>
     padding-bottom: 2px;
   }
   .orange-tag {
-    background: var(--accent);
+    background: var(--accent-strong);
     color: #FFFFFF;
     font-size: 9.5px;
     font-weight: 800;
@@ -1134,7 +1137,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .step-badge {
     font-size: 11px;
     font-weight: 800;
-    color: var(--accent);
+    color: var(--accent-text);
     min-width: 17px;
     line-height: 1.3;
   }
@@ -1204,12 +1207,12 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .mood-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mood-btn.active {
-    background: var(--accent);
+    background: var(--accent-strong);
     color: #FFFFFF;
-    border-color: var(--accent);
+    border-color: var(--accent-strong);
     font-weight: 800;
   }
   .options-row {
@@ -1316,9 +1319,9 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-bg);
   }
   .act-btn.active {
-    background: var(--accent) !important;
+    background: var(--accent-strong) !important;
     color: #FFFFFF !important;
-    border-color: var(--accent) !important;
+    border-color: var(--accent-strong) !important;
     font-weight: 800;
   }
 
@@ -1733,10 +1736,25 @@ PET_HTML = r"""<!DOCTYPE html>
     color: #16161a;
     box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.16);
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
 </style>
 </head>
 <body class="material-clay">
-<div id="stage" class="stage">
+<main id="stage" class="stage">
+  <h1 class="sr-only">ro.bot 펫</h1>
   <!-- 말풍선 패널 (Ro의 말풍선) -->
   <div id="bubble" class="bubble hidden">
     <div class="bubble-tail" aria-hidden="true"></div>
@@ -1892,7 +1910,7 @@ PET_HTML = r"""<!DOCTYPE html>
               <span class="toggle-sub">화면 하단을 스스로 천천히 배회합니다</span>
             </div>
             <label class="switch">
-              <input id="wanderToggle" type="checkbox">
+              <input id="wanderToggle" type="checkbox" aria-label="돌아다니기">
               <span class="slider"></span>
             </label>
           </div>
@@ -1954,7 +1972,7 @@ PET_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="petCaption" class="pet-label">기본</div>
   </div>
-</div>
+</main>
 
 <script>
 const TOKEN = "__RO_TOKEN__";
