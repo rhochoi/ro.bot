@@ -1899,6 +1899,31 @@ PET_HTML = r"""<!DOCTYPE html>
   /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
   .tab-pane.active { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
   .tab-pane.active > * { flex-shrink: 0; }
+  .streak { position: absolute; height: 2.5px; width: 12px; border-radius: 2px; background: var(--muted); opacity: 0; pointer-events: none; }
+  .pet-wrap[data-motion] .pet-label { opacity: 0; }
+  .pet-label { transition: opacity 0.18s ease; }
+  /* 모션 엔진 눈 모양: > <  ∩ ∩  - -  ◍ ◍  C ɔ */
+  .pet-wrap[data-motion] .pill { animation: none !important; }
+  .pet-wrap[data-eyes] .eye { transition: none !important; box-sizing: border-box; }
+  .pet-wrap[data-eyes="squint"] .eye, .pet-wrap[data-eyes="happy"] .eye, .pet-wrap[data-eyes="swirl"] .eye {
+    background: transparent !important; border: 0 solid var(--bot-eye); border-radius: 0;
+  }
+  .pet-wrap[data-eyes="squint"] .eye { width: calc(2.7 * var(--u)) !important; height: calc(2.7 * var(--u)) !important; }
+  .pet-wrap[data-eyes="squint"] .eye-l { border-top-width: 3px; border-right-width: 3px; transform: rotate(45deg) scale(0.8) !important; border-top-right-radius: 1px; }
+  .pet-wrap[data-eyes="squint"] .eye-r { border-top-width: 3px; border-left-width: 3px; transform: rotate(-45deg) scale(0.8) !important; border-top-left-radius: 1px; }
+  .pet-wrap[data-eyes="happy"] .eye {
+    width: calc(3 * var(--u)) !important; height: calc(2 * var(--u)) !important;
+    border-width: 2.5px 2.5px 0 2.5px; border-radius: 999px 999px 0 0; transform: none !important;
+  }
+  .pet-wrap[data-eyes="dash"] .eye { width: calc(2.4 * var(--u)) !important; height: 2.5px !important; border-radius: 2px; transform: none !important; }
+  .pet-wrap[data-eyes="big"] .eye { transform: scale(1.22) !important; }
+  .pet-wrap[data-eyes="swirl"] .eye {
+    width: calc(3 * var(--u)) !important; height: calc(3 * var(--u)) !important; border-width: 2.5px; border-radius: 50%;
+    animation: eyeSpin 0.6s linear infinite;
+  }
+  .pet-wrap[data-eyes="swirl"] .eye-l { border-right-color: transparent; }
+  .pet-wrap[data-eyes="swirl"] .eye-r { border-left-color: transparent; }
+  @keyframes eyeSpin { to { rotate: 360deg; } }
   .sr-only {
     position: absolute;
     width: 1px;
@@ -2102,6 +2127,7 @@ PET_HTML = r"""<!DOCTYPE html>
             <button class="act-btn" data-act="alert">깜짝</button>
             <button class="act-btn" data-act="drowsy">졸음</button>
             <button class="act-btn" data-act="gaze">시선</button>
+            <button class="act-btn" data-act="press">누름</button>
             <button class="act-btn" data-act="pet">쓰다듬기</button>
             <button class="act-btn" data-act="drag">잡기</button>
             <button class="act-btn" data-act="shake">흔들기</button>
@@ -2150,6 +2176,7 @@ PET_HTML = r"""<!DOCTYPE html>
   <!-- RO 캐릭터: 층 셋, 눈 둘 (왼쪽 정렬) -->
   <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 표정 전환 · 드래그: 이동">
     <div id="roBot" class="ro-bot">
+      <span id="streak" class="streak" aria-hidden="true"></span>
       <div id="layerHead" class="pill pill-head">
         <span id="attnDot" class="attn-dot" aria-hidden="true" hidden></span>
         <span id="muteBadge" class="mute-badge" hidden><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1H3z"/><line x1="2" y1="2" x2="14" y2="14"/></svg><span>0</span></span>
@@ -2181,6 +2208,7 @@ const MOOD_META = {
 const MOOD_ORDER = ["idle", "recording", "focus", "anxious", "discovery", "resolved"];
 
 const ACTION_META = {
+  press:       { label: "누름",        desc: "80ms 납작 → 스프링 · 반가운 눈 (클릭·탭)" },
   breathe:     { label: "숨쉬기",      desc: "3개 층 시차 숨쉬기 (3초 루프)" },
   look_around: { label: "두리번",      desc: "눈이 먼저 가는 두리번" },
   walk:        { label: "걷기",        desc: "바닥-몸-머리 순차 이동" },
@@ -2478,6 +2506,8 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") setBubbleOpen(false);
 });
 
+const MOTION_DEMOS = ["press", "drag", "shake", "drop"];
+
 /* 모션 상호작용 컨트롤러 */
 window.triggerAction = function(name, durationMs) {
   if (actionTimer) {
@@ -2504,6 +2534,12 @@ window.triggerAction = function(name, durationMs) {
     return { ok: true, cleared: true };
   }
 
+  if (MOTION_DEMOS.includes(name)) {                  // 누름·잡기·흔들기·놓기는 모션 엔진이 재생한다
+    const meta = ACTION_META[name];
+    if (meta) { petCaption.textContent = meta.label; subStatusText.textContent = meta.desc; }
+    if (!RoMotion.busy()) RoMotion.demo(name);
+    return { ok: true, action: name, duration: 0 };
+  }
   const cls = `action-${name.replace(/_/g, "-")}`;
   petWrap.classList.add(cls);
 
@@ -2523,21 +2559,15 @@ window.triggerAction = function(name, durationMs) {
 };
 
 /* 호스트 드래그 브리지 */
-window.onHostDragStart = function(fromPet) {
-  if (fromPet) window.triggerAction("drag", 0);
-};
-window.onHostDragShake = function() {
-  window.triggerAction("shake", 1200);
-};
-window.onHostDragEnd = function(moved) {
-  if (moved) window.triggerAction("drop", 650);
-  else window.triggerAction(null);
-};
+window.onHostDragStart = function(fromPet) {};   /* 누름은 JS mousedown이 시작한다 */
+window.onHostDragMove = function(x, y) { RoMotion.move(x, y, performance.now(), true); };
+window.onHostDragShake = function() {};          /* 흔들기 감지는 모션 엔진이 속도에서 직접 한다 */
+window.onHostDragEnd = function(moved, fallPx) { RoMotion.up(performance.now(), !!moved, fallPx || 0); };
 
 /* 마우스 쓰다듬기 */
 let isPetHover = false;
 petWrap.addEventListener("mouseenter", () => {
-  if (currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
+  if (RoMotion.busy() || currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
   if (isDrowsy) { wakeUpFromSleep(); return; }
   isPetHover = true;
   window.triggerAction("pet", 0);
@@ -2558,7 +2588,7 @@ window.addEventListener("mousemove", (e) => {
     layerHead.style.transform = "";
     return;
   }
-  if (isPetHover || currentAction) return;
+  if (isPetHover || currentAction || RoMotion.busy()) return;
   const rect = layerHead.getBoundingClientRect();
   const cx = rect.left + rect.width * 0.68;
   const cy = rect.top + rect.height * 0.5;
@@ -2604,7 +2634,7 @@ setInterval(() => {
 }, 4000);
 
 setInterval(() => {
-  if (isDrowsy || isPetHover || currentAction || currentMood !== "idle") return;
+  if (isDrowsy || isPetHover || currentAction || RoMotion.busy() || currentMood !== "idle") return;
   if (Math.random() < 0.40) {
     window.triggerAction("look_around", 3200);
   }
@@ -2622,6 +2652,10 @@ let webLastReversal = 0;
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
   if (e.target.closest("button") || e.target.closest("input")) return;
+  if (fromPet) {
+    if (currentAction === "pet") window.triggerAction(null);   // 쓰다듬기 호버와 겹치지 않게
+    RoMotion.down(performance.now());
+  }
   if (isNativeHost) {
     notifyHost({ type: "dragStart", fromPet: !!fromPet });
     return;
@@ -2630,7 +2664,6 @@ function beginDrag(e, fromPet) {
   webLastX = e.screenX;
   webDidDrag = false;
   webShakeCount = 0;
-  if (fromPet) window.triggerAction("drag", 0);
 }
 
 petWrap.addEventListener("mousedown", (e) => beginDrag(e, true));
@@ -2638,27 +2671,9 @@ bubbleTop.addEventListener("mousedown", (e) => beginDrag(e, false));
 
 window.addEventListener("mousemove", (e) => {
   if (isNativeHost || !webDragStart) return;
+  RoMotion.move(e.screenX, e.screenY, performance.now());
   const dx = e.screenX - webDragStart.x;
   const dy = e.screenY - webDragStart.y;
-  const stepDx = e.screenX - webLastX;
-  const now = Date.now();
-  if (Math.abs(stepDx) > 8) {
-    const sign = stepDx > 0 ? 1 : -1;
-    if (sign !== webLastDxSign && webLastDxSign !== 0) {
-      if (now - webLastReversal < 320) {
-        webShakeCount++;
-        if (webShakeCount >= 3) {
-          window.triggerAction("shake", 1200);
-          webShakeCount = 0;
-        }
-      } else {
-        webShakeCount = 1;
-      }
-      webLastReversal = now;
-    }
-    webLastDxSign = sign;
-  }
-  webLastX = e.screenX;
   if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
@@ -2667,20 +2682,18 @@ window.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", () => {
-  if (!isNativeHost && webDragStart) {
-    if (webDidDrag) window.triggerAction("drop", 650);
-    else if (currentAction === "drag") window.triggerAction(null);
-  }
+  if (!isNativeHost && webDragStart) RoMotion.up(performance.now(), webDidDrag, 0);
   webDragStart = null;
 });
 
 petWrap.addEventListener("click", () => {
-  if (isNativeHost || webDidDrag) return;
+  if (isNativeHost || webDidDrag || !RoMotion.consumeClick()) return;
   if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 });
 
 window.onPetClickFromHost = function() {
+  if (!RoMotion.consumeClick()) return;
   if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 };
@@ -2908,6 +2921,419 @@ document.getElementById("fbNo").addEventListener("click", async () => {
   await apiPost("/api/feedback", { accepted: false });
   await refreshState();
 });
+
+/* ===== 모션 엔진: 07 누름 · 08 잡기·끌기 · 09 흔들기 · 10 놓기 =====
+   시간(ms)을 인자로 받는 결정적 상태기계다. 실제 구동은 rAF가, 테스트는 advance(t)가 맡는다. */
+const RoMotion = (() => {
+  const SPEC = {
+    press: { ms: 80, sx: 1.08, sy: 0.86, rel: [600, 15], delay: [60, 30, 0], happyAfter: 240, happyMs: 600, doneMs: 1000 },
+    grab: { holdMs: 300, moveStart: 8, hang: [5, 17], hangSpring: [400, 24], follow: [1.0, 0.35, 0.2], damping: 0.65, tilt: 0.25, tiltMax: 8,
+            maxLag: 60, wobbleDeg: 1.4, wobbleHz: 1.5 },
+    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 10, dizzyAfter: 1500, dizzyMs: 1200,
+             spinMs: 600, endGap: 450, calmMs: 900, stopSpeed: 150, stopMs: 100, calmDamping: 12 },
+    drop: { g: 2400, maxFallMs: 280, stretch: [0.94, 1.08], landMs: 90, land: [1.12, 0.82], bounce: 0.2,
+            bounceSpring: [500, 18], stack: [0, 60, 120], restMs: 360, fadeMs: 150 },
+    gap: 1,
+  };
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const powerOut = (t, p = 2) => 1 - Math.pow(1 - clamp(t, 0, 1), p);
+
+  /* 질량 1, spring(stiffness, damping)의 단위 스텝 응답(0→1, 오버슈트 포함) */
+  function springStep(k, c, sec) {
+    if (sec <= 0) return 0;
+    const w0 = Math.sqrt(k), z = c / (2 * w0);
+    if (z < 1) {
+      const wd = w0 * Math.sqrt(1 - z * z);
+      return 1 - Math.exp(-z * w0 * sec) * (Math.cos(wd * sec) + (z * w0 / wd) * Math.sin(wd * sec));
+    }
+    if (z === 1) return 1 - Math.exp(-w0 * sec) * (1 + w0 * sec);
+    const s = Math.sqrt(z * z - 1), r1 = -w0 * (z - s), r2 = -w0 * (z + s);
+    return 1 - (r2 * Math.exp(r1 * sec) - r1 * Math.exp(r2 * sec)) / (r2 - r1);
+  }
+  /* 임펄스 응답의 첫 마루를 1로 정규화한 한 번의 튕김(0→1→0) */
+  const [BK, BC] = SPEC.drop.bounceSpring;
+  const BW0 = Math.sqrt(BK), BZ = BC / (2 * BW0), BWD = BW0 * Math.sqrt(1 - BZ * BZ);
+  const BHALF = Math.PI / BWD;
+  let BPEAK = 0;
+  for (let i = 0; i <= 200; i++) { const s = i / 200 * BHALF; BPEAK = Math.max(BPEAK, Math.exp(-BZ * BW0 * s) * Math.sin(BWD * s)); }
+  const bounce1 = (sec) => (sec <= 0 || sec >= BHALF) ? 0 : Math.exp(-BZ * BW0 * sec) * Math.sin(BWD * sec) / BPEAK;
+
+  let S;
+  let dims = null;
+  let manual = false;
+  let raf = null;
+  const now = () => performance.now();
+  const reducedNow = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+  const mkPos = (x, y) => ({ x, y, vx: 0, vy: 0 });
+  function reset() {
+    S = { phase: "idle", downAt: null, upAt: null, grabAt: null, grabbed: false, tap: false,
+          anchor: null, head: { x: 0, y: 0 }, pos: [mkPos(0, 0), mkPos(0, 0), mkPos(0, 0)],
+          vx: 0, vy: 0, lastMoveT: null, peak: 0, sign: 0, revs: [], tau: 80,
+          shakeActive: false, shakeStart: null, shakeLast: -1e9, shakeEnd: null, dizzyUntil: 0, sg: 0, slowSince: null,
+          hist: [], osc: [{ th: 0, w: 0 }, { th: 0, w: 0 }, { th: 0, w: 0 }], simT: 0,
+          dropAt: null, fall: 0, tFall: 0.1, L0: null, reduced: false };
+  }
+  reset();
+
+  function measure() {
+    const bot = document.getElementById("roBot");
+    const els = [layerHead, layerBody, layerBase];
+    if (!bot || !els[0]) { dims = null; return; }
+    dims = els.map(e => {
+      const cs = getComputedStyle(e);
+      return { x: e.offsetLeft, y: e.offsetTop, w: parseFloat(cs.width) || e.offsetWidth, h: parseFloat(cs.height) || e.offsetHeight };
+    });
+  }
+
+  function down(t) {
+    reset();
+    S.reduced = reducedNow();
+    measure();
+    S.phase = "press";
+    S.downAt = t;
+    S.simT = t;
+    ensureLoop();
+  }
+
+  function enterGrab(t) {
+    S.phase = "grab";
+    S.grabAt = t;
+    S.grabbed = true;
+    S.upAt = t;                       // 눌림은 스프링으로 풀린다
+    S.pos = S.pos.map(() => mkPos(S.head.x, S.head.y));
+  }
+
+  function pushReversal(t) {
+    S.revs.push(t);
+    S.revs = S.revs.filter(r => t - r <= SPEC.shake.windowMs);
+    if (S.revs.length >= 2) {
+      const iv = S.revs[S.revs.length - 1] - S.revs[S.revs.length - 2];
+      S.tau = clamp(iv * 0.667, 40, 160);   // 층별 위상 120° 차이
+    }
+    if (S.revs.length >= SPEC.shake.reversals) {
+      if (!S.shakeActive) { S.shakeActive = true; S.shakeStart = S.shakeStart ?? t; }
+      S.shakeLast = t;
+    }
+  }
+
+  function move(x, y, t, force = false) {
+    if (S.phase === "idle" || S.phase === "drop") return;
+    advance(t);
+    if (S.phase === "press") {
+      if (S.upAt != null) return;
+      if (!S.anchor) S.anchor = { x, y };
+      S.head = { x, y };
+      if (force || Math.hypot(x - S.anchor.x, y - S.anchor.y) > SPEC.grab.moveStart) { enterGrab(t); S.head = { x, y }; S.pos = S.pos.map(() => mkPos(x, y)); S.lastMoveT = t; }
+      return;
+    }
+    const dtm = Math.max(1, t - (S.lastMoveT ?? t - 16));
+    const rawX = (x - S.head.x) / dtm * 1000, rawY = (y - S.head.y) / dtm * 1000;
+    S.vx = 0.5 * S.vx + 0.5 * rawX;
+    S.vy = 0.5 * S.vy + 0.5 * rawY;
+    S.head = { x, y };
+    S.lastMoveT = t;
+    S.hist.push({ t, v: S.vx });
+    while (S.hist.length && t - S.hist[0].t > 1500) S.hist.shift();
+    const sign = S.vx > 60 ? 1 : S.vx < -60 ? -1 : 0;
+    if (sign !== 0) {
+      if (S.sign !== 0 && sign !== S.sign) {
+        if (S.peak >= SPEC.shake.speed) pushReversal(t);
+        S.peak = 0;
+      }
+      S.sign = sign;
+      S.peak = Math.max(S.peak, Math.abs(S.vx));
+    }
+  }
+
+  function up(t, moved = false, fall = 0) {
+    if (S.phase === "idle") return;
+    advance(t);
+    if (S.phase === "press") {
+      if (S.upAt == null) { S.upAt = t; S.tap = true; }
+      return;
+    }
+    if (S.phase === "grab") startDrop(t, fall);
+  }
+
+  function startDrop(t, fall) {
+    S.L0 = grabLayers(t);                              // 놓는 순간의 매달린 자세를 기억한다
+    if (S.shakeActive) { S.shakeActive = false; S.shakeEnd = S.shakeLast; }
+    if (S.shakeEnd != null && S.shakeLast - S.shakeStart >= SPEC.shake.dizzyAfter) S.dizzyUntil = Math.max(S.dizzyUntil, t + SPEC.shake.dizzyMs);
+    S.phase = "drop";
+    S.dropAt = t;
+    S.fall = Math.max(0, fall);
+    const sec = S.fall > 0.5 ? Math.sqrt(2 * S.fall / SPEC.drop.g) : 0.1;
+    S.tFall = clamp(sec, 0.04, SPEC.drop.maxFallMs / 1000);
+  }
+
+  function stepSim(cur, dt) {
+    // 체인: 프레임당 추종률 k의 정상 지연(τ)을 유지하면서, 멈출 때 관성으로 살짝 넘어가도록 감쇠 스프링으로 푼다
+    const f = SPEC.grab.follow, Z = SPEC.grab.damping, sec = dt / 1000;
+    for (let i = 1; i < 3; i++) {
+      const w = 2 * Z / (0.016667 / -Math.log(1 - f[i]));
+      const p = S.pos[i];
+      p.vx += (w * w * (S.head.x - p.x) - 2 * Z * w * p.vx) * sec;
+      p.vy += (w * w * (S.head.y - p.y) - 2 * Z * w * p.vy) * sec;
+      p.x += p.vx * sec;
+      p.y += p.vy * sec;
+    }
+    S.pos[0] = mkPos(S.head.x, S.head.y);
+    const gate = S.shakeActive || (S.shakeEnd != null && cur - S.shakeEnd < SPEC.shake.calmMs) ? 1 : 0;
+    const [k, c0] = SPEC.shake.spring;
+    const c = S.shakeActive ? c0 : SPEC.shake.calmDamping;      // 멈춘 뒤엔 900ms 안에 가라앉도록 조금 더 감쇠
+    S.sg += ((S.shakeActive ? 1 : 0) - S.sg) * (1 - Math.exp(-dt / (S.shakeActive ? 40 : 150)));
+    for (let i = 0; i < 3; i++) {
+      const u = gate ? clamp(velAt(cur - i * S.tau) / SPEC.shake.speed, -1, 1) * SPEC.shake.maxRot : 0;
+      const o = S.osc[i];
+      o.w += (k * (u - o.th) - c * o.w) * dt / 1000;
+      o.th += o.w * dt / 1000;
+    }
+  }
+
+  function velAt(t) {
+    const h = S.hist;
+    if (!h.length) return 0;
+    if (t >= h[h.length - 1].t) return t - h[h.length - 1].t > 120 ? 0 : h[h.length - 1].v;
+    for (let i = h.length - 1; i >= 0; i--) if (h[i].t <= t) return h[i].v;
+    return 0;
+  }
+
+  function advance(t) {
+    if (S.phase === "idle") return;
+    if (S.phase === "press" && S.upAt == null && t - S.downAt >= SPEC.grab.holdMs) enterGrab(t);
+    if (S.shakeActive) {
+      if (Math.abs(velAt(t)) < SPEC.shake.stopSpeed) { if (S.slowSince == null) S.slowSince = t; } else S.slowSince = null;
+    }
+    const stopped = S.shakeActive && S.slowSince != null && t - S.slowSince >= SPEC.shake.stopMs;
+    if (S.shakeActive && (stopped || t - S.shakeLast > SPEC.shake.endGap)) {
+      S.shakeActive = false;
+      S.shakeEnd = S.shakeLast;
+      if (S.shakeLast - S.shakeStart >= SPEC.shake.dizzyAfter) S.dizzyUntil = S.shakeEnd + SPEC.shake.dizzyMs;
+      S.shakeStart = null; S.revs = [];
+    }
+    let cur = S.simT;
+    while (cur < t) { const dt = Math.min(4, t - cur); cur += dt; stepSim(cur, dt); }
+    S.simT = Math.max(S.simT, t);
+    const P = SPEC.press, D = SPEC.drop;
+    if (S.phase === "press" && S.upAt != null && !S.grabbed && t > S.upAt + P.doneMs) S.phase = "idle";
+    if (S.phase === "drop") {
+      const end = S.reduced ? D.fadeMs : S.tFall * 1000 + D.landMs + D.restMs;
+      if (t > S.dropAt + end && t > S.dizzyUntil) S.phase = "idle";
+    }
+  }
+
+  /* 누름 스케일: 80ms power2.out → 뗄 때 spring(600,15) (층마다 지연) */
+  function pressScale(t, delay) {
+    if (S.downAt == null) return [1, 1];
+    const tt = t - delay;
+    if (tt < S.downAt) return [1, 1];
+    const P = SPEC.press;
+    const held = (S.upAt == null || tt < S.upAt) ? tt - S.downAt : S.upAt - S.downAt;
+    const p = powerOut(held / P.ms);
+    const sx = 1 + (P.sx - 1) * p, sy = 1 + (P.sy - 1) * p;
+    if (S.upAt == null || tt < S.upAt) return [sx, sy];
+    const r = springStep(P.rel[0], P.rel[1], (tt - S.upAt) / 1000);
+    return [lerp(sx, 1, r), lerp(sy, 1, r)];
+  }
+
+  function grabLayers(t) {
+    const G = SPEC.grab;
+    const L = [0, 1, 2].map(() => ({ tx: 0, ty: 0, rot: 0 }));
+    if (S.reduced) return L;
+    const h = springStep(G.hangSpring[0], G.hangSpring[1], (t - S.grabAt) / 1000);
+    L[1].ty = G.hang[0] * h;
+    L[2].ty = G.hang[1] * h;
+    for (let i = 1; i < 3; i++) {
+      L[i].tx = clamp(S.pos[i].x - S.head.x, -G.maxLag, G.maxLag);
+      L[i].ty += clamp(S.pos[i].y - S.head.y, -G.maxLag, G.maxLag);
+    }
+    const calm = 1 - S.sg;                                        // 흔드는 동안엔 끌기 기울기·매달림 흔들림을 끈다
+    const tilt = clamp(L[2].tx * G.tilt, -G.tiltMax, G.tiltMax) * calm;
+    L[2].rot = tilt;
+    L[1].rot = tilt * 0.5;
+    const wob = G.wobbleDeg * calm * clamp((t - S.grabAt) / 300, 0, 1) * Math.exp(-Math.hypot(S.vx, S.vy) / 600);
+    for (let i = 0; i < 3; i++) {
+      L[i].rot += wob * Math.sin(2 * Math.PI * G.wobbleHz * (t - S.grabAt) / 1000 + i * 1.3);
+      L[i].rot += S.osc[i].th;
+      L[i].rot = clamp(L[i].rot, -SPEC.shake.maxRot, SPEC.shake.maxRot);   // 층 회전 최대 10°
+    }
+    return L;
+  }
+
+  function separate(L) {
+    if (!dims) return;
+    const oy = dims[2].y + dims[2].h;
+    const ext = (i) => {                                          // 회전·스케일된 층의 세로 반높이
+      const r = Math.abs(L[i].rot) * Math.PI / 180;
+      return (dims[i].h * L[i].sy * Math.cos(r) + dims[i].w * L[i].sx * Math.sin(r)) / 2;
+    };
+    const center = (i) => {                                       // apply()와 같은 변환으로 옮겨진 중심 y
+      const cy = dims[i].y + dims[i].h / 2;
+      return cy + L[i].ty + (L[i].sy - 1) * (cy - oy);
+    };
+    for (let i = 1; i < 3; i++) {
+      const need = center(i - 1) + ext(i - 1) + ext(i) + SPEC.gap;
+      const c = center(i);
+      if (c < need) L[i].ty += need - c;
+    }
+  }
+
+  function eyesAt(t) {
+    const D = SPEC.drop, P = SPEC.press, K = SPEC.shake;
+    const swirl = (S.shakeActive && S.shakeStart != null && t - S.shakeStart >= K.dizzyAfter) || t < S.dizzyUntil;
+    if (S.reduced && swirl) return S.shakeActive ? "squint" : "big";
+    if (S.phase === "grab") {
+      if (swirl) return "swirl";
+      if (S.shakeActive) return "squint";
+      return "big";
+    }
+    if (S.phase === "drop") {
+      if (swirl) return "swirl";
+      const tt = t - S.dropAt, tl = S.tFall * 1000;
+      if (S.reduced) return "";
+      if (tt < tl) return "big";
+      const a = tt - tl;
+      return a < 110 ? "squint" : a < 260 ? "" : a < 380 ? "dash" : "";
+    }
+    if (S.phase === "press") {
+      if (t <= S.downAt) return "";
+      if (S.upAt == null || t < S.upAt) return "squint";
+      if (!S.tap) return "";
+      const a = t - S.upAt;
+      return a < P.happyAfter ? "big" : (a < P.happyAfter + P.happyMs ? "happy" : "");
+    }
+    return "";
+  }
+
+  function pose(t) {
+    const P = { l: [0, 1, 2].map(() => ({ tx: 0, ty: 0, sx: 1, sy: 1, rot: 0 })), op: 1, eyes: { shape: "", lx: 0, ly: 0 }, streak: { o: 0, w: 12, dir: -1 } };
+    if (S.phase === "idle") return P;
+    const D = SPEC.drop;
+    P.eyes.shape = eyesAt(t);
+    if (S.phase === "press" || S.phase === "grab") {
+      if (!S.reduced) for (let i = 0; i < 3; i++) { const s = pressScale(t, SPEC.press.delay[i]); P.l[i].sx = s[0]; P.l[i].sy = s[1]; }
+      if (S.phase === "grab") {
+        const L = grabLayers(t);
+        for (let i = 0; i < 3; i++) Object.assign(P.l[i], L[i]);
+        separate(P.l);
+        if (P.eyes.shape === "big") { P.eyes.lx = clamp(S.vx / 900, -1, 1) * 3; P.eyes.ly = clamp(S.vy / 900, -1, 1) * 2; }
+        if (!S.reduced) {                                              // 빠르게 움직이면 머리 뒤에 속도선이 생긴다
+          const sp = Math.abs(S.vx);
+          P.streak = { o: clamp((sp - 250) / 600, 0, 1) * 0.85, w: 8 + clamp(sp / 150, 0, 8), dir: S.vx > 0 ? -1 : 1 };
+        }
+      }
+      return P;
+    }
+    // drop
+    const tt = (t - S.dropAt) / 1000;
+    if (S.reduced) { P.op = lerp(0.4, 1, clamp(tt * 1000 / D.fadeMs, 0, 1)); return P; }
+    if (tt < S.tFall) {
+      const h = 1 - Math.pow(tt / S.tFall, 2);                 // 중력: 거리 ∝ t²
+      const b = powerOut(tt * 1000 / 60);
+      for (let i = 0; i < 3; i++) {
+        P.l[i].tx = S.L0[i].tx * h; P.l[i].ty = S.L0[i].ty * h; P.l[i].rot = S.L0[i].rot * h;
+        P.l[i].sx = lerp(1, D.stretch[0], b); P.l[i].sy = lerp(1, D.stretch[1], b);
+      }
+      return P;
+    }
+    const a = tt - S.tFall;                                   // 착지 후 경과(초)
+    const hop = D.bounce * Math.max(S.fall, 24);
+    for (let i = 0; i < 3; i++) {
+      if (a * 1000 < D.landMs) {
+        const p = powerOut(a * 1000 / D.landMs);
+        P.l[i].sx = lerp(D.stretch[0], D.land[0], p); P.l[i].sy = lerp(D.stretch[1], D.land[1], p);
+      } else {
+        const ab = a - D.landMs / 1000;
+        const r = springStep(BK, BC, ab - D.stack[i] / 1000);
+        P.l[i].sx = lerp(D.land[0], 1, r); P.l[i].sy = lerp(D.land[1], 1, r);
+        P.l[i].ty = -hop * bounce1(ab - Math.max(0, D.stack[i] / 1000 - 0.0));
+      }
+    }
+    return P;
+  }
+
+  function apply(P) {
+    if (!dims) measure();
+    const bot = document.getElementById("roBot");
+    if (!bot || !dims) return;
+    const els = [layerHead, layerBody, layerBase];
+    const ox = dims[2].x + dims[2].w / 2, oy = dims[2].y + dims[2].h;
+    els.forEach((el, i) => {
+      const l = P.l[i], d = dims[i];
+      const cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+      const tx = l.tx + (l.sx - 1) * (cx - ox), ty = l.ty + (l.sy - 1) * (cy - oy);
+      el.style.translate = `${tx.toFixed(2)}px ${ty.toFixed(2)}px`;
+      el.style.rotate = `${l.rot.toFixed(2)}deg`;
+      el.style.scale = `${l.sx.toFixed(4)} ${l.sy.toFixed(4)}`;
+    });
+    bot.style.opacity = P.op === 1 ? "" : String(P.op);
+    const st = document.getElementById("streak");
+    if (st) {
+      st.style.opacity = P.streak.o.toFixed(2);
+      st.style.width = P.streak.w.toFixed(1) + "px";
+      const hx = dims[0].x + P.l[0].tx, hy = dims[0].y + dims[0].h * 0.38 + P.l[0].ty;
+      st.style.left = (P.streak.dir < 0 ? hx - P.streak.w - 6 : hx + dims[0].w + 6).toFixed(1) + "px";
+      st.style.top = hy.toFixed(1) + "px";
+    }
+    petWrap.dataset.eyes = P.eyes.shape;
+    eyesWrap.style.translate = (P.eyes.lx || P.eyes.ly) ? `${P.eyes.lx.toFixed(2)}px ${P.eyes.ly.toFixed(2)}px` : "";
+    petWrap.dataset.motion = S.phase;
+  }
+
+  function clearStyles() {
+    [layerHead, layerBody, layerBase].forEach(el => { el.style.translate = ""; el.style.rotate = ""; el.style.scale = ""; });
+    const bot = document.getElementById("roBot");
+    if (bot) bot.style.opacity = "";
+    const st = document.getElementById("streak");
+    if (st) st.style.opacity = "";
+    eyesWrap.style.translate = "";
+    delete petWrap.dataset.eyes;
+    delete petWrap.dataset.motion;
+  }
+
+  function loop() {
+    const t = now();
+    advance(t);
+    apply(pose(t));
+    if (S.phase !== "idle") raf = requestAnimationFrame(loop);
+    else { raf = null; clearStyles(); if (api.onIdle) api.onIdle(); }
+  }
+  function ensureLoop() { if (!manual && raf == null) raf = requestAnimationFrame(loop); }
+
+  /* 설정 화면·메뉴의 미리보기용 합성 입력 */
+  let demoTimer = null;
+  function demo(name, done) {
+    clearInterval(demoTimer);
+    const t0 = now();
+    down(t0);
+    const plan = {
+      press: { upAt: 90, end: 90 },
+      drag: { moveFrom: 340, upAt: 1900, path: (s) => ({ x: 150 * Math.sin(s * 2.2), y: 18 * Math.sin(s * 1.1) }) },
+      shake: { moveFrom: 340, upAt: 2600, path: (s) => ({ x: 60 * Math.sin(s * 2 * Math.PI * 4), y: 0 }) },
+      drop: { moveFrom: 1e9, upAt: 450, fall: 60 },
+    }[name];
+    if (!plan) return false;
+    demoTimer = setInterval(() => {
+      const t = now(), e = t - t0;
+      if (plan.moveFrom != null && e >= plan.moveFrom) { const p = plan.path ? plan.path((e - plan.moveFrom) / 1000) : { x: 0, y: 0 }; move(p.x, p.y, t); }
+      if (e >= plan.upAt) { clearInterval(demoTimer); up(t, true, plan.fall || 0); if (done) done(); }
+    }, 8);
+    return true;
+  }
+
+  const api = {
+    SPEC, springStep, bounce1, down, move, up, advance, pose, apply, demo, reset, clearStyles,
+    get state() { return S; },
+    set manual(v) { manual = !!v; },
+    busy: () => S.phase !== "idle",
+    consumeClick: () => { const g = S.grabbed; S.grabbed = false; return !g; },
+  };
+  return api;
+})();
+
+RoMotion.onIdle = () => { if (MOTION_DEMOS.includes(currentAction)) window.triggerAction(null); };
 
 /* ===== UX 확장: 앰비언트(E) · 근거 있는 답(C) · 정리(D) · ⌥R 팔레트(B) · 끌어다 놓기(A) ===== */
 const attnDot = document.getElementById("attnDot");
