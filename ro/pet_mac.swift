@@ -53,6 +53,13 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     // 화면 위 이 거리 안으로 끌고 오면 메뉴 막대에 Ro 자리가 열린다
     private let dockZone: CGFloat = 80.0
     private var toastPanel: NSPanel?
+    // 아이콘을 이만큼 아래로 끌면 펫으로 꺼낸다
+    private let popOutDistance: CGFloat = 24.0
+    private var iconTimer: Timer?
+    private var headerTitle: NSTextField!
+    private var headerDetail: NSTextField!
+    // 메뉴 막대 모드에서 패널을 아이콘 아래로 옮기기 전 데스크톱 자리
+    private var savedDesktopOrigin: NSPoint?
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -248,7 +255,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             )
         }
 
-        dragTimer = Timer.scheduledTimer(withTimeInterval: 0.008, repeats: true) { [weak self] timer in
+        let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -330,6 +337,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        dragTimer = timer
     }
 
     // 놓는 순간 펫 창을 아이콘 자리로 빨아들이고 숨긴다. 다시 꺼내면 끌기 전 자리로 돌아온다
@@ -445,11 +454,17 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.autosaveName = "ro.pet"  // ⌘-드래그로 바꾼 막대 안 위치를 기억한다
         if let btn = statusItem.button {
+            // 메뉴를 직접 띄워야 '끌어 내리기'와 '눌러서 메뉴'를 구분할 수 있다
+            btn.target = self
+            btn.action = #selector(statusButtonPressed)
+            btn.sendAction(on: [.leftMouseDown, .rightMouseDown])
             btn.image = make16pxIcon()
             btn.toolTip = "ro — 층 셋, 눈 둘. 기록하고, 풀어낸다."
         }
         let menu = NSMenu()
-        let talkItem = NSMenuItem(title: "말 걸기 (대화창 열기/닫기)", action: #selector(toggleBubble), keyEquivalent: "r")
+        menu.addItem(makeHeaderItem())
+        menu.addItem(NSMenuItem.separator())
+        let talkItem = NSMenuItem(title: "패널 열기", action: #selector(toggleBubble), keyEquivalent: "k")
         talkItem.target = self
         menu.addItem(talkItem)
 
@@ -542,20 +557,92 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         menu.addItem(quitItem)
 
         mainMenu = menu
-        statusItem.menu = menu
+    }
+
+    // 메뉴 첫 줄: 오늘 기록 수와 지금 표정. 숫자는 웹이 폴링할 때 넘겨준다
+    private func makeHeaderItem() -> NSMenuItem {
+        headerTitle = NSTextField(labelWithString: "오늘 기록 불러오는 중")
+        headerTitle.font = NSFont.boldSystemFont(ofSize: 13)
+        headerDetail = NSTextField(labelWithString: "ro")
+        headerDetail.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        headerDetail.textColor = .secondaryLabelColor
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 44))
+        headerTitle.frame = NSRect(x: 14, y: 22, width: 220, height: 17)
+        headerDetail.frame = NSRect(x: 14, y: 5, width: 220, height: 15)
+        view.addSubview(headerTitle)
+        view.addSubview(headerDetail)
+        let item = NSMenuItem()
+        item.view = view
+        return item
+    }
+
+    @objc private func statusButtonPressed() {
+        guard let event = NSApp.currentEvent, let btn = statusItem.button else { return }
+        if event.type == .rightMouseDown {
+            showStatusMenu()
+            return
+        }
+        // 누른 채 아래로 끌면 펫으로 꺼내고, 그대로 떼면 메뉴를 연다
+        let start = NSEvent.mouseLocation
+        iconTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            let cur = NSEvent.mouseLocation
+            if start.y - cur.y > self.popOutDistance {
+                timer.invalidate()
+                self.iconTimer = nil
+                btn.highlight(false)
+                self.popOut(at: cur)
+            } else if (NSEvent.pressedMouseButtons & 1) == 0 {
+                timer.invalidate()
+                self.iconTimer = nil
+                self.showStatusMenu()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        iconTimer = timer
+    }
+
+    private func showStatusMenu() {
+        guard let btn = statusItem.button, let win = btn.window else { return }
+        btn.highlight(true)
+        mainMenu.popUp(positioning: nil, at: NSPoint(x: win.frame.minX, y: win.frame.minY - 4), in: nil)
+        btn.highlight(false)
+    }
+
+    // 끌어 내린 커서 아래에 펫을 띄우고 그대로 드래그를 이어 받는다
+    private func popOut(at mouse: NSPoint) {
+        savedDesktopOrigin = nil
+        panel.setFrameOrigin(NSPoint(x: mouse.x - compactSize.width / 2, y: mouse.y - compactSize.height + 40))
+        setMode(.desktop)
+        startNativeDrag(fromPet: true)
+    }
+
+    // 메뉴 막대 모드에서 펫(과 패널)이 내려올 자리: 아이콘 바로 아래
+    private func menubarAnchorOrigin() -> NSPoint {
+        let vf = currentVisibleFrame()
+        let midX = statusItem.button?.window?.frame.midX ?? (vf.maxX - compactSize.width / 2)
+        return NSPoint(x: midX - compactSize.width / 2, y: vf.maxY - compactSize.height)
     }
 
     // 모드 전환은 여기 한 곳에서만 한다: 펫 창, 상태 아이콘, 저장
     private func setMode(_ next: PetMode) {
+        if next != mode && bubbleOpen {
+            webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
+            setBubbleState(false)
+        }
+        if next == .desktop, let origin = savedDesktopOrigin {
+            panel.setFrameOrigin(origin)
+            savedDesktopOrigin = nil
+        }
         mode = next
         defaults.set(next.rawValue, forKey: "ro.mode")
         statusItem.isVisible = (next == .menubar)
         modeItem.title = (next == .menubar) ? "데스크톱에 꺼내기" : "메뉴 막대로 보내기"
         if next == .menubar {
-            if bubbleOpen {
-                webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
-                setBubbleState(false)
-            }
             panel.orderOut(nil)
         } else {
             panel.orderFrontRegardless()
@@ -647,6 +734,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     @objc private func toggleBubble() {
+        if mode == .menubar && !bubbleOpen {
+            savedDesktopOrigin = savedDesktopOrigin ?? panel.frame.origin
+            panel.setFrameOrigin(menubarAnchorOrigin())
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost();", completionHandler: nil)
@@ -708,6 +799,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "menu" {
             // 데스크톱 모드에선 상태 아이콘이 숨으므로 펫 우클릭이 같은 메뉴로 가는 길이다
             mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        } else if type == "status" {
+            let today = (dict["today"] as? NSNumber)?.intValue ?? 0
+            headerTitle.stringValue = "오늘 \(today)건 기록"
+            headerDetail.stringValue = (dict["mood"] as? String) ?? "ro"
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)

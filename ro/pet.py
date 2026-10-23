@@ -2317,7 +2317,14 @@ async function apiPost(path, body) {
   return await res.json();
 }
 
+let lastHostStatus = "";
 function applyState(st) {
+  // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
+  const hostStatus = { type: "status", today: (st.counts && st.counts.today_events) || 0, mood: st.mood_label || "" };
+  if (JSON.stringify(hostStatus) !== lastHostStatus) {
+    lastHostStatus = JSON.stringify(hostStatus);
+    notifyHost(hostStatus);
+  }
   const locked = Date.now() < previewLockUntil;
   if (!locked) {
     currentMood = st.mood;

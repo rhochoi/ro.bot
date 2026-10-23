@@ -446,6 +446,18 @@ class PetTest(unittest.TestCase):
         self.assertIn("scale(calc(1.04 - 0.82 * var(--dock, 0)))", html)  # 1.04 → 0.22
         self.assertIn('"놓으면 메뉴 막대로"', html)
 
+    def test_menubar_icon_menu_and_pull_down(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertNotIn("statusItem.menu = ", src)  # 메뉴를 붙이면 버튼 액션이 오지 않는다
+        self.assertIn("btn.sendAction(on: [.leftMouseDown, .rightMouseDown])", src)
+        self.assertIn("if start.y - cur.y > self.popOutDistance {", src)  # 끌어 내리면 펫으로
+        self.assertIn("self.popOut(at: cur)", src)
+        self.assertIn("RunLoop.main.add(timer, forMode: .common)", src)  # 트래킹 중에도 돈다
+        self.assertIn('NSMenuItem(title: "패널 열기", action: #selector(toggleBubble), keyEquivalent: "k")', src)
+        self.assertIn("panel.setFrameOrigin(menubarAnchorOrigin())", src)  # 패널은 아이콘 아래로
+        self.assertIn('headerTitle.stringValue = "오늘 \\(today)건 기록"', src)
+        self.assertIn('type: "status", today:', pet.PET_HTML)
+
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
         submit = html[html.index('askForm.addEventListener("submit"'):]
