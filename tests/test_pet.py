@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -469,6 +470,21 @@ class PetTest(unittest.TestCase):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn("ensureIconVisible(announceSuccess: false)", src)  # 시작할 때도 노치 확인
         self.assertIn("} else if NSMenu.menuBarVisible() {", src)  # 전체 화면은 가려진 것으로 보지 않는다
+
+    @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
+    def test_cpu_gait_selftest(self):
+        # 앱을 띄우지 않고 계산만 확인한다: idle 인덱스, UInt32 wrap, 순간 튐, 50% 흔들림, 계단 반응, 과열 해제
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_path = Path(tmp) / "ro-pet-selftest"
+            build = subprocess.run(
+                ["swiftc", str(pet.swift_source_path()), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(build.returncode, 0, build.stderr[-2000:])
+            r = subprocess.run([str(bin_path), "--selftest"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("selftest passed", r.stdout)
+        self.assertNotIn("FAIL", r.stdout)
 
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML

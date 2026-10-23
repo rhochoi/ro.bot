@@ -15,6 +15,149 @@ final class FloatingPetPanel: NSPanel {
     }
 }
 
+// MARK: - CPU 걸음 (07). 순수 계산만 두어 --selftest로 GUI 없이 확인한다
+
+// host_statistics(HOST_CPU_LOAD_INFO)의 누적 틱. 배열 순서는 USER, SYSTEM, IDLE, NICE (idle은 인덱스 2)
+struct CPUTicks: Equatable {
+    var user: UInt32
+    var system: UInt32
+    var idle: UInt32
+    var nice: UInt32
+
+    // 카운터는 UInt32라 몇 달 켜 두면 한 바퀴 돈다. 합과 차를 모두 &+ / &- 로 해야 wrap에도 맞는다
+    var busy: UInt32 { user &+ system &+ nice }
+    var total: UInt32 { busy &+ idle }
+
+    init(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32) {
+        self.user = user
+        self.system = system
+        self.idle = idle
+        self.nice = nice
+    }
+
+    // 커널이 주는 cpu_ticks 튜플을 이름 붙은 필드로. 순서를 틀리면 사용률이 100%로 나온다
+    init(machTicks t: (UInt32, UInt32, UInt32, UInt32)) {
+        self.init(user: t.0, system: t.1, idle: t.2, nice: t.3)
+    }
+
+    static func read() -> CPUTicks? {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let rc = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard rc == KERN_SUCCESS else { return nil }
+        return CPUTicks(machTicks: info.cpu_ticks)
+    }
+}
+
+// 두 표본 사이 전체 CPU 사용률(0~100). 틱이 안 늘었으면(잠자기 직후 등) nil
+func cpuPercent(from prev: CPUTicks, to cur: CPUTicks) -> Double? {
+    let total = cur.total &- prev.total
+    guard total > 0 else { return nil }
+    let busy = cur.busy &- prev.busy
+    return min(100, Double(busy) / Double(total) * 100)
+}
+
+// 걸음 4단계. 경계는 20/50/80이고 메뉴 막대는 0.8초보다 빨라지지 않는다
+enum Gait: Int, CaseIterable {
+    case calm = 0, walk, busy, hot
+
+    static let edges: [Double] = [20, 50, 80]
+    var period: Double { [3.2, 1.6, 0.8, 0.4][rawValue] }
+    var rate: Double { 3.2 / period }
+    var menubarPeriod: Double { max(period, 0.8) }
+    var label: String { ["느긋", "보통 걸음", "바쁨", "과열"][rawValue] }
+}
+
+// 최근 3개 중앙값(순간 튐 제거) → 지수 평균 α=0.3 → 모든 경계에 ±5% 히스테리시스.
+// 시뮬레이션(docs/PET-MENUBAR-MODE.md): 50% 근처 10분 140회 → 13회 전환
+struct CPUSmoother {
+    static let alpha = 0.3
+    static let gap = 5.0
+    private(set) var recent: [Double] = []
+    private(set) var smoothed: Double? = nil
+    private(set) var gait: Gait = .calm
+
+    mutating func push(_ raw: Double) -> Gait {
+        recent.append(raw)
+        if recent.count > 3 { recent.removeFirst() }
+        let median = recent.sorted()[recent.count / 2]
+        let value = smoothed.map { Self.alpha * median + (1 - Self.alpha) * $0 } ?? median
+        smoothed = value
+        // 한 번에 여러 단계를 건너뛸 수 있다 (5% → 90% 계단)
+        while gait != .hot && value >= Gait.edges[gait.rawValue] + Self.gap {
+            gait = Gait(rawValue: gait.rawValue + 1)!
+        }
+        while gait != .calm && value < Gait.edges[gait.rawValue - 1] - Self.gap {
+            gait = Gait(rawValue: gait.rawValue - 1)!
+        }
+        return gait
+    }
+
+    // 잠자기·화면 꺼짐 뒤에는 이전 값이 의미 없으니 처음부터
+    mutating func reset() {
+        recent = []
+        smoothed = nil
+        gait = .calm
+    }
+}
+
+// GUI 없이 계산만 확인한다. 실패 항목을 출력하고 실패 수를 돌려준다
+func runCPUSelfTest() -> Int {
+    var failures = 0
+    func check(_ ok: Bool, _ name: String) {
+        print("\(ok ? "ok  " : "FAIL") \(name)")
+        if !ok { failures += 1 }
+    }
+    func feed(_ values: [Double]) -> [Gait] {
+        var s = CPUSmoother()
+        return values.map { s.push($0) }
+    }
+    func switches(_ gaits: [Gait]) -> Int {
+        zip(gaits, gaits.dropFirst()).filter { $0 != $1 }.count
+    }
+
+    // 커널 순서 (USER, SYSTEM, IDLE, NICE) 그대로 넣는다
+    let a = CPUTicks(machTicks: (100, 100, 700, 0))
+    let b = CPUTicks(machTicks: (110, 110, 780, 0))
+    check(cpuPercent(from: a, to: b) == 20, "idle은 인덱스 2: 바쁨 20틱 / 전체 100틱 = 20%")
+
+    // 카운터 셋이 함께 한 바퀴 돌아도 (합에서도 넘친다) 차이는 맞아야 한다
+    let nearMax = CPUTicks(user: UInt32.max - 5, system: UInt32.max - 3, idle: UInt32.max - 50, nice: 0)
+    let wrapped = CPUTicks(user: 4, system: 6, idle: 29, nice: 0)  // user +10, system +10, idle +80
+    let wrapPct = cpuPercent(from: nearMax, to: wrapped) ?? -1
+    check(abs(wrapPct - 20) < 0.01, "UInt32 wrap에도 사용률이 맞다 (\(String(format: "%.2f", wrapPct)))")
+    check(cpuPercent(from: a, to: a) == nil, "틱이 안 늘면 nil")
+
+    var spikes = Array(repeating: 6.0, count: 60)
+    spikes[20] = 76
+    spikes[41] = 76
+    check(feed(spikes).allSatisfy { $0 == .calm }, "한가할 때 순간 튐 한 번은 무시한다")
+
+    let hover = (0..<240).map { $0 % 2 == 0 ? 44.0 : 56.0 }
+    check(switches(feed(hover)) <= 1, "50% 근처에서 단계가 흔들리지 않는다")
+
+    let step = Array(repeating: 5.0, count: 30) + Array(repeating: 90.0, count: 30)
+    let stepGaits = feed(step)
+    let hotAt = stepGaits.firstIndex(of: .hot).map { $0 - 30 } ?? -1
+    check(hotAt >= 0 && hotAt <= 10, "5% → 90% 계단은 10초 안에 과열 (\(hotAt)초)")
+
+    var s = CPUSmoother()
+    for _ in 0..<30 { _ = s.push(95) }
+    for _ in 0..<30 { _ = s.push(78) }
+    check(s.gait == .hot, "과열은 75% 아래로 내려가야 풀린다 (78%는 유지)")
+    for _ in 0..<30 { _ = s.push(70) }
+    check(s.gait == .busy, "70%면 바쁨으로 내려온다")
+
+    check(Gait.allCases.map(\.period) == [3.2, 1.6, 0.8, 0.4], "사이클 3.2 / 1.6 / 0.8 / 0.4초")
+    check(Gait.hot.menubarPeriod == 0.8 && Gait.calm.menubarPeriod == 3.2, "메뉴 막대는 0.8초 상한")
+    print(failures == 0 ? "selftest passed" : "selftest failed: \(failures)")
+    return failures
+}
+
 // 데스크톱 펫과 메뉴 막대 아이콘은 같은 Ro다. 한 번에 한 곳에만 보인다
 enum PetMode: String {
     case desktop
@@ -60,6 +203,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var headerDetail: NSTextField!
     // 메뉴 막대 모드에서 패널을 아이콘 아래로 옮기기 전 데스크톱 자리
     private var savedDesktopOrigin: NSPoint?
+    private var cpuTimer: Timer?
+    private var lastTicks: CPUTicks?
+    private var smoother = CPUSmoother()
+    private(set) var gait: Gait = .calm
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -80,6 +227,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         ensureIconVisible(announceSuccess: false)  // 지난번 메뉴 막대 모드로 시작했는데 아이콘이 가려진 경우
         setupWanderTimer()
         setupBackdropTimer()
+        setupCPUSampler()
     }
 
     // 중복 실행 방지: 현재 프로세스 외에 다른 ro-pet-host가 떠 있으면 즉시 종료시킨다
@@ -572,7 +720,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private func makeHeaderItem() -> NSMenuItem {
         headerTitle = NSTextField(labelWithString: "오늘 기록 불러오는 중")
         headerTitle.font = NSFont.boldSystemFont(ofSize: 13)
-        headerDetail = NSTextField(labelWithString: "ro")
+        headerDetail = NSTextField(labelWithString: "CPU 재는 중")
         headerDetail.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         headerDetail.textColor = .secondaryLabelColor
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 44))
@@ -734,6 +882,42 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
+    // 1초마다 전체 CPU 사용률을 읽어 걸음 단계를 정한다. 화면이 꺼지거나 잠기면 쉬고, 돌아오면 처음부터
+    private func setupCPUSampler() {
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.stopCPUSampler() }
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.startCPUSampler() }
+        }
+        startCPUSampler()
+    }
+
+    private func startCPUSampler() {
+        stopCPUSampler()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in self?.sampleCPU() }
+        timer.tolerance = 0.3  // 다른 타이머와 묶여 깨어나는 횟수를 줄인다
+        RunLoop.main.add(timer, forMode: .common)
+        cpuTimer = timer
+    }
+
+    private func stopCPUSampler() {
+        cpuTimer?.invalidate()
+        cpuTimer = nil
+        lastTicks = nil
+        smoother.reset()
+    }
+
+    private func sampleCPU() {
+        guard let cur = CPUTicks.read() else { return }
+        defer { lastTicks = cur }
+        guard let prev = lastTicks, let pct = cpuPercent(from: prev, to: cur) else { return }
+        gait = smoother.push(pct)
+        let shown = Int((smoother.smoothed ?? pct).rounded())
+        headerDetail.stringValue = "CPU \(shown)% · \(gait.label)"
+    }
+
     // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지
     private func setupBackdropTimer() {
         backdropTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
@@ -811,7 +995,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "status" {
             let today = (dict["today"] as? NSNumber)?.intValue ?? 0
             headerTitle.stringValue = "오늘 \(today)건 기록"
-            headerDetail.stringValue = (dict["mood"] as? String) ?? "ro"
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)
@@ -830,6 +1013,9 @@ while i < args.count {
     } else if args[i] == "--wander" {
         wanderArg = true
         i += 1
+    } else if args[i] == "--selftest" {
+        // 앱을 띄우기 전에 끝낸다 (killOtherInstances가 떠 있는 펫을 죽이지 않게)
+        exit(runCPUSelfTest() == 0 ? 0 : 1)
     } else {
         i += 1
     }
