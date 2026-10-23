@@ -5,3 +5,5 @@
 공유 계층: `identity/`(원칙), `~/.ro/ro-model.md`(승인된 기억, 사용자별), `routing.toml`(작업 유형→엔진·모델 기본값, 사용자별 사본 `~/.ro/routing.toml`).
 
 @identity/principles.md
+
+구현·탐색·테스트는 scripts/delegate.sh codex로, 브라우저·UI는 agy로 위임한다. Claude는 조율·검토만 한다.
