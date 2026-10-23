@@ -1,4 +1,6 @@
+import contextlib
 import datetime
+import io
 import json
 import os
 import stat
@@ -397,6 +399,106 @@ class OrganizeTest(unittest.TestCase):
         self.assertNotIn("메모.txt", q)
         self.assertIn("pic.zip", organize.show(plan, kind="extracted"))
         self.assertNotIn("pic.zip", organize.show(plan, action="move"))
+
+    # --- 정리 통합 C6: 격리 폴더 보기·비우기 ---
+
+    def quarantine_batch(self, name, aged=False):
+        """name.zip(풀린 원본)을 격리한 배치 하나. aged면 2020년 배치인 척 기록·폴더를 바꾼다."""
+        self.w(f"{name}.png", name)
+        self.zip_of(f"{name}.zip", {f"{name}.png": name})
+        self.scan()
+        batch, done, _ = organize.apply(kind="extracted", home=self.ro, log_dir=self.log)
+        if not aged:
+            return batch, Path(done[0]["dest"])
+        j = self.ro / "cleanup" / "journal.jsonl"
+        rows = [json.loads(x) for x in j.read_text().splitlines()]
+        new_dir = Path(done[0]["dest"]).parent.with_name("20200101-000000")
+        Path(done[0]["dest"]).parent.rename(new_dir)
+        for r in rows:
+            if r["batch"] == batch:
+                r.update(ts="2020-01-01T00:00:00+0000", batch="20200101-000000",
+                         dst=str(new_dir / Path(r["dst"]).name))
+        j.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        return "20200101-000000", new_dir / Path(done[0]["dest"]).name
+
+    def trash(self, answer=None, tty=True, older="7d"):
+        term = SimpleNamespace(isatty=lambda: tty)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            organize.trash_cli(older, answer is not None, home=self.ro, log_dir=self.log, stdin=term, stdout=term,
+                               ask=lambda _: answer)
+        return out.getvalue()
+
+    def test_trash_lists_batches_and_due_marks(self):
+        old_batch, _ = self.quarantine_batch("old", aged=True)
+        new_batch, _ = self.quarantine_batch("new")
+        out = self.trash()
+        self.assertIn(f"{old_batch}  ", out)
+        self.assertIn("← 비울 수 있음", out.split(old_batch)[1].splitlines()[0])
+        self.assertNotIn("← 비울 수 있음", out.split(new_batch)[1].splitlines()[0])
+        self.assertIn("비우기: ro organize trash --empty", out)
+
+    def test_empty_needs_tty_and_exact_yes(self):
+        _, old_file = self.quarantine_batch("old", aged=True)
+        with self.assertRaises(SystemExit):
+            self.trash("yes", tty=False)
+        for answer in ("", "y", "YES please", "네"):
+            self.assertIn("아무것도 지우지 않았습니다", self.trash(answer))
+        self.assertTrue(old_file.exists())
+
+    def test_empty_purges_only_old_batches_and_blocks_undo(self):
+        old_batch, old_file = self.quarantine_batch("old", aged=True)
+        new_batch, new_file = self.quarantine_batch("new")
+        out = self.trash("yes")
+        self.assertIn("격리 비움: 1개", out)
+        self.assertFalse(old_file.exists() or old_file.parent.exists())
+        self.assertTrue(new_file.exists())
+        self.assertIn('"op": "purge"', (self.ro / "cleanup" / "journal.jsonl").read_text())
+        self.assertEqual({e["batch"] for e in organize.pending(self.ro)}, {new_batch})
+        with self.assertRaises(ValueError):  # 비운 배치는 되돌릴 수 없다
+            organize.undo(old_batch, home=self.ro, log_dir=self.log)
+        _, back, _ = organize.undo(new_batch, home=self.ro, log_dir=self.log)  # 남은 배치는 그대로 되돌린다
+        self.assertEqual(len(back), 1)
+        self.assertIn("격리된 파일이 없습니다", self.trash())
+
+    def test_older_option_validation_and_custom_days(self):
+        self.quarantine_batch("new")
+        for bad in ("0d", "0", "abc", "-3d"):
+            with self.assertRaises(ValueError):
+                self.trash(older=bad)
+        self.assertIn("1일 지난 배치가 없습니다", self.trash("yes", older="1d"))
+
+    def test_purge_never_deletes_outside_trash(self):
+        _, old_file = self.quarantine_batch("old", aged=True)
+        outside = self.w("keep-me.txt", "important")
+        j = self.ro / "cleanup" / "journal.jsonl"
+        rows = [json.loads(x) for x in j.read_text().splitlines()]
+        for r in rows:
+            if r["batch"] == "20200101-000000":
+                r["dst"] = str(outside)  # 기록이 바깥 파일을 가리키게 조작
+        j.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        out = self.trash("yes")
+        self.assertTrue(outside.exists())
+        self.assertIn("격리 폴더 밖", out)
+
+    def test_purge_legacy_tidy_batch_and_tidy_undo_respects_it(self):
+        from ro import tidy
+        old = self.w("sub/old.bin", "x" * 5000, time.time() - 400 * 86400)
+        plan = tidy.scan(self.root)
+        tidy.save_plan(plan, self.ro)
+        tbatch, _, _ = tidy.apply([plan["items"][0]["id"]], self.ro, self.log)
+        tj = self.ro / "tidy" / "journal.jsonl"
+        rows = [json.loads(x) for x in tj.read_text().splitlines()]
+        for r in rows:
+            r["ts"] = "2020-01-01T00:00:00+0000"
+        tj.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+        self.assertIn("(예전 tidy)", self.trash())
+        self.assertIn("격리 비움: 1개", self.trash("yes"))
+        self.assertFalse(list((self.ro / "tidy" / "trash").rglob("*old.bin")))
+        self.assertIn("purge", [e["op"] for e in tidy.read_journal(self.ro)])  # 복원 표시처럼 원래 기록 쪽에
+        with self.assertRaises(ValueError):
+            tidy.undo(tbatch, self.ro, self.log)  # 비운 배치는 tidy undo 대상도 아니다
+        self.assertFalse(old.exists())
 
     def test_show_lists_sections(self):
         self.w("pic.png", "IMG")

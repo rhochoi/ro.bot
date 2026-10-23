@@ -191,6 +191,59 @@ def _checks():
             after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
             return one_each and judged and applied and old and after == before
 
+    def purge_needs_terminal_yes():
+        # 격리 비우기(영구 삭제): 최근 배치는 남기고, 비대화 실행·yes 아닌 답에는 아무것도 지우지 않으며,
+        # 비운 배치는 되돌리기 대상에서 빠진다.
+        import json as _json
+        import zipfile
+        with tempfile.TemporaryDirectory() as h:
+            t = Path(h).resolve()
+            root = t / "home" / "Downloads"
+            root.mkdir(parents=True)
+            ro_home, logs = t / "ro", str(t / "log")
+            files = []
+            with mock.patch("pathlib.Path.home", return_value=t / "home"):
+                for name in ("old", "new"):  # 배치 둘: 하나는 오래된 것으로 만든다
+                    (root / f"{name}.png").write_text(name)
+                    with zipfile.ZipFile(root / f"{name}.zip", "w") as zf:
+                        zf.writestr(f"{name}.png", name)
+                    for p in root.iterdir():
+                        os.utime(p, (1, 1))
+                    plan = organize.scan(root, t / "home" / "Documents" / "정리됨", extractor=lambda ps: {})
+                    organize.save_plan(plan, ro_home)
+                    organize.apply(kind="extracted", home=ro_home, log_dir=logs)
+                    if name == "old":
+                        j = ro_home / "cleanup" / "journal.jsonl"
+                        rows = [_json.loads(x) for x in j.read_text().splitlines()]
+                        aged = Path(rows[0]["dst"]).parent.with_name("20200101-000000")
+                        Path(rows[0]["dst"]).parent.rename(aged)
+                        for r in rows:  # 7일보다 오래된 배치인 척: 시각·배치·격리 경로를 함께 바꾼다
+                            r["ts"], r["batch"] = "2020-01-01T00:00:00+0000", "20200101-000000"
+                            r["dst"] = str(aged / Path(r["dst"]).name)
+                        j.write_text("".join(_json.dumps(r) + "\n" for r in rows))
+                        files.append(Path(rows[0]["dst"]))
+                trash = ro_home / "cleanup" / "trash"
+                before = sorted(trash.rglob("*.zip"))
+                tty, pipe = mock.Mock(isatty=lambda: True), mock.Mock(isatty=lambda: False)
+                import contextlib
+                import io
+
+                def run(**kw):  # 목록 출력은 eval 화면에 섞지 않는다
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        organize.trash_cli("7d", True, home=ro_home, log_dir=logs, **kw)
+                try:
+                    run(stdin=pipe, stdout=tty)
+                    refused = False
+                except SystemExit:
+                    refused = True
+                run(stdin=tty, stdout=tty, ask=lambda _: "y")
+                kept_after_no = sorted(trash.rglob("*.zip")) == before
+                run(stdin=tty, stdout=tty, ask=lambda _: "yes")
+                left = sorted(trash.rglob("*.zip"))
+                undoable = {e["batch"] for e in organize.pending(ro_home)}
+            return refused and kept_after_no and len(before) == 2 and len(left) == 1 \
+                and not files[0].exists() and "20200101-000000" not in undoable and len(undoable) == 1
+
     def revise_needs_approval():
         import datetime
         import shutil
@@ -307,6 +360,7 @@ def _checks():
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
         ("분류 정리: 읽기 전용 스캔·본문 미저장·엔진 미호출·검토 항목 보류·복원 가능", organize_safe),
         ("정리 통합: 파일당 제안 하나·재무 보관·격리+이동 한 배치 복원·예전 tidy 배치 복원", cleanup_unified_safe),
+        ("격리 비우기: 최근 배치 보존·비대화 거부·yes 전 무변경·비운 배치 되돌리기 제외", purge_needs_terminal_yes),
         ("데이터 파일 비공개 권한", private_files),
         ("손상 상태 보존 후 복구", corrupt_state_recovers),
         ("외부 입력은 정리·마스킹 후 기록만", ambient_untrusted),

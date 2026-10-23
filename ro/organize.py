@@ -17,6 +17,7 @@
   ro organize edit ID [--category 문서] [--name "전세 계약서"] | --action keep|move|quarantine
   ro organize apply ID [ID...] | --category 재무 | --kind extracted
   ro organize undo [BATCH] | status
+  ro organize trash [--empty [--older 7d]]   격리 폴더 보기 / N일 지난 배치 영구 삭제(터미널에서 yes 확인)
 """
 import argparse
 import datetime
@@ -495,9 +496,9 @@ def read_journal(home=HOME):
 def pending(home=HOME, sources=("cleanup", "organize", "tidy")):
     """되돌리지 않은 이동·격리 기록."""
     entries = [e for e in read_journal(home) if e["source"] in sources]
-    restored = {(e["source"], e["batch"], e["id"]) for e in entries if e["op"] == "restore"}
+    closed = {(e["source"], e["batch"], e["id"]) for e in entries if e["op"] in ("restore", "purge")}
     return [e for e in entries if e["op"] in ("move", "quarantine")
-            and (e["source"], e["batch"], e["id"]) not in restored]
+            and (e["source"], e["batch"], e["id"]) not in closed]  # 비운(purge) 항목은 되돌릴 수 없다
 
 
 def _append(entry, home, source="cleanup"):
@@ -583,13 +584,80 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
 KIND_LABELS = {"duplicate": "중복", "extracted": "풀린 압축", "version": "옛 버전", "stale": "오래됨", "manual": "직접 지정"}
 
 
+TRASH_DAYS = 7  # 격리 후 이만큼 지난 배치만 비울 수 있다(결정 ③)
+
+
+def _trash_roots(home):
+    h = Path(home).expanduser()
+    return {"cleanup": h / "cleanup" / "trash", "tidy": h / "tidy" / "trash"}  # tidy는 예전 격리 위치
+
+
 def trash_size(home=HOME):
     """격리 폴더에 지금 있는 (파일 수, 바이트). 비우기 전에는 디스크 공간이 줄지 않는다."""
     n = size = 0
-    for p in (_cleanup_dir(home) / "trash").rglob("*"):
-        if p.is_file() and not p.is_symlink():
-            n, size = n + 1, size + p.stat().st_size
+    for root in _trash_roots(home).values():
+        for p in root.rglob("*"):
+            if p.is_file() and not p.is_symlink():
+                n, size = n + 1, size + p.stat().st_size
     return n, size
+
+
+def trash_batches(home=HOME, now=None):
+    """격리된 채(되돌리지도 비우지도 않은) 배치 목록, 오래된 순.
+    각 항목: source·batch·ts·age_days·entries(기록)·present(남은 파일 수)·bytes."""
+    now = now or time.time()
+    groups = {}
+    for e in pending(home):
+        if e["op"] != "quarantine" and e["source"] != "tidy":  # tidy 기록의 move는 격리였다
+            continue
+        g = groups.setdefault((e["source"], e["batch"]), {"source": e["source"], "batch": e["batch"],
+                                                          "ts": e["ts"], "entries": []})
+        g["entries"].append(e)
+        g["ts"] = min(g["ts"], e["ts"])
+    out = []
+    for g in groups.values():
+        when = datetime.datetime.strptime(g["ts"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        present = [Path(e["dst"]) for e in g["entries"] if Path(e["dst"]).is_file() and not Path(e["dst"]).is_symlink()]
+        g.update(age_days=(now - when) / 86400, present=len(present), bytes=sum(p.stat().st_size for p in present))
+        out.append(g)
+    return sorted(out, key=lambda g: g["ts"])
+
+
+def purge(batches, home=HOME, log_dir=log.LOG_DIR):
+    """격리 배치를 **영구 삭제**한다(되돌릴 수 없음). 확인 질문은 호출하는 쪽(CLI)이 받는다.
+    기록에 있고 격리 폴더 안에 있는 일반 파일만 지운다. 반환: (지운 파일 수, 바이트, 건너뜀 [(id, 이유)])."""
+    roots = {k: v.resolve() for k, v in _trash_roots(home).items()}
+    n = size = 0
+    skipped = []
+    for g in batches:
+        for e in g["entries"]:
+            dst = Path(e["dst"])
+            root = roots["tidy"] if e["source"] == "tidy" else Path(e.get("trash") or roots["cleanup"]).resolve()
+            try:
+                if root not in roots.values() or root not in dst.resolve().parents:
+                    raise ValueError("격리 폴더 밖 — 지우지 않음")
+                if dst.is_symlink() or (dst.exists() and not dst.is_file()):
+                    raise ValueError("일반 파일이 아님 — 지우지 않음")
+                if dst.is_file():
+                    size += dst.stat().st_size
+                    dst.unlink()
+                    n += 1
+            except (OSError, ValueError) as ex:
+                skipped.append((e["id"], str(ex)))
+                continue
+            _append({"op": "purge", "batch": e["batch"], "id": e["id"], "src": e["src"],
+                     "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home, e["source"])
+            for d in dst.parents:  # 비게 된 배치 폴더만 지운다(격리 루트 자체는 남김)
+                if d.resolve() == root or root not in d.resolve().parents:
+                    break
+                try:
+                    d.rmdir()
+                except OSError:
+                    break
+    if n:
+        log.append("organize_purge", f"격리 비움 {n}건", {"count": n, "bytes": size,
+                   "batches": [g["batch"] for g in batches]}, log_dir=log_dir)
+    return n, size, skipped
 
 
 def _check_restorable(e, home):
@@ -624,6 +692,8 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
         raise ValueError("되돌릴 항목이 없습니다")
     if batch:
         group = [e for e in todo if e["batch"] == batch]
+        if not group:
+            raise ValueError(f"되돌릴 수 없는 배치입니다(이미 되돌렸거나 비웠거나 없음): {batch}")
     else:
         last = todo[-1]
         batch, group = last["batch"], [e for e in todo if (e["source"], e["batch"]) == (last["source"], last["batch"])]
@@ -752,6 +822,9 @@ def main(argv=None):
     u = sub.add_parser("undo", help="원래 이름·위치로 되돌리기")
     u.add_argument("batch", nargs="?")
     sub.add_parser("status", help="이동·복원 이력")
+    tr = sub.add_parser("trash", help="격리 폴더 보기 / N일 지난 배치 비우기(영구 삭제, 터미널 확인)")
+    tr.add_argument("--empty", action="store_true", help="--older보다 오래된 배치를 영구 삭제(터미널에서 yes 입력 필요)")
+    tr.add_argument("--older", default=f"{TRASH_DAYS}d", help=f"이보다 오래된 배치만(예: 7d, 14d, 최소 1d). 기본 {TRASH_DAYS}d")
     args = ap.parse_args(argv)
     try:
         if args.cmd == "scan":
@@ -785,11 +858,59 @@ def main(argv=None):
             print(f"되돌림 {len(done)}건 (batch {batch})")
             for cid, why in skipped:
                 print(f"건너뜀 [{cid}]: {why}")
+        elif args.cmd == "trash":
+            trash_cli(args.older, args.empty)
         else:
             for e in read_journal():
                 print(f"{e['ts']} {e['op']:10} {e['source']:8} {e['batch']} [{e['id']}] {e['src']}")
     except ValueError as e:
         raise SystemExit(str(e))
+
+
+def _days(spec):
+    m = re.fullmatch(r"(\d+)d?", str(spec).strip())
+    if not m or int(m[1]) < 1:
+        raise ValueError("--older는 1d 이상(예: 7d)이어야 합니다")
+    return int(m[1])
+
+
+def trash_cli(older=f"{TRASH_DAYS}d", empty=False, home=HOME, log_dir=log.LOG_DIR, stdin=None, stdout=None,
+              ask=input):
+    """격리 폴더 목록. empty면 기준보다 오래된 배치만, 대화형 터미널에서 yes를 받은 뒤에 영구 삭제한다."""
+    stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
+    days = _days(older)
+    batches = trash_batches(home)
+    if not batches:
+        print("격리된 파일이 없습니다.")
+        return
+    for g in batches:
+        tag = "  ← 비울 수 있음" if g["age_days"] >= days else ""
+        src = " (예전 tidy)" if g["source"] == "tidy" else ""
+        print(f"{g['batch']}{src}  {g['age_days']:.0f}일 전 · {g['present']}개 · {_mb(g['bytes'])}{tag}")
+    print(f"합계 {sum(g['present'] for g in batches)}개 · {_mb(sum(g['bytes'] for g in batches))} "
+          "(되돌리기: ro organize undo BATCH)")
+    if not empty:
+        print(f"비우기: ro organize trash --empty — {days}일 지난 배치만, 영구 삭제(되돌릴 수 없음)")
+        return
+    due = [g for g in batches if g["age_days"] >= days]
+    if not due:
+        print(f"{days}일 지난 배치가 없습니다. 아무것도 지우지 않았습니다.")
+        return
+    if not (stdin.isatty() and stdout.isatty()):
+        raise SystemExit("영구 삭제는 터미널에서 직접 확인해야 합니다(파이프·자동 실행은 거부). 아무것도 지우지 않았습니다.")
+    print(f"\n영구 삭제: {len(due)}배치 · {sum(g['present'] for g in due)}개 · {_mb(sum(g['bytes'] for g in due))}. "
+          "되돌릴 수 없습니다.")
+    try:
+        answer = ask("계속하려면 yes를 입력하세요: ")
+    except EOFError:
+        answer = ""
+    if answer.strip() != "yes":
+        print("취소했습니다. 아무것도 지우지 않았습니다.")
+        return
+    n, size, skipped = purge(due, home, log_dir)
+    print(f"격리 비움: {n}개 · {_mb(size)} 삭제")
+    for cid, why in skipped:
+        print(f"건너뜀 [{cid}]: {why}")
 
 
 if __name__ == "__main__":
