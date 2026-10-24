@@ -3,6 +3,8 @@
 audit: ~/.ro 데이터의 권한·비밀 유출·규칙 무결성 점검 (읽기 전용, --fix 시 권한만 조정)
 eval:  핵심 안전 불변식을 임시 디렉터리에서 재검증
 """
+import contextlib
+import io
 import json
 import os
 import stat
@@ -99,7 +101,7 @@ def _checks():
                 stats.write(d, h, ld)
             sent = []
             fake = lambda e, prompt, **k: sent.append((prompt, k)) or {"ok": False, "output": ""}  # noqa: E731
-            new, _, _ = distill.run(7, "codex", home=h, runner=fake)
+            new, _, _ = distill.run(7, "codex", home=h, runner=fake, log_dir=ld)
             mem = Path(h) / "m.md"
             return (learn.load_rules(h) == [] and not mem.exists() and len(sent) == 1
                     and "SECRETSUBJECT" not in sent[0][0] and not sent[0][1].get("write"))
@@ -268,7 +270,7 @@ def _checks():
             return not findings
 
     def corrupt_state_recovers():
-        with tempfile.TemporaryDirectory() as h:
+        with tempfile.TemporaryDirectory() as h, contextlib.redirect_stderr(io.StringIO()):  # 의도한 손상 경고는 숨긴다
             (Path(h) / "rules.json").write_text("{broken")
             return learn.load_rules(h) == [] and any(
                 p.name.startswith("rules.json.corrupt") for p in Path(h).iterdir())

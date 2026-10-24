@@ -76,7 +76,8 @@ class RoutingTest(unittest.TestCase):
                 r = route.load_routing(bad)
             self.assertIn("경고", err.getvalue())
             self.assertEqual(route.choose("버그 수정", routing=r)[0], "codex")  # 내장 기본값
-            self.assertEqual(route.load_routing(Path(d) / "없음.toml")["fallback"][0], "claude")
+            with contextlib.redirect_stderr(io.StringIO()):  # 의도한 경고
+                self.assertEqual(route.load_routing(Path(d) / "없음.toml")["fallback"][0], "claude")
 
     def test_edit_in_file_changes_routing(self):
         with tempfile.TemporaryDirectory() as d:

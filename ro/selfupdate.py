@@ -22,7 +22,7 @@ def update_command():
         return ["uv", "tool", "upgrade", PACKAGE], "uv tool 설치본"
     if shutil.which("pipx"):
         return ["pipx", "upgrade", PACKAGE], "pipx 설치본"
-    return None, "pipx가 없습니다. 설치한 방식(pip 등)으로 직접 업그레이드하세요."
+    return None, "uv·pipx 설치본을 찾지 못했습니다. 설치한 방식(uv tool·pipx·pip 등)으로 직접 업그레이드하세요."
 
 
 def update(runner=subprocess.run):

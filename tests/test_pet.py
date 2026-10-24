@@ -257,7 +257,7 @@ class PetTest(unittest.TestCase):
             self.assertFalse(rt.queue_organize_undo()["ok"])
 
     def test_bubble_fits_overlay_window(self):
-        # 오버레이 창(360×520)을 넘지 않게: 툴바·입력창 사이의 내용(팔레트·카드·기록)은 스크롤 영역 안에 있다
+        # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         html = pet.PET_HTML
         order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="writeCard"', 'id="activityList"',
                                           'id="paneSettings"', 'id="fileOrgBlock"', 'id="askForm"')]
@@ -474,6 +474,28 @@ class PetTest(unittest.TestCase):
                 other.kill()
                 other.wait()
         self.assertFalse(pet._is_pet_process(1, "py_pid"))
+
+
+    def test_ask_without_map_does_not_scan(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            with mock.patch("ro.route.run") as run, mock.patch("ro.mapper.build_map") as build:
+                res = rt.ask_question("질문")
+            self.assertEqual((res["ok"], res["reason"]), (False, "needs_setup"))
+            run.assert_not_called()
+            build.assert_not_called()
+            self.assertFalse((Path(d) / "map.json").exists())
+
+    def test_ask_uses_preferred_engine_and_model(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "map.json").write_text(json.dumps({"projects": [], "tools": {}}))
+            (Path(d) / "config.json").write_text(json.dumps({"engine": "codex"}))
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            with mock.patch("ro.route.run", return_value={"ok": True, "code": 0, "duration": 0, "output": "x"}) as run, \
+                    mock.patch("ro.route.model_for", return_value="m-1"):
+                rt.ask_question("안녕")
+            self.assertEqual(run.call_args.args[0], "codex")
+            self.assertEqual(run.call_args.kwargs.get("model"), "m-1")
 
 
 if __name__ == "__main__":

@@ -104,7 +104,7 @@ def _state(home):
         return p, {}
 
 
-def external_candidates(w, engine, home=HOME, runner=route.run, now=None):
+def external_candidates(w, engine, home=HOME, runner=route.run, now=None, log_dir=log.LOG_DIR):
     """주 1회 한도 안에서 외부 엔진 호출. 반환: (후보, 메모). 한도 초과·실패 시 빈 목록."""
     if not (w["tool_days"] or w["proj_days"] or w["sessions"]):
         return [], "통계가 비어 있어 외부 호출 생략(먼저 `python -m ro.collectors allow ...` 후 `run`)"
@@ -117,14 +117,15 @@ def external_candidates(w, engine, home=HOME, runner=route.run, now=None):
         return [], "페이로드가 4KB를 넘어 중단"
     res = runner(engine, PROMPT.format(n=MAX_CANDS, m=TEXT_MAX, data=data), write=False)
     fsutil.atomic_write(p, json.dumps({**st, "external_week": week}))  # 실패해도 한도는 소모(비용 상한)
-    log.append("distill", f"외부 증류 {engine}", {"engine": engine, "ok": res["ok"], "bytes": len(data)}, engine=engine)
+    log.append("distill", f"외부 증류 {engine}", {"engine": engine, "ok": res["ok"], "bytes": len(data)}, engine=engine,
+               log_dir=log_dir)
     if not res["ok"]:
         return [], f"{engine} 호출 실패"
     cands = [_cand(t, e or "외부 증류", f"ro distill({engine})", "낮음") for t, e in parse_response(res["output"])]
     return cands, f"{engine} 후보 {len(cands)}개"
 
 
-def run(days=7, engine=None, dry=False, home=HOME, runner=route.run, now=None):
+def run(days=7, engine=None, dry=False, home=HOME, runner=route.run, now=None, log_dir=log.LOG_DIR):
     w = weekly(days, home, now)
     cands = local_candidates(w, days)
     note = ""
@@ -132,7 +133,7 @@ def run(days=7, engine=None, dry=False, home=HOME, runner=route.run, now=None):
         if dry:
             note = f"(dry-run) {engine}에 보낼 페이로드:\n{json.dumps(payload(w), ensure_ascii=False, indent=2)}"
         else:
-            ext, note = external_candidates(w, engine, home, runner, now)
+            ext, note = external_candidates(w, engine, home, runner, now, log_dir)
             cands += ext
     new = cands if dry else learn.add_pending(cands, home)
     return new, note, w["days"]

@@ -84,7 +84,7 @@ def main(argv=None):
     fb.add_argument("--category", required=True)
     fb.add_argument("--projects", default="", help="쉼표로 구분")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더, 선호 엔진")
-    ssub = su.add_subparsers(dest="setup_cmd", required=True)
+    ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
     ss.add_argument("--json", action="store_true")
     sr = ssub.add_parser("roots", help="스캔 폴더 관리")
@@ -223,6 +223,10 @@ def main(argv=None):
                 print(f"판정 {n}건 저장")
             print(bench.report(data))
     elif args.cmd == "ask":
+        if not args.question.strip():
+            msg = "질문을 입력해 주세요."
+            emit(args, {"event": "error", "reason": "empty_question", "message": msg}, msg, err=True)
+            raise SystemExit(2)
         mapdata = ask.load_map()
         if mapdata is None:  # 동의 없이 폴더를 훑지 않는다: 지도는 사용자가 `ro map`으로 직접 만든다
             msg = "프로젝트 지도가 없습니다. 먼저 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."
@@ -275,9 +279,9 @@ def main(argv=None):
         raise SystemExit(0 if res["ok"] else 1)
     elif args.cmd == "setup":
         try:
-            if args.setup_cmd == "status":
+            if args.setup_cmd in ("status", None):
                 st = setup_mod.status()
-                print(json.dumps(st, ensure_ascii=False) if args.json else setup_mod.render(st))
+                print(json.dumps(st, ensure_ascii=False) if getattr(args, "json", False) else setup_mod.render(st))
             elif args.setup_cmd == "roots":
                 if args.action == "add":
                     roots = setup_mod.add_roots(args.paths)
@@ -405,7 +409,7 @@ def main(argv=None):
         print("도구: " + ", ".join(t for t, p in data["tools"].items() if p))
         for p in data["projects"]:
             git = p.get("git") or {}
-            langs = ",".join(p["languages"]) or "-"
+            langs = ",".join(dict.fromkeys([*p.get("markers", []), *p["languages"]])) or "-"
             print(f"- {p['name']}  [{langs}]  {git.get('branch') or '-'}  {p['path']}")
             purpose = (p.get("summary") or {}).get("purpose")
             if purpose:
