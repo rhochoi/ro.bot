@@ -106,7 +106,9 @@ def extracted(zpath, root):
     if not entries or len(entries) > MAX_ZIP_ENTRIES:
         return None
     zpath = Path(zpath)
-    for base in (zpath.parent, zpath.parent / zpath.stem):
+    # 압축 이름 폴더도 정규화 차이를 허용한다(APFS가 아닌 볼륨은 NFC·NFD를 다른 이름으로 본다)
+    stems = dict.fromkeys(unicodedata.normalize(f, zpath.stem) for f in ("NFC", "NFD"))
+    for base in (zpath.parent, *(zpath.parent / s for s in stems)):
         hits = [_find_plain(base, n, root) for n, _ in entries]
         if all(hits) and all(crc32(p) == c for p, (_, c) in zip(hits, entries)):
             return base, hits
