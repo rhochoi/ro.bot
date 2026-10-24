@@ -498,6 +498,21 @@ class PetTest(unittest.TestCase):
         self.assertIn("let iconCanvas: CGFloat = 18", src)  # 위쪽 여유로 뛴다
         self.assertIn("NSWindow.didChangeOcclusionStateNotification", src)  # 가려지면 그리기를 멈춘다
 
+    def test_overheat_alert_wiring(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("if overheatGate.push(pct) {", src)  # 원시 CPU의 60초 평균
+        self.assertIn("DispatchQueue.global(qos: .utility).async", src)  # 프로세스 스캔은 메인 밖에서
+        self.assertIn("machToSeconds(info.ri_user_time + info.ri_system_time, numer: tb.numer, denom: tb.denom)", src)
+        self.assertIn("return overheatCulprit(usage, unreadable: max(0, busy - readable))", src)
+        self.assertIn('"Mac이 힘들어해요"', src)
+        self.assertIn('NSButton(title: "활동 모니터 열기"', src)
+        self.assertIn('NSButton(title: "오늘은 그만"', src)
+        self.assertIn('withBundleIdentifier: "com.apple.ActivityMonitor"', src)
+        # 앱 이름은 이 Mac 안의 동작 상태로만 둔다: 로그·엔진·~/.ro로 보내지 않는다
+        scan = src[src.index("// MARK: 과열 알림."):src.index("@objc private func muteOverheatToday")]
+        for leak in ("evaluateJavaScript", "print(", "NSLog", "FileManager", "URLSession"):
+            self.assertNotIn(leak, scan)
+
     @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
     def test_cpu_gait_selftest(self):
         # 앱을 띄우지 않고 계산만 확인한다: idle 인덱스, UInt32 wrap, 순간 튐, 50% 흔들림, 계단 반응, 과열 해제

@@ -157,6 +157,83 @@ struct CPUSmoother {
     }
 }
 
+// MARK: - 과열 알림 (07). "Mac이 힘들어해요"는 1분 넘게 바쁠 때 한 번만
+
+struct RollingMean {
+    let capacity: Int
+    private(set) var values: [Double] = []
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    mutating func push(_ v: Double) {
+        values.append(v)
+        if values.count > capacity { values.removeFirst() }
+    }
+
+    var isFull: Bool { values.count == capacity }
+    var mean: Double { values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count) }
+
+    mutating func reset() {
+        values = []
+    }
+}
+
+// 원시 CPU의 60초 평균이 85% 이상이면 한 번 울린다. 평균이 75% 아래로 내려가야 다시 울릴 수 있다.
+// (시뮬레이션: 진입/해제 규칙은 빌드처럼 잠깐씩 꺼지는 부하에서 안 울리고 평균 83%에서 울렸다)
+struct OverheatGate {
+    static let enter = 85.0
+    static let rearm = 75.0
+    private(set) var window = RollingMean(capacity: 60)
+    private(set) var armed = true
+
+    mutating func push(_ raw: Double) -> Bool {
+        window.push(raw)
+        if !armed {
+            if window.mean < Self.rearm { armed = true }
+            return false
+        }
+        if window.isFull && window.mean >= Self.enter {
+            armed = false
+            return true
+        }
+        return false
+    }
+
+    mutating func reset() {
+        window.reset()
+        armed = true
+    }
+}
+
+// proc_pid_rusage의 시간은 나노초가 아니라 mach 틱이다 (Apple Silicon timebase 125/3)
+func machToSeconds(_ ticks: UInt64, numer: UInt32, denom: UInt32) -> Double {
+    Double(ticks) * Double(numer) / Double(denom) / 1e9
+}
+
+// 실행 파일 경로에서 가장 바깥 .app 이름. Chrome Helper 수십 개가 'Google Chrome' 하나로 묶인다
+func appName(forExecutablePath path: String) -> String {
+    let parts = path.split(separator: "/")
+    if let app = parts.first(where: { $0.hasSuffix(".app") }) {
+        return String(app.dropLast(4))
+    }
+    return String(parts.last ?? "")
+}
+
+// 1위 앱의 몫(%)이 읽지 못한 몫(시스템·root 프로세스)보다 클 때만 이름을 댄다. 엉뚱한 앱을 지목하지 않게
+func overheatCulprit(_ usage: [String: Double], unreadable: Double) -> (name: String, share: Double)? {
+    guard let top = usage.max(by: { $0.value < $1.value }), top.value > 0, top.value > unreadable else { return nil }
+    return (top.key, top.value)
+}
+
+// 같은 앱은 하루 한 번, '오늘은 그만'이면 그날은 더 없다. 앱 이름이 없으면 ""로 센다
+func shouldAlertOverheat(app: String?, today: String, memoDay: String?, muted: Bool, alerted: [String]) -> Bool {
+    guard memoDay == today else { return true }
+    if muted { return false }
+    return !alerted.contains(app ?? "")
+}
+
 // GUI 없이 계산만 확인한다. 실패 항목을 출력하고 실패 수를 돌려준다
 func runCPUSelfTest() -> Int {
     var failures = 0
@@ -227,6 +304,27 @@ func runCPUSelfTest() -> Int {
     let rise = iconPose(.rise, gait: .walk)
     check(stand.base.minY - rise.base.minY < stand.head.minY - rise.head.minY, "솟을 때 받침이 머리보다 늦게 따라온다")
     check(iconPose(.apex, gait: .hot).narrowEyes && !iconPose(.apex, gait: .busy).narrowEyes, "과열만 눈을 가늘게")
+
+    func fires(_ values: [Double]) -> [Int] {
+        var g = OverheatGate()
+        return values.enumerated().compactMap { g.push($0.element) ? $0.offset : nil }
+    }
+    check(fires(Array(repeating: 95, count: 120)) == [59], "95%가 60초 이어지면 60초째에 한 번만")
+    check(fires(Array(repeating: 95, count: 70) + Array(repeating: 60, count: 70) + Array(repeating: 95, count: 70)).count == 2,
+          "평균이 75% 아래로 내려간 뒤에만 다시 울린다")
+    check(fires((0..<300).map { _ in 83.0 }).isEmpty, "평균 83%로 오래 바빠도 울리지 않는다")
+    let build = (0..<200).map { $0 % 40 < 34 ? 92.0 : 60.0 }  // 링크 때마다 6초씩 60%로 꺼짐 → 평균 87%
+    check(!fires(build).isEmpty, "빌드처럼 잠깐씩 꺼지는 부하도 평균이 85% 넘으면 울린다")
+    check(machToSeconds(24_000_000, numer: 125, denom: 3) == 1.0, "mach 틱을 timebase로 초로 바꾼다")
+    let helper = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"
+    check(appName(forExecutablePath: helper) == "Google Chrome", "Chrome Helper는 Google Chrome으로 묶는다")
+    check(appName(forExecutablePath: "/usr/sbin/mds_stores") == "mds_stores", ".app 밖이면 실행 파일 이름")
+    check(overheatCulprit(["Chrome": 40, "Xcode": 10], unreadable: 30)?.name == "Chrome", "1위가 읽지 못한 몫보다 크면 이름을 댄다")
+    check(overheatCulprit(["Chrome": 40, "Xcode": 10], unreadable: 50) == nil, "읽지 못한 몫이 더 크면 이름 없이")
+    check(shouldAlertOverheat(app: "Chrome", today: "d2", memoDay: "d1", muted: true, alerted: ["Chrome"]), "날이 바뀌면 다시 알린다")
+    check(!shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: true, alerted: []), "'오늘은 그만'이면 그날은 없다")
+    check(!shouldAlertOverheat(app: "Chrome", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "같은 앱은 하루 한 번")
+    check(shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "다른 앱은 알린다")
     print(failures == 0 ? "selftest passed" : "selftest failed: \(failures)")
     return failures
 }
@@ -284,6 +382,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var jumpStep = 0
     private var iconGait: Gait = .calm  // 지금 아이콘이 뛰고 있는 단계. 착지(f1)할 때만 gait를 따라간다
     private var iconImages: [Int: NSImage] = [:]
+    private var overheatGate = OverheatGate()
+    private var overheatScanning = false
+    private var alertPanel: NSPanel?
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -984,6 +1085,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         cpuTimer = nil
         lastTicks = nil
         smoother.reset()
+        overheatGate.reset()
     }
 
     private func sampleCPU() {
@@ -997,6 +1099,163 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
         let shown = Int((smoother.smoothed ?? pct).rounded())
         headerDetail.stringValue = "CPU \(shown)% · \(gait.label)"
+        if overheatGate.push(pct) {
+            startOverheatScan(busy: overheatGate.window.mean)
+        }
+    }
+
+    // MARK: 과열 알림. 앱별 사용량은 그때만 2초 재고, 이름은 이 Mac 밖으로도 로그로도 나가지 않는다
+
+    private func todayString() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    private func startOverheatScan(busy: Double) {
+        let today = todayString()
+        let memoDay = defaults.string(forKey: "ro.overheat.day")
+        if memoDay == today && defaults.bool(forKey: "ro.overheat.muted") { return }  // 오늘은 그만
+        guard !overheatScanning else { return }
+        overheatScanning = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let culprit = Self.scanTopApp()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.overheatScanning = false
+                self.presentOverheat(culprit: culprit, busy: busy)
+            }
+        }
+    }
+
+    // 프로세스별 CPU 시간(초)과 앱 이름. rusage를 못 읽는 프로세스(시스템·root)는 빠진다
+    private static func processCPU() -> [pid_t: (app: String, seconds: Double)] {
+        var tb = mach_timebase_info()
+        mach_timebase_info(&tb)
+        let n = proc_listallpids(nil, 0)
+        guard n > 0 else { return [:] }
+        var pids = [pid_t](repeating: 0, count: Int(n) * 2)
+        let got = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        var out: [pid_t: (String, Double)] = [:]
+        var pathBuf = [CChar](repeating: 0, count: 4096)
+        for pid in pids.prefix(Int(max(0, got))) where pid > 0 {
+            var info = rusage_info_v4()
+            let rc = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+            }
+            guard rc == 0 else { continue }
+            let len = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
+            let path = len > 0 ? String(cString: pathBuf) : ""
+            let secs = machToSeconds(info.ri_user_time + info.ri_system_time, numer: tb.numer, denom: tb.denom)
+            out[pid] = (appName(forExecutablePath: path), secs)
+        }
+        return out
+    }
+
+    // 2초 동안 앱별로 CPU의 몇 %를 썼는지 재고, 읽지 못한 몫과 비교해 이름을 댈지 정한다
+    private static func scanTopApp() -> (name: String, share: Double)? {
+        guard let t0 = CPUTicks.read() else { return nil }
+        let a = processCPU()
+        Thread.sleep(forTimeInterval: 2.0)
+        guard let t1 = CPUTicks.read(), let busy = cpuPercent(from: t0, to: t1) else { return nil }
+        let b = processCPU()
+        let capacity = Double(t1.total &- t0.total) / Double(sysconf(Int32(_SC_CLK_TCK)))  // 코어 수 × 경과 초
+        guard capacity > 0 else { return nil }
+        var usage: [String: Double] = [:]
+        for (pid, now) in b {
+            guard let before = a[pid], now.seconds >= before.seconds else { continue }
+            usage[now.app, default: 0] += (now.seconds - before.seconds) / capacity * 100
+        }
+        let readable = usage.values.reduce(0, +)
+        return overheatCulprit(usage, unreadable: max(0, busy - readable))
+    }
+
+    private func presentOverheat(culprit: (name: String, share: Double)?, busy: Double) {
+        let today = todayString()
+        let memoDay = defaults.string(forKey: "ro.overheat.day")
+        var alerted = (memoDay == today) ? (defaults.stringArray(forKey: "ro.overheat.apps") ?? []) : []
+        guard shouldAlertOverheat(app: culprit?.name, today: today, memoDay: memoDay,
+                                  muted: defaults.bool(forKey: "ro.overheat.muted"), alerted: alerted) else { return }
+        if memoDay != today { defaults.set(false, forKey: "ro.overheat.muted") }
+        alerted.append(culprit?.name ?? "")
+        defaults.set(today, forKey: "ro.overheat.day")
+        defaults.set(alerted, forKey: "ro.overheat.apps")
+
+        // CPU %는 메뉴의 숫자와 같은 'Mac 전체 대비'다 (활동 모니터의 코어당 %와 다르다)
+        let detail = culprit.map { "가장 많이 쓰는 앱: \($0.name) (CPU \(Int($0.share.rounded()))%) · 1분째 바빠요" }
+            ?? "1분째 CPU \(Int(busy.rounded()))%로 바빠요 · 어떤 앱인지는 확인할 수 없어요"
+        showOverheatCard(detail: detail)
+    }
+
+    private func showOverheatCard(detail: String) {
+        alertPanel?.orderOut(nil)
+        let title = NSTextField(labelWithString: "Mac이 힘들어해요")
+        title.font = NSFont.boldSystemFont(ofSize: 13)
+        let body = NSTextField(wrappingLabelWithString: detail)
+        body.font = NSFont.systemFont(ofSize: 12)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 260
+        let open = NSButton(title: "활동 모니터 열기", target: self, action: #selector(openActivityMonitor))
+        open.bezelStyle = .rounded
+        open.keyEquivalent = "\r"
+        let mute = NSButton(title: "오늘은 그만", target: self, action: #selector(muteOverheatToday))
+        mute.bezelStyle = .inline
+        let buttons = NSStackView(views: [open, mute])
+        buttons.spacing = 10
+        let stack = NSStackView(views: [title, body, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        let size = stack.fittingSize
+
+        let box = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        box.material = .popover
+        box.state = .active
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 12
+        stack.frame = box.bounds
+        box.addSubview(stack)
+
+        // 메뉴 막대 모드는 아이콘 아래, 데스크톱 모드는 펫 옆
+        let vf = currentVisibleFrame()
+        var origin: NSPoint
+        if mode == .menubar, let icon = statusItem.button?.window?.frame {
+            origin = NSPoint(x: icon.midX - size.width / 2, y: vf.maxY - size.height - 8)
+        } else {
+            let pet = panel.frame
+            origin = NSPoint(x: pet.minX - size.width - 8, y: pet.maxY - size.height)
+            if origin.x < vf.minX + 8 { origin.x = pet.maxX + 8 }
+        }
+        origin.x = min(max(origin.x, vf.minX + 8), vf.maxX - size.width - 8)
+        origin.y = min(max(origin.y, vf.minY + 8), vf.maxY - size.height - 8)
+        let card = NSPanel(contentRect: NSRect(origin: origin, size: size),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        card.isOpaque = false
+        card.backgroundColor = .clear
+        card.hasShadow = true
+        card.level = .statusBar
+        card.becomesKeyOnlyIfNeeded = true
+        card.contentView = box
+        card.orderFrontRegardless()
+        alertPanel = card
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak card] in
+            card?.orderOut(nil)
+            if self?.alertPanel === card { self?.alertPanel = nil }
+        }
+    }
+
+    @objc private func openActivityMonitor() {
+        alertPanel?.orderOut(nil)
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+
+    @objc private func muteOverheatToday() {
+        alertPanel?.orderOut(nil)
+        defaults.set(todayString(), forKey: "ro.overheat.day")
+        defaults.set(true, forKey: "ro.overheat.muted")
     }
 
     // MARK: 메뉴 막대 아이콘 걸음 (07). 데스크톱 펫은 CPU에 맞춰 걷지 않는다
