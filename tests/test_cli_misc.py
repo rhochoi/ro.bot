@@ -38,5 +38,25 @@ class CliMiscTest(unittest.TestCase):
         self.assertIn("- a  [-]  -  /p/a", r.stdout)
 
 
+    def test_ask_rejects_empty_question_before_engine(self):
+        (self.home / ".ro").mkdir()
+        (self.home / ".ro" / "map.json").write_text(json.dumps({"projects": [], "tools": {}}))
+        r = self.ro("ask", "  ", "--yes")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("질문을 입력", r.stderr)
+
+    def test_setup_without_subcommand_shows_status(self):
+        r = self.ro("setup")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ro 설정 상태", r.stdout)
+
+    def test_show_lists_markers(self):
+        m = self.home / "map.json"
+        m.write_text(json.dumps({"generated_at": "now", "tools": {}, "projects": [
+            {"name": "b", "markers": ["node"], "languages": {"js": 1}, "git": None, "path": "/p/b", "summary": {}}]}))
+        r = self.ro("show", "--map", str(m))
+        self.assertIn("- b  [node,js]", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

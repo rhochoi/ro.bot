@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, fsutil, harden, learn, log, mapper, organize, route
+from . import ask, config, fsutil, harden, learn, log, organize, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -493,7 +493,7 @@ class PetRuntime:
                 "kind": e.get("kind", ""),
                 "summary": log.redact(str(e.get("summary", ""))),
             }
-            for e in today_events[-3:]
+            for e in today_events[-10:]
         ]
         safe_answer = None
         if last_answer:
@@ -540,23 +540,23 @@ class PetRuntime:
         if not question:
             return {"ok": False, "output": "질문을 입력해 주세요."}
         mapdata = ask.load_map(self.map_path)
-        if mapdata is None:
-            mapdata = mapper.build_map(mapper.DEFAULT_ROOTS)
-            mapper.save_map(mapdata, self.map_path)
+        if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
+            return {"ok": False, "reason": "needs_setup",
+                    "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
         rules = learn.load_rules(self.home)
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
-                      engine=engine, rules=rules, project=project)
+                      engine=engine or config.load(self.home).get("engine") or None, rules=rules, project=project)
         with self._lock:
             if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
                 return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
             self.busy = True
             self.busy_task = log.redact(question[:60])
         try:
-            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"])
+            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"], model=pl.get("model", ""))
             log.append("route", question[:80], {
                 "engine": pl["engine"], "category": pl["category"], "mode": "read",
                 "ok": res["ok"], "code": res["code"], "duration": res["duration"],
-                "projects": pl["projects"], "context_chars": len(pl["context"]), "via": "pet",
+                "projects": pl["projects"], "model": pl.get("model", ""), "context_chars": len(pl["context"]), "via": "pet",
             }, engine=pl["engine"], log_dir=self.log_dir)
             ans = {
                 "question": log.redact(question),
@@ -621,26 +621,33 @@ PET_HTML = r"""<!DOCTYPE html>
 <style>
   :root {
     --ink: #1A1917;
-    --chalk: #F3EFE6;
-    --chalk-soft: #E5DFD2;
+    --chalk: #F5F2EB;
+    --chalk-soft: #EFE9DC;
     --chalk-muted: #7E786D;
+    --accent: #FF4B1F;
+    --accent-hover: #E03E15;
+    --accent-soft: rgba(255, 75, 31, 0.12);
     --bot-fill: var(--ink);
     --bot-eye: var(--chalk);
-    --panel-bg: var(--chalk);
+    --panel-bg: #FFFFFF;
     --panel-fg: var(--ink);
-    --panel-soft: var(--chalk-soft);
-    --panel-border: rgba(26, 25, 23, 0.16);
+    --panel-soft: #F4F0E8;
+    --panel-border: rgba(26, 25, 23, 0.12);
+    --divider: #EAE7E0;
+    --muted: #7E786D;
     --bubble-fill: var(--ink);
     --bubble-fg: var(--chalk);
   }
-  /* 분필(Chalk) 모드: 브랜드 시트의 다크 카드 배색(분필 봇 + 먹색 배경 카드) */
+  /* 분필(Chalk) 다크 모드 */
   body.theme-chalk {
     --bot-fill: var(--chalk);
     --bot-eye: var(--ink);
-    --panel-bg: #1A1917;
+    --panel-bg: #232220;
     --panel-fg: #F3EFE6;
-    --panel-soft: #2A2825;
-    --panel-border: rgba(243, 239, 230, 0.18);
+    --panel-soft: #2E2C29;
+    --panel-border: rgba(243, 239, 230, 0.14);
+    --divider: #33312E;
+    --muted: #9E988C;
     --chalk-muted: #9E988C;
     --bubble-fill: #F3EFE6;
     --bubble-fg: #1A1917;
@@ -650,7 +657,7 @@ PET_HTML = r"""<!DOCTYPE html>
     margin: 0; padding: 0;
     width: 100%; height: 100%;
     background: transparent;
-    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif;
     color: var(--panel-fg);
     overflow: hidden;
   }
@@ -666,10 +673,9 @@ PET_HTML = r"""<!DOCTYPE html>
     flex-direction: column;
     justify-content: flex-end;
     align-items: flex-end;
-    padding: 16px 20px 18px 20px;
+    padding: 12px 14px 14px 14px;
     box-sizing: border-box;
   }
-  /* 화면 상단에 있을 때는 펫이 위쪽(flex-start)에 고정되고 말풍선이 그 아래로 열림 */
   body.place-top .stage {
     flex-direction: column-reverse;
     justify-content: flex-end;
@@ -677,9 +683,39 @@ PET_HTML = r"""<!DOCTYPE html>
   body.place-left .stage {
     align-items: flex-start;
   }
+
+  /* =========================================================
+     말풍선 패널 (Ro의 말풍선 메타포 카드)
+     ========================================================= */
+  .bubble {
+    width: 332px;
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    border: 1.5px solid var(--panel-border);
+    border-radius: 20px;
+    box-shadow: 0 16px 36px rgba(15, 14, 13, 0.22);
+    padding: 12px 13px 12px 13px;
+    margin-bottom: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    transition: opacity 0.16s ease, transform 0.16s cubic-bezier(.22,1,.36,1), background-color 0.2s ease, border-color 0.2s ease;
+    transform-origin: bottom right;
+    position: relative;
+    /* 창(오버레이 360×530) 안에 맞춘다: 상단 바·입력창은 고정, 탭 내용만 스크롤 */
+    flex: 0 1 auto;
+    min-height: 0;
+    max-height: min(440px, 100%);
+    overflow: hidden;
+    box-sizing: border-box;
+  }
+  .stage > .pet-wrap { flex-shrink: 0; }
+  .bubble.hidden {
+    display: none;
+  }
   body.place-top .bubble {
     margin-bottom: 0;
-    margin-top: 10px;
+    margin-top: 8px;
     transform-origin: top right;
   }
   body.place-left .bubble {
@@ -689,120 +725,340 @@ PET_HTML = r"""<!DOCTYPE html>
     transform-origin: top left;
   }
 
-  /* =========================================================
-     IN USE 스타일 대화 패널 (브랜드 시트 하단 우측 디자인 재현)
-     ========================================================= */
-  .bubble {
-    width: 326px;
-    max-width: 100%;
+  /* 말풍선 꼬리 (Ro와 패널을 잇는 유기적 연결부) */
+  .bubble-tail {
+    position: absolute;
+    width: 14px;
+    height: 14px;
     background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1.5px solid var(--panel-border);
-    border-radius: 20px;
-    box-shadow: 0 14px 34px rgba(15, 14, 13, 0.28);
-    padding: 12px 14px 13px 14px;
-    margin-bottom: 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-    transition: opacity 0.16s ease, transform 0.16s cubic-bezier(.22,1,.36,1);
-    transform-origin: bottom right;
+    border-right: 1.5px solid var(--panel-border);
+    border-bottom: 1.5px solid var(--panel-border);
+    bottom: -8px;
+    right: 38px;
+    transform: rotate(45deg);
+    border-bottom-right-radius: 3px;
+    z-index: 2;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
   }
-  .bubble.hidden {
-    display: none;
+  body.place-top .bubble-tail {
+    bottom: auto;
+    top: -8px;
+    border-right: none;
+    border-bottom: none;
+    border-left: 1.5px solid var(--panel-border);
+    border-top: 1.5px solid var(--panel-border);
+    border-top-left-radius: 3px;
+    border-bottom-right-radius: 0;
   }
-  /* 창(오버레이 360×520) 안에 맞춘다: 툴바·입력창은 고정, 가운데(팔레트·대화·카드·기록)만 스크롤 */
-  .bubble {
-    flex: 0 1 auto;
-    min-height: 0;
-    max-height: 100%;
-    box-sizing: border-box;
-    overflow: hidden;
+  body.place-left .bubble-tail {
+    right: auto;
+    left: 38px;
   }
-  .stage > .pet-wrap { flex-shrink: 0; }
-  .bubble-scroll {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-    margin-right: -6px;
-    padding-right: 6px;
-    scrollbar-width: thin;
-  }
-  .bubble-scroll > * { flex-shrink: 0; }
+
+  /* 상단 헤더 & 네비게이션 */
   .bubble-top {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding-bottom: 7px;
-    border-bottom: 1px solid var(--panel-border);
+    border-bottom: 1px solid var(--divider);
     cursor: grab;
   }
   .bubble-top:active { cursor: grabbing; }
-  .brand-tag {
+  .top-left {
     display: flex;
     align-items: center;
     gap: 6px;
-    font-size: 12.5px;
-    font-weight: 800;
-    letter-spacing: -0.02em;
+  }
+  .brand-tag {
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    color: var(--panel-fg);
   }
   .mood-tag {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
-    border: none;
-    padding: 2.5px 9px;
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    padding: 2px 7px;
     border-radius: 999px;
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 700;
     cursor: pointer;
+    transition: all 0.14s;
   }
-  .mood-tag:hover { opacity: 0.85; }
-  .toolbar {
+  .mood-tag:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .nav-tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: var(--panel-soft);
+    padding: 2px;
+    border-radius: 999px;
+    border: 1px solid var(--panel-border);
+  }
+  .nav-tab {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 2.5px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.14s ease, color 0.14s ease;
+  }
+  .nav-tab:hover {
+    color: var(--panel-fg);
+  }
+  .nav-tab.active {
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  }
+  .top-right {
     display: flex;
     align-items: center;
     gap: 4px;
-    flex-wrap: nowrap;
   }
-  .chip-btn {
+  .clear-chip-btn {
     background: var(--panel-soft);
     color: var(--panel-fg);
     border: none;
     border-radius: 999px;
-    padding: 3px 7px;
-    font-size: 10px;
+    padding: 2.5px 7px;
+    font-size: 9.5px;
     font-weight: 600;
+    cursor: pointer;
+  }
+  .clear-chip-btn:hover {
+    background: var(--divider);
+  }
+  .close-x-btn {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.14s, color 0.14s;
+  }
+  .close-x-btn:hover {
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+  }
+
+  /* 탭 컨텐츠 컨테이너 */
+  .tab-pane {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tab-pane.active {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
+  .tab-pane > * { flex-shrink: 0; }
+
+  /* 기본 (Home) 뷰 - 브리핑 & 필터 */
+  .greeting-section {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .greeting-title {
+    font-size: 14.5px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--panel-fg);
+    line-height: 1.25;
+  }
+  .greeting-sub {
+    font-size: 10.5px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .sub-filters {
+    display: flex;
+    gap: 5px;
+    margin-top: 2px;
+  }
+  .sub-pill {
+    background: var(--panel-soft);
+    color: var(--muted);
+    border: none;
+    border-radius: 999px;
+    padding: 2.5px 9px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.14s;
+  }
+  .sub-pill:hover {
+    color: var(--panel-fg);
+  }
+  .sub-pill.active {
+    background: var(--panel-fg);
+    color: var(--panel-bg);
+  }
+
+  /* 3열 통계 메트릭 박스 ("챗 대신 통계") */
+  .metrics-box {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    align-items: center;
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 13px;
+    padding: 7px 10px;
+  }
+  .metric-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+  .metric-value {
+    font-size: 16.5px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: var(--panel-fg);
+    line-height: 1.1;
+  }
+  .metric-label {
+    font-size: 9.5px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .metric-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--divider);
+  }
+
+  /* 게이트 승인 카드 (쓰기 승인 / 규칙 학습) */
+  .gate-box {
+    background: var(--panel-soft);
+    border: 1.5px solid var(--accent);
+    border-radius: 12px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .gate-head {
+    font-size: 10px;
+    font-weight: 800;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .gate-body {
+    font-size: 11px;
+    line-height: 1.35;
+    word-break: break-all;
+    color: var(--panel-fg);
+  }
+  .gate-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 2px;
+  }
+  .action-btn {
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.14s;
+  }
+  .action-btn.primary {
+    background: var(--panel-fg);
+    color: var(--panel-bg);
+  }
+  .action-btn.primary:hover { opacity: 0.88; }
+  .action-btn.ghost {
+    background: transparent;
+    color: var(--panel-fg);
+    border-color: var(--panel-border);
+  }
+  .action-btn.ghost:hover { background: var(--divider); }
+  .action-btn:disabled { opacity: 0.5; cursor: default; }
+  .gate-text {  /* 긴 후보 문장이 카드를 한없이 키우지 않게: 4줄까지, 전체는 title로 */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .fb-done { font-size: 10px; color: var(--muted); }
+
+  /* 파일 정리 탭: 정리안(카테고리별 건수) → 칩 = 쓰기 승인 요청 → 위 승인 카드에서 실행 */
+  .org-box {
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 9px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .org-summary { font-size: 11px; line-height: 1.4; color: var(--panel-fg); }
+  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
+  .org-cats:empty { display: none; }
+  .org-chip {
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 2.5px 8px;
+    font-size: 10px;
+    font-weight: 700;
     cursor: pointer;
     white-space: nowrap;
   }
-  .chip-btn:hover {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
-  }
+  .org-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .org-chip.quar { border-style: dashed; }
+  .org-msg { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+  .org-msg:empty { display: none; }
 
-  /* IN USE 대화 흐름 */
-  .chat-stream {
+  /* 최근 질문 답변 뷰 (답변 스트림) */
+  .qa-card {
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 13px;
+    padding: 8px 10px;
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 6px;
   }
   .user-msg-row {
     display: flex;
     justify-content: flex-end;
-    align-items: center;
-    gap: 5px;
   }
   .user-pill {
-    background: var(--panel-soft);
+    background: var(--panel-bg);
     color: var(--panel-fg);
-    padding: 5px 12px;
+    border: 1px solid var(--panel-border);
+    padding: 4px 10px;
     border-radius: 999px;
-    font-size: 11.5px;
+    font-size: 11px;
     font-weight: 600;
-    max-width: 82%;
+    max-width: 85%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -810,60 +1066,60 @@ PET_HTML = r"""<!DOCTYPE html>
   .ro-msg-row {
     display: flex;
     align-items: flex-start;
-    gap: 8px;
+    gap: 7px;
   }
-  /* 원형 아바타 안의 미니 ro (19u : 15u : 23u, 높이 8u : 6u : 6u 비례) */
   .mini-avatar {
-    width: 24px;
-    height: 24px;
-    min-width: 24px;
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
     border-radius: 50%;
-    background: var(--bubble-fill);
+    background: var(--panel-fg);
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     justify-content: center;
-    padding: 4.5px 4px 4.5px 5px;
-    gap: 1px;
+    padding: 4px 3.5px 4px 4.5px;
+    gap: 0.9px;
   }
   .mini-avatar.small {
-    width: 17px;
-    height: 17px;
-    min-width: 17px;
-    padding: 3px 2.5px 3px 3.5px;
-    gap: 0.8px;
+    width: 16px;
+    height: 16px;
+    min-width: 16px;
+    padding: 2.8px 2.3px 2.8px 3.2px;
+    gap: 0.7px;
   }
   .mini-h {
-    width: 10.5px; height: 4.5px;
-    background: var(--bubble-fg);
+    width: 9.8px; height: 4.2px;
+    background: var(--panel-bg);
     border-radius: 999px;
     position: relative;
   }
   .mini-h::before, .mini-h::after {
     content: "";
     position: absolute;
-    background: var(--bubble-fill);
+    background: var(--panel-fg);
     border-radius: 999px;
-    width: 1.2px;
-    top: 1.1px;
+    width: 1.1px;
+    top: 1.0px;
   }
-  .mini-h::before { height: 2.3px; left: 5px; }
-  .mini-h::after  { height: 1.9px; left: 7.2px; top: 1.3px; }
-  .mini-b { width: 8.3px; height: 3.4px; background: var(--bubble-fg); border-radius: 999px; }
-  .mini-l { width: 12.8px; height: 3.4px; background: var(--bubble-fg); border-radius: 999px; }
-  .mini-avatar.small .mini-h { width: 7.4px; height: 3.2px; }
-  .mini-avatar.small .mini-h::before { left: 3.5px; width: 0.9px; height: 1.6px; top: 0.8px; }
-  .mini-avatar.small .mini-h::after  { left: 5.1px; width: 0.9px; height: 1.3px; top: 0.95px; }
-  .mini-avatar.small .mini-b { width: 5.8px; height: 2.4px; }
-  .mini-avatar.small .mini-l { width: 9.0px; height: 2.4px; }
+  .mini-h::before { height: 2.1px; left: 4.7px; }
+  .mini-h::after  { height: 1.7px; left: 6.7px; top: 1.2px; }
+  .mini-b { width: 7.7px; height: 3.1px; background: var(--panel-bg); border-radius: 999px; }
+  .mini-l { width: 11.9px; height: 3.1px; background: var(--panel-bg); border-radius: 999px; }
+  .mini-avatar.small .mini-h { width: 7.0px; height: 3.0px; }
+  .mini-avatar.small .mini-h::before { left: 3.3px; width: 0.8px; height: 1.5px; top: 0.7px; }
+  .mini-avatar.small .mini-h::after  { left: 4.8px; width: 0.8px; height: 1.2px; top: 0.9px; }
+  .mini-avatar.small .mini-b { width: 5.4px; height: 2.2px; }
+  .mini-avatar.small .mini-l { width: 8.4px; height: 2.2px; }
 
   .ro-pill {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
-    padding: 8px 13px;
-    border-radius: 16px;
-    font-size: 11.5px;
-    line-height: 1.48;
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    padding: 7px 11px;
+    border-radius: 13px;
+    font-size: 11px;
+    line-height: 1.45;
     max-height: min(240px, 42vh);
     overflow-y: auto;
     white-space: pre-wrap;
@@ -876,123 +1132,390 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 6px;
+    font-size: 10px;
+    color: var(--muted);
     padding-left: 2px;
   }
-  .ro-sub-left {
+  .feedback-chips {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10.5px;
-    color: var(--chalk-muted);
-    font-weight: 500;
+    gap: 4px;
   }
-
-  /* 승인 카드 (규칙 학습 / 쓰기 승인) */
-  .gate-card {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
-    border-radius: 14px;
-    padding: 9px 11px;
-    font-size: 11.5px;
-    line-height: 1.4;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .gate-title { font-size: 10.5px; opacity: 0.72; font-weight: 700; }
-  .gate-text {  /* 긴 후보 문장이 카드를 한없이 키우지 않게: 4줄까지, 전체는 title로 */
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .fb-done { font-size: 10.5px; opacity: 0.8; }
-  .gate-actions { display: flex; gap: 6px; }
-  .pill-btn {
-    background: var(--bubble-fg);
-    color: var(--bubble-fill);
-    border: none;
+  .fb-btn {
+    background: var(--panel-bg);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
     border-radius: 999px;
-    padding: 4px 10px;
-    font-size: 10.5px;
+    padding: 2px 7px;
+    font-size: 9.5px;
     font-weight: 700;
     cursor: pointer;
   }
-  .pill-btn.ghost {
-    background: transparent;
-    color: var(--bubble-fg);
-    border: 1px solid currentColor;
+  .fb-btn:hover { background: var(--divider); }
+
+  /* 최근 활동 섹션 */
+  .section-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 1px;
   }
-  .pill-btn:hover { opacity: 0.88; }
-
-  .org-card.hidden { display: none; }
-  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
-  .org-msg { font-size: 10.5px; opacity: 0.72; min-height: 0; }
-  .org-msg:empty { display: none; }
-  .org-cats:empty { display: none; }
-  .chip-btn.quar { background: transparent; color: var(--bubble-fg); box-shadow: inset 0 0 0 1px var(--panel-soft); }
-
-  /* 최근 기록 3줄 리스트 (줄 잘림 방지) */
-  .logs {
+  .section-label {
     font-size: 10.5px;
-    color: var(--chalk-muted);
-    line-height: 16px;
-    max-height: 54px;
-    overflow: hidden;
-    border-top: 1px solid var(--panel-border);
-    padding-top: 5px;
+    font-weight: 800;
+    color: var(--muted);
+    letter-spacing: -0.01em;
+  }
+  .section-badge {
+    background: var(--panel-soft);
+    color: var(--muted);
+    padding: 1.5px 6px;
+    border-radius: 999px;
+    font-size: 9px;
+    font-weight: 700;
+    border: 1px solid var(--panel-border);
+  }
+  .activity-stream {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 5px;
+    max-height: 115px;
+    overflow-y: auto;
+    padding-right: 2px;
   }
-  .log-row {
-    height: 16px;
+  .empty-note { font-size: 10.5px; color: var(--muted); text-align: center; padding: 14px 0; }
+  .activity-card {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5.5px 9px;
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    font-size: 11px;
+    transition: background 0.12s;
+  }
+  .activity-card:hover {
+    background: var(--divider);
+  }
+  .act-dot {
+    width: 6.5px;
+    height: 6.5px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+  .act-dot.route {
+    background: var(--panel-fg);
+  }
+  .act-summary {
+    flex: 1;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    font-weight: 600;
+    color: var(--panel-fg);
+    letter-spacing: -0.01em;
+  }
+  .act-time {
+    font-size: 9.5px;
+    color: var(--muted);
+    flex-shrink: 0;
   }
 
-  /* 질문 입력 폼 */
+  /* 하단 입력 폼 (주황 '+' 버튼) */
   .ask-form {
+    margin-top: 2px;
+  }
+  .input-bar {
+    position: relative;
     display: flex;
-    gap: 6px;
-    margin-top: 1px;
+    align-items: center;
+    width: 100%;
   }
   .ask-input {
-    flex: 1;
+    width: 100%;
     background: var(--panel-soft);
     color: var(--panel-fg);
-    border: 1.5px solid transparent;
+    border: 1.5px solid var(--panel-border);
     border-radius: 999px;
-    padding: 7px 13px;
+    padding: 7px 38px 7px 13px;
     font-size: 11.5px;
     outline: none;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease;
     user-select: text;
     -webkit-user-select: text;
   }
   .ask-input:focus {
-    border-color: var(--panel-border);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
   }
-  .ask-input::placeholder { color: var(--chalk-muted); }
+  .ask-input::placeholder {
+    color: var(--muted);
+    font-size: 11px;
+  }
   .ask-submit {
-    background: var(--bubble-fill);
-    color: var(--bubble-fg);
+    position: absolute;
+    right: 4px;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #FFFFFF;
     border: none;
-    border-radius: 999px;
-    padding: 0 13px;
-    font-size: 11.5px;
-    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     cursor: pointer;
+    box-shadow: 0 2px 7px rgba(255, 75, 31, 0.35);
+    transition: transform 0.14s ease, background-color 0.14s ease;
   }
-  .ask-submit:disabled { opacity: 0.45; cursor: default; }
+  .ask-submit:hover {
+    background: var(--accent-hover);
+    transform: scale(1.05);
+  }
+  .ask-submit:active {
+    transform: scale(0.95);
+  }
+  .ask-submit:disabled {
+    opacity: 0.45;
+    cursor: default;
+    transform: none;
+  }
+
+  /* 타임라인 뷰 */
+  .timeline-head-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 2px;
+  }
+  .orange-tag {
+    background: var(--accent);
+    color: #FFFFFF;
+    font-size: 9.5px;
+    font-weight: 800;
+    padding: 2.5px 7.5px;
+    border-radius: 6px;
+    letter-spacing: -0.01em;
+  }
+  .timeline-counter {
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .timeline-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 245px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .timeline-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6.5px 9px;
+    background: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    border-radius: 11px;
+    font-size: 11px;
+  }
+  .step-badge {
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--accent);
+    min-width: 17px;
+    line-height: 1.3;
+  }
+  .timeline-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .timeline-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 9.5px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .timeline-text {
+    font-size: 11px;
+    line-height: 1.35;
+    color: var(--panel-fg);
+    word-break: break-word;
+  }
+
+  /* 설정 뷰 */
+  .settings-stream {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+  .setting-block {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--divider);
+  }
+  .setting-block:last-child {
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .block-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .mood-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 5px;
+  }
+  .mood-btn {
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 5px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.12s;
+  }
+  .mood-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .mood-btn.active {
+    background: var(--accent);
+    color: #FFFFFF;
+    border-color: var(--accent);
+    font-weight: 800;
+  }
+  .options-row {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .opt-btn {
+    flex: 1;
+    min-width: 58px;
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    padding: 4px 6px;
+    font-size: 9.8px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.12s;
+  }
+  .opt-btn:hover {
+    border-color: var(--panel-fg);
+  }
+  .opt-btn.active {
+    background: var(--panel-fg);
+    color: var(--panel-bg);
+    border-color: var(--panel-fg);
+    font-weight: 800;
+  }
+  .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 2px 0;
+  }
+  .toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .toggle-name {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--panel-fg);
+  }
+  .toggle-sub {
+    font-size: 9.5px;
+    color: var(--muted);
+  }
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: var(--panel-soft);
+    border: 1px solid var(--panel-border);
+    transition: 0.2s;
+    border-radius: 999px;
+  }
+  .slider:before {
+    position: absolute;
+    content: "";
+    height: 16px;
+    width: 16px;
+    left: 2px;
+    bottom: 2px;
+    background-color: var(--panel-fg);
+    transition: 0.2s;
+    border-radius: 50%;
+  }
+  input:checked + .slider {
+    background-color: var(--accent);
+    border-color: var(--accent);
+  }
+  input:checked + .slider:before {
+    transform: translateX(16px);
+    background-color: #FFFFFF;
+  }
+  .act-chips-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .act-btn {
+    background: var(--panel-soft);
+    color: var(--panel-fg);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px;
+    padding: 2.5px 7px;
+    font-size: 9.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .act-btn:hover {
+    background: var(--panel-fg);
+    color: var(--panel-bg);
+  }
+  .act-btn.active {
+    background: var(--accent) !important;
+    color: #FFFFFF !important;
+    border-color: var(--accent) !important;
+    font-weight: 800;
+  }
 
   /* =========================================================
      RO 캐릭터 본체 — CONSTRUCTION 정밀 그리드 (1u = 3.8px)
      - 머리: 19u × 8u
-     - 간격: 1u
      - 몸:   15u × 6u
-     - 간격: 1u
      - 바닥: 23u × 6u
      - 눈:   머리 왼쪽에서 9u 지점에 왼눈(2u × 4u), 2u 간격, 오른눈(1.8u × 3.3u)
      ========================================================= */
@@ -1003,7 +1526,7 @@ PET_HTML = r"""<!DOCTYPE html>
     flex-direction: column;
     align-items: center;
     cursor: grab;
-    padding: 12px 14px 10px 14px;
+    padding: 10px 14px 8px 14px;
     overflow: visible;
   }
   .pet-wrap:active { cursor: grabbing; }
@@ -1012,10 +1535,10 @@ PET_HTML = r"""<!DOCTYPE html>
     width: calc(23 * var(--u));
     display: flex;
     flex-direction: column;
-    align-items: flex-start; /* 왼쪽 정렬! 기록처럼 왼쪽 끝이 맞는다 */
-    gap: calc(1 * var(--u)); /* 간격 1u */
+    align-items: flex-start;
+    gap: calc(1 * var(--u));
     position: relative;
-    filter: drop-shadow(0 4px 10px rgba(15, 14, 13, 0.26));
+    filter: drop-shadow(0 4px 10px rgba(15, 14, 13, 0.24));
     overflow: visible;
     margin-right: 2px;
   }
@@ -1031,7 +1554,6 @@ PET_HTML = r"""<!DOCTYPE html>
       box-shadow 0.2s ease;
     position: relative;
   }
-  /* 정밀 그리드: 머리 19u×8u, 몸 15u×6u, 바닥 23u×6u */
   .pill-head {
     width: calc(19 * var(--u));
     height: calc(8 * var(--u));
@@ -1045,7 +1567,7 @@ PET_HTML = r"""<!DOCTYPE html>
     height: calc(6 * var(--u));
   }
 
-  /* 점토(Clay) 질감 모드 */
+  /* 점토(Clay) 모드 */
   body.material-clay .pill {
     box-shadow:
       inset 0 2.5px 4px rgba(255, 255, 255, 0.22),
@@ -1062,10 +1584,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid rgba(26, 25, 23, 0.14);
   }
 
-  /* =========================================================
-     MATERIAL — 점토(Clay), 리퀴드 글라스(Liquid Glass), 젤리(Jelly) 3종
-     ========================================================= */
-  /* 1. 리퀴드 글라스 (Liquid Glass): 은은하게 뒤가 비치는 반투명 밀키 리퀴드 글라스 + 양끝 프리즘 림 */
+  /* 리퀴드 글라스(Liquid Glass) 모드 */
   body.material-glass .ro-bot {
     filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.16));
   }
@@ -1076,77 +1595,65 @@ PET_HTML = r"""<!DOCTYPE html>
       180deg,
       rgba(255, 255, 255, 0.72) 0%,
       rgba(252, 251, 248, 0.54) 52%,
-      rgba(244, 241, 235, 0.64) 100%
+      rgba(240, 238, 230, 0.62) 100%
     );
-    backdrop-filter: blur(18px) saturate(190%);
-    -webkit-backdrop-filter: blur(18px) saturate(190%);
-    border: 1.2px solid rgba(255, 255, 255, 0.88);
+    border: 1px solid rgba(255, 255, 255, 0.88);
+    backdrop-filter: blur(12px) saturate(145%);
+    -webkit-backdrop-filter: blur(12px) saturate(145%);
     box-shadow:
-      inset 0 2.5px 4px rgba(255, 255, 255, 0.92),
-      inset 3.5px 0 6px rgba(255, 210, 160, 0.38),
-      inset -3.5px 0 6px rgba(175, 214, 255, 0.38),
-      inset 0 -3px 6px rgba(196, 190, 180, 0.34),
+      inset 0 1.5px 3px rgba(255, 255, 255, 0.92),
+      inset 0 -2px 4px rgba(26, 25, 23, 0.18),
+      inset 2.5px 0 3px rgba(255, 255, 255, 0.55),
+      inset -2.5px 0 3px rgba(255, 255, 255, 0.45),
       0 4px 10px rgba(15, 14, 13, 0.12);
   }
-  body.material-glass .eyes {
-    z-index: 2;
+  body.material-glass .eyes { z-index: 2; }
+  body.material-glass .eye { background: #1A1917; }
+  body.material-glass .resolved-arch { stroke: #1A1917; }
+  body.theme-chalk.material-glass .pill {
+    background: linear-gradient(
+      180deg,
+      rgba(55, 53, 50, 0.72) 0%,
+      rgba(38, 36, 34, 0.62) 55%,
+      rgba(26, 25, 23, 0.78) 100%
+    );
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    box-shadow:
+      inset 0 1.5px 3px rgba(255, 255, 255, 0.42),
+      inset 0 -2px 4px rgba(0, 0, 0, 0.65),
+      inset 2px 0 3px rgba(255, 255, 255, 0.28),
+      inset -2px 0 3px rgba(255, 255, 255, 0.18),
+      0 6px 14px rgba(0, 0, 0, 0.42);
   }
-  body.material-glass .eye {
-    background: #1A1917;
-    box-shadow: none;
-  }
-  body.material-glass .resolved-arch {
-    stroke: #1A1917;
-  }
+  body.theme-chalk.material-glass .eye { background: #F3EFE6; }
+  body.theme-chalk.material-glass .resolved-arch { stroke: #F3EFE6; }
 
-  /* 2. 젤리 · Jelly (반투명 탄제린/코랄 구미 젤리 + 내부 서브서피스 산란광 + 매끈한 하이라이트) */
+  /* 젤리(Jelly) 모드 */
   body.material-jelly .ro-bot {
-    filter: drop-shadow(0 8px 16px rgba(235, 92, 24, 0.26));
+    filter: drop-shadow(0 6px 14px rgba(15, 14, 13, 0.20));
   }
   body.material-jelly .pill {
+    z-index: 1;
     overflow: hidden;
-    background:
-      radial-gradient(
-        90% 95% at 48% 54%,
-        rgba(255, 172, 108, 0.94) 0%,
-        rgba(255, 122, 52, 0.90) 56%,
-        rgba(232, 84, 22, 0.88) 100%
-      );
-    backdrop-filter: blur(10px) saturate(165%);
-    -webkit-backdrop-filter: blur(10px) saturate(165%);
-    border: 1px solid rgba(255, 214, 182, 0.78);
-    box-shadow:
-      inset 0 3px 4px rgba(255, 242, 226, 0.88),
-      inset 0 -3.5px 6px rgba(188, 52, 6, 0.52),
-      0 4px 11px rgba(224, 82, 18, 0.22);
-  }
-  body.material-jelly .pill::before {
-    content: "";
-    position: absolute;
-    top: 3px;
-    left: 8px;
-    width: 36%;
-    height: 2.3px;
-    border-radius: 999px;
     background: linear-gradient(
-      90deg,
-      rgba(255, 255, 255, 0.92) 0%,
-      rgba(255, 255, 255, 0.32) 70%,
-      rgba(255, 255, 255, 0.0) 100%
+      180deg,
+      rgba(255, 255, 255, 0.90) 0%,
+      rgba(250, 248, 242, 0.78) 45%,
+      rgba(235, 231, 220, 0.86) 100%
     );
-    pointer-events: none;
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow:
+      inset 0 3px 5px rgba(255, 255, 255, 0.98),
+      inset 0 -3px 5px rgba(26, 25, 23, 0.16),
+      0 3px 8px rgba(15, 14, 13, 0.14);
   }
-  body.material-jelly .eyes {
-    z-index: 2;
-  }
-  body.material-jelly .eye {
-    background: #1A1917;
-  }
-  body.material-jelly .resolved-arch {
-    stroke: #1A1917;
-  }
+  body.material-jelly .eyes { z-index: 2; }
+  body.material-jelly .eye { background: #1A1917; }
+  body.material-jelly .resolved-arch { stroke: #1A1917; }
 
-  /* 눈 둘 — 머리 왼쪽 끝에서 정확히 9u 지점 시작, 눈 사이 간격 2u */
+  /* 눈 둘 */
   .eyes {
     position: absolute;
     left: calc(9 * var(--u));
@@ -1166,7 +1673,6 @@ PET_HTML = r"""<!DOCTYPE html>
       border-radius 0.18s ease,
       transform 0.18s ease;
   }
-  /* 왼눈 2u × 4u, 오른눈 1.8u × 3.3u */
   .eye-l {
     width: calc(2 * var(--u));
     height: calc(4 * var(--u));
@@ -1177,7 +1683,6 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .eye.blink { height: 2.5px !important; }
 
-  /* 풀어냄(resolved) 전용 곡선 눈 SVG (기본은 숨김) */
   .resolved-arch {
     display: none;
     width: calc(6.2 * var(--u));
@@ -1189,25 +1694,12 @@ PET_HTML = r"""<!DOCTYPE html>
     fill: none;
   }
 
-  /* =========================================================
-     EXPRESSIONS — 눈과 층으로만 (브랜드 시트 6가지 표정)
-     ========================================================= */
+  /* 6가지 표정 */
+  .mood-idle .pill-head, .action-breathe .pill-head { animation: breatheHead 3.0s infinite ease-in-out; }
+  .mood-idle .pill-body, .action-breathe .pill-body { animation: breatheBody 3.0s infinite ease-in-out; }
+  .mood-idle .pill-base, .action-breathe .pill-base { animation: breatheBase 3.0s infinite ease-in-out; }
 
-  /* 1. 기본 (idle): 3개 층 독립 시차 호흡 */
-  .mood-idle .pill-head, .action-breathe .pill-head {
-    animation: breatheHead 3.0s infinite ease-in-out;
-  }
-  .mood-idle .pill-body, .action-breathe .pill-body {
-    animation: breatheBody 3.0s infinite ease-in-out;
-  }
-  .mood-idle .pill-base, .action-breathe .pill-base {
-    animation: breatheBase 3.0s infinite ease-in-out;
-  }
-
-  /* 2. 기록 중 (recording): 아래를 보며 바닥 층이 길어진다 */
-  .mood-recording .eyes {
-    top: 66%;
-  }
+  .mood-recording .eyes { top: 66%; }
   .mood-recording .eye-l { width: calc(1.8 * var(--u)); height: calc(1.9 * var(--u)); }
   .mood-recording .eye-r { width: calc(1.6 * var(--u)); height: calc(1.7 * var(--u)); }
   .mood-recording .pill-base {
@@ -1215,7 +1707,6 @@ PET_HTML = r"""<!DOCTYPE html>
     animation: baseGrow 0.95s infinite alternate ease-in-out;
   }
 
-  /* 3. 집중 (focus): 하나만 본다 (가로 일자 눈 '— —') */
   .mood-focus .eyes { left: calc(8.6 * var(--u)); gap: calc(1.4 * var(--u)); }
   .mood-focus .eye-l { width: calc(2.8 * var(--u)); height: calc(1.3 * var(--u)); border-radius: 999px; }
   .mood-focus .eye-r { width: calc(2.5 * var(--u)); height: calc(1.3 * var(--u)); border-radius: 999px; }
@@ -1225,14 +1716,12 @@ PET_HTML = r"""<!DOCTYPE html>
     animation: baseGrow 0.85s infinite alternate ease-in-out;
   }
 
-  /* 4. 불안 (anxious): 눈이 작아지고 층이 어긋난다 */
   .mood-anxious .eye-l { width: calc(1.5 * var(--u)); height: calc(1.7 * var(--u)); }
   .mood-anxious .eye-r { width: calc(1.2 * var(--u)); height: calc(1.4 * var(--u)); }
   .mood-anxious .pill-head { transform: translateX(calc(-1.1 * var(--u))); }
   .mood-anxious .pill-body { transform: translateX(calc(1.8 * var(--u))); }
   .mood-anxious .pill-base { transform: translateX(calc(0.3 * var(--u))); }
 
-  /* 5. 발견 (discovery): 눈이 커지고 머리가 들린다 */
   .mood-discovery .eye-l { width: calc(2.6 * var(--u)); height: calc(3.0 * var(--u)); border-radius: 50%; }
   .mood-discovery .eye-r { width: calc(2.1 * var(--u)); height: calc(2.5 * var(--u)); border-radius: 50%; }
   .mood-discovery .pill-head {
@@ -1240,22 +1729,13 @@ PET_HTML = r"""<!DOCTYPE html>
     transform: translateY(calc(-0.7 * var(--u)));
   }
 
-  /* 6. 풀어냄 (resolved): 브랜드 시트의 부드러운 둥근 호 눈 + 바닥이 길게 뻗는다 */
   .mood-resolved .eyes { left: calc(8.8 * var(--u)); }
   .mood-resolved .eye { display: none; }
   .mood-resolved .resolved-arch { display: block; }
   .mood-resolved .pill-body { width: calc(13 * var(--u)) !important; }
   .mood-resolved .pill-base { width: calc(25.5 * var(--u)) !important; }
 
-  /* =========================================================
-     MOTIONS & INTERACTIONS — 브랜드 모션 가이드 12종
-     1. 몸은 따로 움직인다 (머리/몸/바닥 시차 분절)
-     2. 눈이 먼저 간다 (눈 리드 모션)
-     3. 원래 수에 남지 않는다 (스쿼시 앤 스트레치 탄성)
-     4. 몸짓, 느낌을 분절한다 (물리적 무게감)
-     ========================================================= */
-
-  /* A-1. 대기 · 숨쉬기 (breathe): 3.0s 주기, 3개 층 독립 시차 호흡 */
+  /* 12종 모션 키프레임 & 액션 */
   @keyframes breatheHead {
     0%, 100% { transform: translateY(0) scaleX(1); }
     22%      { transform: translateY(-2.2px) scaleX(0.985); }
@@ -1274,16 +1754,9 @@ PET_HTML = r"""<!DOCTYPE html>
     70%      { transform: translateY(0) scaleX(1.012); }
   }
 
-  /* A-2. 두리번 (look_around): 눈이 먼저 가고 머리가 1u 뒤따른다 */
-  .action-look-around .eyes {
-    animation: lookEyes 3.0s infinite cubic-bezier(.22,1,.36,1);
-  }
-  .action-look-around .pill-head {
-    animation: lookHead 3.0s infinite cubic-bezier(.22,1,.36,1);
-  }
-  .action-look-around .pill-body {
-    animation: lookBody 3.0s infinite cubic-bezier(.22,1,.36,1);
-  }
+  .action-look-around .eyes { animation: lookEyes 3.0s infinite cubic-bezier(.22,1,.36,1); }
+  .action-look-around .pill-head { animation: lookHead 3.0s infinite cubic-bezier(.22,1,.36,1); }
+  .action-look-around .pill-body { animation: lookBody 3.0s infinite cubic-bezier(.22,1,.36,1); }
   @keyframes lookEyes {
     0%, 100% { transform: translate(0, -50%); }
     15%, 38% { transform: translate(calc(-2.8 * var(--u)), -50%); }
@@ -1303,16 +1776,9 @@ PET_HTML = r"""<!DOCTYPE html>
     94%      { transform: translateX(0); }
   }
 
-  /* A-3. 걷기 / 이동 (walk): 바닥이 먼저 가고 몸-머리가 뒤따르는 분절 스텝 */
-  .action-walk .pill-base {
-    animation: walkBase 1.3s infinite ease-in-out;
-  }
-  .action-walk .pill-body {
-    animation: walkBody 1.3s infinite ease-in-out;
-  }
-  .action-walk .pill-head {
-    animation: walkHead 1.3s infinite ease-in-out;
-  }
+  .action-walk .pill-base { animation: walkBase 1.3s infinite ease-in-out; }
+  .action-walk .pill-body { animation: walkBody 1.3s infinite ease-in-out; }
+  .action-walk .pill-head { animation: walkHead 1.3s infinite ease-in-out; }
   @keyframes walkBase {
     0%, 100% { transform: translateX(0); }
     25%      { transform: translateX(calc(2.2 * var(--u) * var(--gait-amp, 1))) scaleX(1.04); }
@@ -1327,141 +1793,75 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   @keyframes walkHead {
     0%, 100% { transform: translateX(0); }
-    42%      { transform: translateX(calc(1.1 * var(--u) * var(--gait-amp, 1))); }
+    42%      { transform: translateX(calc(1.0 * var(--u) * var(--gait-amp, 1))); }
     50%      { transform: translateX(0); }
-    92%      { transform: translateX(calc(-1.1 * var(--u) * var(--gait-amp, 1))); }
+    92%      { transform: translateX(calc(-1.0 * var(--u) * var(--gait-amp, 1))); }
   }
 
   /* CPU 걸음 (07): 기본 표정이고 다른 동작이 없을 때만 적용한다 (잡기 > 동작 > 표정 > CPU 걸음).
-     느긋은 3.2초 숨쉬기, 그 위로는 제자리걸음 1.6 / 0.8 / 0.4초. 바쁨부터 층이 더 크게 흔들리고, 과열은 눈을 가늘게 뜬다 */
+     한가해도 멈춰 있지 않게 느긋은 3.2초로 작게 걷고, 1.6 / 0.8 / 0.4초로 빨라진다.
+     바쁨부터 층이 더 크게 흔들리고, 과열은 눈을 가늘게 뜬다 */
+  body[data-gait="calm"] { --gait-period: 3.2s; --gait-amp: 0.5; }
   body[data-gait="walk"] { --gait-period: 1.6s; --gait-amp: 1; }
   body[data-gait="busy"] { --gait-period: 0.8s; --gait-amp: 1.5; }
   body[data-gait="hot"]  { --gait-period: 0.4s; --gait-amp: 1.5; }
-  body[data-gait="calm"] .mood-idle:not([class*="action-"]) .pill { animation-duration: 3.2s; }
-  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-base {
+  body[data-gait] .mood-idle:not([class*="action-"]) .pill-base {
     animation: walkBase var(--gait-period) infinite ease-in-out;
   }
-  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-body {
+  body[data-gait] .mood-idle:not([class*="action-"]) .pill-body {
     animation: walkBody var(--gait-period) infinite ease-in-out;
   }
-  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-head {
+  body[data-gait] .mood-idle:not([class*="action-"]) .pill-head {
     animation: walkHead var(--gait-period) infinite ease-in-out;
   }
   body[data-gait="hot"] .mood-idle:not([class*="action-"]) .eye-l { height: calc(1.1 * var(--u)); border-radius: 999px; }
   body[data-gait="hot"] .mood-idle:not([class*="action-"]) .eye-r { height: calc(1.0 * var(--u)); border-radius: 999px; }
 
-  /* A-4. 생각 / 계산 (thinking): 머리 갸우뚱 & 엇박자 펄스 & 시선 위 */
-  .action-thinking .pill-head {
-    animation: thinkHead 2.2s infinite ease-in-out;
-  }
-  .action-thinking .pill-body {
-    animation: thinkBody 2.2s infinite ease-in-out;
-  }
-  .action-thinking .pill-base {
-    animation: thinkBase 2.2s infinite ease-in-out;
-  }
-  .action-thinking .eyes {
-    transform: translate(calc(0.8 * var(--u)), calc(-50% - 2.8px)) !important;
-  }
+  .action-thinking .pill-head { animation: thinkHead 1.6s infinite ease-in-out; }
+  .action-thinking .eyes { animation: thinkEyes 1.6s infinite ease-in-out; }
   @keyframes thinkHead {
-    0%, 100% { transform: rotate(-3.5deg) translateY(-2.2px); }
-    50%      { transform: rotate(-1.0deg) translateY(-3.2px); }
+    0%, 100% { transform: rotate(0deg) translateY(0); }
+    40%      { transform: rotate(-5deg) translateY(-2px); }
+    75%      { transform: rotate(2deg) translateY(0); }
   }
-  @keyframes thinkBody {
-    0%, 100% { transform: translateX(calc(0.7 * var(--u))); }
-    50%      { transform: translateX(calc(-0.5 * var(--u))); }
-  }
-  @keyframes thinkBase {
-    0%, 100% { transform: translateX(calc(-0.4 * var(--u))); }
-    50%      { transform: translateX(calc(0.6 * var(--u))); }
+  @keyframes thinkEyes {
+    0%, 100% { transform: translate(0, -50%); }
+    40%      { transform: translate(1px, -55%); }
   }
 
-  /* A-5. 깜짝 / 일어나기 (alert): 솟구침 & 눈 커짐 & 탄성 안착 */
-  .action-alert .pill-head {
-    animation: alertHead 1.5s cubic-bezier(.22,1,.36,1) forwards;
-  }
-  .action-alert .pill-body {
-    animation: alertBody 1.5s cubic-bezier(.22,1,.36,1) forwards;
-  }
-  .action-alert .eyes {
-    animation: alertEyes 1.5s cubic-bezier(.22,1,.36,1) forwards;
-  }
-  @keyframes alertHead {
-    0%   { transform: translateY(0); }
-    22%  { transform: translateY(-9px) scaleY(1.12) scaleX(0.95); }
-    45%  { transform: translateY(2px) scaleY(0.92) scaleX(1.05); }
-    70%  { transform: translateY(-1.8px) scaleY(1.02); }
-    100% { transform: translateY(0) scale(1); }
-  }
-  @keyframes alertBody {
-    0%   { transform: translateY(0); }
-    28%  { transform: translateY(-5px) scaleY(1.06); }
-    50%  { transform: translateY(1.2px) scaleY(0.95); }
+  .action-alert .ro-bot { animation: alertJump 0.6s cubic-bezier(.17,.89,.32,1.28); }
+  .action-alert .eye-l { width: calc(2.8 * var(--u)); height: calc(4.6 * var(--u)); border-radius: 50%; }
+  .action-alert .eye-r { width: calc(2.4 * var(--u)); height: calc(4.0 * var(--u)); border-radius: 50%; }
+  @keyframes alertJump {
+    0%   { transform: translateY(0) scaleY(1); }
+    30%  { transform: translateY(-12px) scaleY(1.08); }
+    55%  { transform: translateY(2px) scaleY(0.95); }
+    75%  { transform: translateY(-3px) scaleY(1.02); }
     100% { transform: translateY(0) scaleY(1); }
   }
-  @keyframes alertEyes {
-    0%   { transform: translate(0, -50%) scale(1); }
-    24%  { transform: translate(0, calc(-50% - 2.5px)) scale(1.18); }
-    60%  { transform: translate(0, calc(-50% - 1.2px)) scale(1.10); }
-    100% { transform: translate(0, -50%) scale(1); }
+
+  .action-drowsy .pill-head { transform: translateY(calc(1.2 * var(--u))); }
+  .action-drowsy .eye-l, .action-drowsy .eye-r { height: 2px !important; border-radius: 999px; }
+  .action-drowsy .ro-bot { animation: drowsySway 4.8s infinite ease-in-out; }
+  @keyframes drowsySway {
+    0%, 100% { transform: translateY(0) rotate(0deg); }
+    50%      { transform: translateY(2px) rotate(1.2deg); }
   }
 
-  /* A-6. 졸음 (drowsy): 머리 침하 & 실눈 & 느린 6초 심호흡 */
-  .action-drowsy .pill-head {
-    transform: translateY(calc(1.4 * var(--u)));
-    animation: drowsyHead 6.0s infinite ease-in-out !important;
-  }
-  .action-drowsy .pill-body {
-    transform: scaleY(0.92);
-    animation: drowsyBody 6.0s infinite ease-in-out !important;
-  }
-  .action-drowsy .eye {
-    height: 1.5px !important;
-    border-radius: 999px !important;
-    opacity: 0.85;
-  }
-  @keyframes drowsyHead {
-    0%, 100% { transform: translateY(calc(1.4 * var(--u))); }
-    50%      { transform: translateY(calc(0.6 * var(--u))); }
-  }
-  @keyframes drowsyBody {
-    0%, 100% { transform: scaleY(0.92); }
-    50%      { transform: scaleY(0.97); }
-  }
-
-  /* B-2. 쓰다듬기 (pet / hover): 폭신하게 눌림 & 기분 좋은 호 눈('⌒ ⌒') & 살랑임 */
-  .action-pet .ro-bot {
-    animation: petWiggle 0.7s infinite alternate ease-in-out;
-  }
   .action-pet .pill-head {
-    transform: translateY(calc(0.9 * var(--u))) scaleY(0.91) scaleX(1.05);
+    transform: translateY(calc(1.4 * var(--u))) scaleX(1.04);
   }
-  .action-pet .pill-body {
-    transform: scaleY(0.93) scaleX(1.02);
+  .action-pet .eye-l, .action-pet .eye-r {
+    height: 2px !important;
+    border-radius: 999px;
   }
-  .action-pet .eye { display: none !important; }
-  .action-pet .resolved-arch {
-    display: block !important;
-    transform: translateY(-0.8px);
-  }
-  @keyframes petWiggle {
-    0%   { transform: rotate(-1.8deg); }
-    100% { transform: rotate(1.8deg); }
-  }
+  .action-pet .pill-body { transform: translateY(calc(0.6 * var(--u))); }
 
-  /* B-3. 잡기 · 끌기 (drag): 세로로 늘어남 & 바닥이 무게로 처짐 */
   .action-drag .ro-bot {
-    transform: scaleY(1.15) scaleX(0.92);
-  }
-  .action-drag .pill-head {
-    transform: translateY(-2.5px);
+    transform: scaleY(1.10) scaleX(0.94);
   }
   .action-drag .pill-base {
-    transform: translateY(3.5px) scaleX(0.96);
-    box-shadow: 0 10px 22px rgba(15, 14, 13, 0.35);
-  }
-  .action-drag .eyes {
-    top: 40%;
+    transform: translateY(calc(1.4 * var(--u)));
   }
 
   /* 메뉴 막대 쪽으로 끌 때: 위로 떠오르며 아이콘 크기로 줄고, 눈은 위를 본다 (--dock 0→1) */
@@ -1473,118 +1873,49 @@ PET_HTML = r"""<!DOCTYPE html>
   .pet-wrap.docking .eyes { top: 18%; }
   .pet-wrap.docking .pet-label { opacity: calc(1 - 2 * var(--dock, 0)); }
 
-  /* B-4. 흔들기 (shake): 층들이 좌우로 요동치고 작은 눈으로 어긋남 */
   .action-shake .ro-bot {
-    animation: shakeJitter 0.11s infinite linear;
+    animation: shakeAnim 0.35s infinite ease-in-out;
   }
-  .action-shake .pill-head { transform: translateX(calc(-1.6 * var(--u))); }
-  .action-shake .pill-body { transform: translateX(calc(2.0 * var(--u))); }
-  .action-shake .pill-base { transform: translateX(calc(-0.9 * var(--u))); }
-  .action-shake .eye-l { width: calc(1.3 * var(--u)) !important; height: calc(1.4 * var(--u)) !important; }
-  .action-shake .eye-r { width: calc(1.1 * var(--u)) !important; height: calc(1.2 * var(--u)) !important; }
-  @keyframes shakeJitter {
-    0%   { transform: translate(-2.5px, 1.2px) rotate(-1.5deg); }
-    50%  { transform: translate(2.5px, -1.2px) rotate(1.5deg); }
-    100% { transform: translate(-1.2px, -2px) rotate(0deg); }
+  @keyframes shakeAnim {
+    0%, 100% { transform: translateX(0); }
+    25%      { transform: translateX(-6px) rotate(-3deg); }
+    75%      { transform: translateX(6px) rotate(3deg); }
   }
 
-  /* B-5. 놓기 · 착지 (drop): 착지 스쿼시 & 튀어오르는 스프링 바운스 */
   .action-drop .ro-bot {
-    animation: dropImpact 0.62s cubic-bezier(.22,1,.36,1) forwards;
+    animation: dropSquash 0.65s cubic-bezier(.22,1,.36,1);
   }
-  @keyframes dropImpact {
-    0%   { transform: scaleY(0.74) scaleX(1.26) translateY(4px); }
-    34%  { transform: scaleY(1.14) scaleX(0.92) translateY(-6px); }
-    64%  { transform: scaleY(0.95) scaleX(1.03) translateY(1.5px); }
-    84%  { transform: scaleY(1.02) scaleX(0.99) translateY(-0.8px); }
-    100% { transform: scale(1) translateY(0); }
-  }
-
-  /* C-1. 성공 / 해결 (success): 기쁨의 점프 & 웃는 눈 & 26u 만폭 */
-  .action-success .ro-bot {
-    animation: joyHop 0.78s cubic-bezier(.22,1,.36,1) infinite alternate;
-  }
-  .action-success .eye { display: none !important; }
-  .action-success .resolved-arch { display: block !important; }
-  .action-success .pill-body { width: calc(13 * var(--u)) !important; }
-  .action-success .pill-base { width: calc(25.5 * var(--u)) !important; }
-  @keyframes joyHop {
-    0%   { transform: translateY(0) scaleY(0.95) scaleX(1.04); }
-    45%  { transform: translateY(-11px) scaleY(1.08) scaleX(0.95); }
+  @keyframes dropSquash {
+    0%   { transform: translateY(-14px) scaleY(1.08) scaleX(0.94); }
+    40%  { transform: translateY(0) scaleY(0.82) scaleX(1.14); }
+    70%  { transform: translateY(-4px) scaleY(1.04) scaleX(0.98); }
     100% { transform: translateY(0) scaleY(1) scaleX(1); }
   }
 
-  /* C-2. 실패 / 에러 (failure): 층 어긋남 & 덜덜 떠는 진동 & 불안 표정 */
-  .action-failure .ro-bot {
-    animation: failTremble 0.18s infinite ease-in-out;
+  .action-success .ro-bot {
+    animation: successJump 0.8s cubic-bezier(.17,.89,.32,1.28);
   }
-  .action-failure .pill-head { transform: translateX(calc(-1.5 * var(--u))); }
-  .action-failure .pill-body { transform: translateX(calc(2.0 * var(--u))); }
-  .action-failure .pill-base { transform: translateX(calc(0.4 * var(--u))); }
-  .action-failure .eye-l { width: calc(1.3 * var(--u)) !important; height: calc(1.5 * var(--u)) !important; }
-  .action-failure .eye-r { width: calc(1.0 * var(--u)) !important; height: calc(1.2 * var(--u)) !important; }
-  @keyframes failTremble {
-    0%, 100% { transform: translateY(0); }
-    50%      { transform: translateY(1.4px) rotate(-0.8deg); }
+  .action-success .resolved-arch { display: block; }
+  .action-success .eye { display: none; }
+  @keyframes successJump {
+    0%   { transform: translateY(0) scaleY(1); }
+    35%  { transform: translateY(-16px) scaleY(1.12); }
+    60%  { transform: translateY(2px) scaleY(0.92); }
+    80%  { transform: translateY(-4px) scaleY(1.04); }
+    100% { transform: translateY(0) scaleY(1); }
   }
 
-  /* 상호작용 칩 팔레트 (말풍선 안) */
-  .act-palette {
-    background: var(--panel-soft);
-    border: 1px solid var(--panel-border);
-    border-radius: 14px;
-    padding: 8px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    transition: opacity 0.16s ease, max-height 0.2s ease;
+  .action-failure .ro-bot {
+    animation: failureAnim 0.7s cubic-bezier(.36,.07,.19,.97);
   }
-  .act-palette.hidden {
-    display: none;
-  }
-  .act-palette-title {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    font-size: 10.5px;
-    font-weight: 700;
-    color: var(--panel-fg);
-    white-space: nowrap;
-  }
-  .act-hint {
-    font-size: 9px;
-    font-weight: 500;
-    color: var(--chalk-muted);
-    white-space: nowrap;
-  }
-  .act-chips-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .act-btn {
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 3px 7.5px;
-    font-size: 9.8px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background 0.12s, color 0.12s, transform 0.1s;
-  }
-  .act-btn:hover {
-    background: var(--panel-fg);
-    color: var(--panel-bg);
-    opacity: 0.85;
-    transform: translateY(-1px);
-  }
-  .act-btn.active {
-    background: var(--bubble-fill) !important;
-    color: var(--bubble-fg) !important;
-    opacity: 1.0 !important;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-    font-weight: 800;
+  .action-failure .eye-l { width: calc(1.4 * var(--u)); height: calc(1.6 * var(--u)); }
+  .action-failure .eye-r { width: calc(1.1 * var(--u)); height: calc(1.3 * var(--u)); }
+  @keyframes failureAnim {
+    0%, 100% { transform: translateX(0); }
+    20%      { transform: translateX(-5px); }
+    40%      { transform: translateX(5px); }
+    60%      { transform: translateX(-3px); }
+    80%      { transform: translateX(3px); }
   }
 
   @keyframes baseGrow {
@@ -1624,120 +1955,229 @@ PET_HTML = r"""<!DOCTYPE html>
 </head>
 <body class="material-clay">
 <div id="stage" class="stage">
+  <!-- 말풍선 패널 (Ro의 말풍선) -->
   <div id="bubble" class="bubble hidden">
+    <div class="bubble-tail" aria-hidden="true"></div>
+
+    <!-- 패널 상단 바 & 네비게이션 -->
     <div id="bubbleTop" class="bubble-top" title="드래그하여 이동">
-      <div class="brand-tag">
-        <span>ro</span>
-        <button id="moodPill" class="mood-tag" title="클릭하여 6가지 표정 미리보기">기본</button>
+      <div class="top-left">
+        <span class="brand-tag">ro</span>
+        <button id="moodPill" class="mood-tag" title="클릭하여 표정 미리보기">기본</button>
       </div>
-      <div class="toolbar">
-        <button id="clearBtn" class="chip-btn" style="display:none;" title="알림/답변 닫기">초기화</button>
-        <button id="orgToggleBtn" class="chip-btn" title="다운로드 폴더 분류·이름 정리">정리 ▸</button>
-        <button id="actToggleBtn" class="chip-btn" title="상호작용 12종 팔레트">상호작용 ▾</button>
-        <button id="matBtn" class="chip-btn" title="재질 전환 (점토 / 리퀴드 글라스 / 젤리)">점토</button>
-        <button id="themeBtn" class="chip-btn" title="색상 전환 (먹 / 분필)">먹</button>
-        <button id="moreBtn" class="chip-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
-        <button id="closeBtn" class="chip-btn" title="대화창 닫기 (Esc)">닫기</button>
+      <div class="nav-tabs">
+        <button id="tabBtnHome" class="nav-tab active" data-tab="home">기본</button>
+        <button id="tabBtnTimeline" class="nav-tab" data-tab="timeline">타임라인</button>
+        <button id="tabBtnOrganize" class="nav-tab" data-tab="organize" title="다운로드 폴더 분류·이름 정리">정리</button>
+        <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
-    </div>
-
-    <div id="bubbleScroll" class="bubble-scroll">
-    <!-- 모션 가이드 12종 즉시 상호작용 팔레트 -->
-    <div id="actPalette" class="act-palette">
-      <div class="act-palette-title">
-        <span>모션 상호작용 12종</span>
-        <span class="act-hint">클릭 또는 마우스 동작</span>
-      </div>
-      <div class="act-chips-grid">
-        <button class="act-btn" data-act="breathe" title="3개 층 시차 숨쉬기 (3초 루프)">숨쉬기</button>
-        <button class="act-btn" data-act="look_around" title="눈이 먼저 가는 두리번">두리번</button>
-        <button class="act-btn" data-act="walk" title="바닥-몸-머리 순차 이동">걷기</button>
-        <button class="act-btn" data-act="thinking" title="머리 갸우뚱 & 엇박자 펄스">생각</button>
-        <button class="act-btn" data-act="alert" title="깜짝 솟구침 & 눈 커짐">깜짝</button>
-        <button class="act-btn" data-act="drowsy" title="머리 침하 & 실눈 & 느린 호흡">졸음</button>
-        <button class="act-btn" data-act="gaze" title="마우스 커서 시선 추적">시선</button>
-        <button class="act-btn" data-act="pet" title="폭신하게 눌림 & 눈웃음 (마우스 호버)">쓰다듬기</button>
-        <button class="act-btn" data-act="drag" title="세로 늘어남 & 바닥 처짐 (드래그)">잡기</button>
-        <button class="act-btn" data-act="shake" title="층 좌우 요동 (빠른 흔들기)">흔들기</button>
-        <button class="act-btn" data-act="drop" title="착지 스쿼시 & 스프링 탄성">착지</button>
-        <button class="act-btn" data-act="success" title="기쁨의 점프 & 웃는 눈 & 26u 확장">성공</button>
-        <button class="act-btn" data-act="failure" title="층 어긋남 & 떨림 & 작은 눈">실패</button>
+      <div class="top-right">
+        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변/알림 닫기">초기화</button>
+        <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
+        <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
     </div>
 
-    <div class="chat-stream">
-      <div id="userMsgRow" class="user-msg-row" style="display:none;">
-        <div id="userQuestionPill" class="user-pill"></div>
+    <!-- 쓰기 승인 게이트 카드: 어느 탭에서 요청했든 보이도록 탭 밖에 둔다 -->
+    <div id="writeCard" class="gate-box" style="display:none;">
+      <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
+      <div id="writeText" class="gate-body"></div>
+      <div class="gate-actions">
+        <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
+        <button id="writeRejectBtn" class="action-btn ghost">취소</button>
       </div>
+    </div>
 
-      <div class="ro-msg-row">
-        <div class="mini-avatar" aria-hidden="true">
-          <div class="mini-h"></div>
-          <div class="mini-b"></div>
-          <div class="mini-l"></div>
+    <!-- 1. 기본 (Home) 탭 -->
+    <div id="paneHome" class="tab-pane active">
+      <!-- 브리핑 & 필터 -->
+      <div class="greeting-section">
+        <div id="greetingTitle" class="greeting-title">오늘 새로 시작했어요.</div>
+        <div id="greetingSub" class="greeting-sub">기록이 시작되면 여기에 요약이 표시됩니다</div>
+        <div class="sub-filters">
+          <button id="filterSummaryBtn" class="sub-pill active">기록 요약</button>
+          <button id="filterStatsBtn" class="sub-pill">통계</button>
         </div>
-        <div id="roMainBubble" class="ro-pill">기록하고, 풀어낸다.</div>
       </div>
 
-      <div class="ro-sub-row">
-        <div class="ro-sub-left">
-          <div class="mini-avatar small" aria-hidden="true">
+      <!-- 3열 메트릭 카드 ("챗 대신 통계") -->
+      <div class="metrics-box">
+        <div class="metric-item">
+          <div id="metricEvents" class="metric-value">0</div>
+          <div class="metric-label">기록</div>
+        </div>
+        <div class="metric-sep"></div>
+        <div class="metric-item">
+          <div id="metricProjects" class="metric-value">0</div>
+          <div class="metric-label">프로젝트</div>
+        </div>
+        <div class="metric-sep"></div>
+        <div class="metric-item">
+          <div id="metricTime" class="metric-value">--:--</div>
+          <div class="metric-label">활동 시각</div>
+        </div>
+      </div>
+
+      <!-- 질문 답변 카드: 방금 한 질문의 결과라 승인 대기 카드보다 위에 둔다 -->
+      <div id="answerCard" class="qa-card" style="display:none;">
+        <div id="userMsgRow" class="user-msg-row">
+          <div id="userQuestionPill" class="user-pill"></div>
+        </div>
+        <div class="ro-msg-row">
+          <div class="mini-avatar" aria-hidden="true">
             <div class="mini-h"></div>
             <div class="mini-b"></div>
             <div class="mini-l"></div>
           </div>
-          <span id="subStatusText">오늘 기록 준비됨</span>
+          <div id="roMainBubble" class="ro-pill">기록하고, 풀어낸다.</div>
         </div>
-        <span id="feedbackBtns" style="display:none;gap:4px;">
-          <button id="fbYes" class="chip-btn" title="첫 답변 수용">수용</button>
-          <button id="fbNo" class="chip-btn" title="아쉬움">거절</button>
-        </span>
-        <span id="fbDone" class="fb-done" style="display:none;"></span>
+        <div class="ro-sub-row">
+          <span id="subStatusText">기록 완료</span>
+          <span id="feedbackBtns" class="feedback-chips" style="display:none;">
+            <button id="fbYes" class="fb-btn" title="첫 답변 수용">수용</button>
+            <button id="fbNo" class="fb-btn" title="아쉬움">거절</button>
+          </span>
+          <span id="fbDone" class="fb-done" style="display:none;"></span>
+        </div>
+      </div>
+
+      <!-- 규칙 학습 게이트 카드 -->
+      <div id="ruleCard" class="gate-box" style="display:none;">
+        <div id="ruleTitle" class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
+        <div id="ruleText" class="gate-text gate-body"></div>
+        <div class="gate-actions">
+          <button id="ruleApproveBtn" class="action-btn primary">승인</button>
+          <button id="ruleRejectBtn" class="action-btn ghost">거절</button>
+        </div>
+      </div>
+
+      <!-- 최근 활동 섹션 -->
+      <div class="section-row">
+        <span class="section-label">최근 활동</span>
+        <span id="logCountBadge" class="section-badge">0건</span>
+      </div>
+      <div id="activityList" class="activity-stream"></div>
+    </div>
+
+    <!-- 2. 타임라인 (Timeline) 탭 -->
+    <div id="paneTimeline" class="tab-pane">
+      <div class="timeline-head-row">
+        <span class="orange-tag">기록 타임라인</span>
+        <span id="timelineCountText" class="timeline-counter">오늘 0건</span>
+      </div>
+      <div id="timelineList" class="timeline-stream"></div>
+    </div>
+
+    <!-- 3. 정리 (Organize) 탭: 칩을 누르면 승인 요청만 올라가고, 위 승인 카드에서 실행한다 -->
+    <div id="paneOrganize" class="tab-pane">
+      <div class="timeline-head-row">
+        <span class="orange-tag">파일 정리</span>
+        <span class="timeline-counter">승인 전에는 옮기지 않음</span>
+      </div>
+      <div id="orgCard" class="org-box">
+        <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
+        <div id="orgCats" class="org-cats"></div>
+        <div id="orgQuar" class="org-cats"></div>
+        <div class="gate-actions">
+          <button id="orgScanBtn" class="action-btn ghost">정리안 만들기</button>
+          <button id="orgUndoBtn" class="action-btn ghost" style="display:none;">되돌리기</button>
+        </div>
+        <div id="orgMsg" class="org-msg"></div>
       </div>
     </div>
 
-    <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 아래 승인 카드에서 실행 -->
-    <div id="orgCard" class="gate-card org-card hidden">
-      <div class="gate-title">파일 정리 (승인 전에는 옮기지 않음)</div>
-      <div id="orgSummary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
-      <div id="orgCats" class="org-cats"></div>
-      <div id="orgQuar" class="org-cats"></div>
-      <div class="gate-actions">
-        <button id="orgScanBtn" class="pill-btn ghost">정리안 만들기</button>
-        <button id="orgUndoBtn" class="pill-btn ghost" style="display:none;">되돌리기</button>
+    <!-- 4. 설정 (Settings) 탭 -->
+    <div id="paneSettings" class="tab-pane">
+      <div class="settings-stream">
+        <!-- 표정 6종 -->
+        <div class="setting-block">
+          <div class="block-title">표정 (6종)</div>
+          <div class="mood-grid">
+            <button class="mood-btn" data-mood="idle">기본</button>
+            <button class="mood-btn" data-mood="recording">기록 중</button>
+            <button class="mood-btn" data-mood="focus">집중</button>
+            <button class="mood-btn" data-mood="anxious">불안</button>
+            <button class="mood-btn" data-mood="discovery">발견</button>
+            <button class="mood-btn" data-mood="resolved">풀어냄</button>
+          </div>
+        </div>
+
+        <!-- 재질 3종 -->
+        <div class="setting-block">
+          <div class="block-title">재질</div>
+          <div class="options-row">
+            <button class="opt-btn mat-opt" data-mat="clay">점토</button>
+            <button class="opt-btn mat-opt" data-mat="glass">글라스</button>
+            <button class="opt-btn mat-opt" data-mat="jelly">젤리</button>
+            <button class="opt-btn mat-opt" data-mat="auto">자동</button>
+          </div>
+        </div>
+
+        <!-- 색상 모드 -->
+        <div class="setting-block">
+          <div class="block-title">색상 모드</div>
+          <div class="options-row">
+            <button class="opt-btn theme-opt" data-theme="ink">먹 (라이트)</button>
+            <button class="opt-btn theme-opt" data-theme="chalk">분필 (다크)</button>
+            <button class="opt-btn theme-opt" data-theme="auto">자동 감지</button>
+          </div>
+        </div>
+
+        <!-- 자동 방랑 스위치 -->
+        <div class="setting-block">
+          <div class="toggle-row">
+            <div class="toggle-text">
+              <span class="toggle-name">자동 방랑 (Wander)</span>
+              <span class="toggle-sub">화면 하단을 스스로 천천히 배회합니다</span>
+            </div>
+            <label class="switch">
+              <input id="wanderToggle" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 모션 상호작용 12종 -->
+        <div class="setting-block">
+          <div class="block-title">모션 상호작용 (12종)</div>
+          <div class="act-chips-grid">
+            <button class="act-btn" data-act="breathe">숨쉬기</button>
+            <button class="act-btn" data-act="look_around">두리번</button>
+            <button class="act-btn" data-act="walk">걷기</button>
+            <button class="act-btn" data-act="thinking">생각</button>
+            <button class="act-btn" data-act="alert">깜짝</button>
+            <button class="act-btn" data-act="drowsy">졸음</button>
+            <button class="act-btn" data-act="gaze">시선</button>
+            <button class="act-btn" data-act="pet">쓰다듬기</button>
+            <button class="act-btn" data-act="drag">잡기</button>
+            <button class="act-btn" data-act="shake">흔들기</button>
+            <button class="act-btn" data-act="drop">착지</button>
+            <button class="act-btn" data-act="success">성공</button>
+            <button class="act-btn" data-act="failure">실패</button>
+          </div>
+        </div>
       </div>
-      <div id="orgMsg" class="org-msg"></div>
     </div>
 
-    <div id="writeCard" class="gate-card" style="display:none;">
-      <div class="gate-title">쓰기 작업 직전 승인 (불안)</div>
-      <div id="writeText"></div>
-      <div class="gate-actions">
-        <button id="writeApproveBtn" class="pill-btn">승인 후 실행</button>
-        <button id="writeRejectBtn" class="pill-btn ghost">취소</button>
-      </div>
-    </div>
-
-    <div id="ruleCard" class="gate-card" style="display:none;">
-      <div id="ruleTitle" class="gate-title">규칙 학습 후보 발견 (승인 전 미적용)</div>
-      <div id="ruleText" class="gate-text"></div>
-      <div class="gate-actions">
-        <button id="ruleApproveBtn" class="pill-btn">승인</button>
-        <button id="ruleRejectBtn" class="pill-btn ghost">거절</button>
-      </div>
-    </div>
-
-    <div id="logsBox" class="logs"></div>
-    </div>
-
+    <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
-      <input id="askInput" class="ask-input" type="text" placeholder="오늘 할 일이나 프로젝트를 물어보세요..." autocomplete="off" />
-      <button id="askSubmit" class="ask-submit" type="submit">묻기</button>
+      <div class="input-bar">
+        <input id="askInput" class="ask-input" type="text" placeholder="무엇이든 물어보거나 기록하세요..." autocomplete="off" />
+        <button id="askSubmit" class="ask-submit" type="submit" title="질문 또는 기록">
+          <svg id="plusIcon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
+            <line x1="8" y1="2.5" x2="8" y2="13.5"></line>
+            <line x1="2.5" y1="8" x2="13.5" y2="8"></line>
+          </svg>
+          <svg id="sendIcon" viewBox="0 0 16 16" width="12" height="12" fill="currentColor" style="display:none;">
+            <path d="M14.2 1.8a.7.7 0 0 0-.75-.15L1.8 6.5a.7.7 0 0 0 .04 1.3l4.5 1.7 1.7 4.5a.7.7 0 0 0 1.3.04l4.85-11.65a.7.7 0 0 0-.19-.59z"></path>
+          </svg>
+        </button>
+      </div>
     </form>
   </div>
 
   <!-- RO 캐릭터: 층 셋, 눈 둘 (왼쪽 정렬) -->
-  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 대화창 · 우클릭: 메뉴 · 드래그: 이동 (위로 끌면 메뉴 막대로)">
+  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 메뉴 · 드래그: 이동 (위로 끌면 메뉴 막대로)">
     <div id="roBot" class="ro-bot">
       <div id="layerHead" class="pill pill-head">
         <div id="eyesWrap" class="eyes">
@@ -1787,71 +2227,116 @@ const ALL_ACTIONS = Object.keys(ACTION_META);
 const stage = document.getElementById("stage");
 const bubble = document.getElementById("bubble");
 const bubbleTop = document.getElementById("bubbleTop");
-const actPalette = document.getElementById("actPalette");
-const actToggleBtn = document.getElementById("actToggleBtn");
 const petWrap = document.getElementById("petWrap");
 const petCaption = document.getElementById("petCaption");
 const moodPill = document.getElementById("moodPill");
 const clearBtn = document.getElementById("clearBtn");
+const closeBtn = document.getElementById("closeBtn");
+
+const paneHome = document.getElementById("paneHome");
+const paneTimeline = document.getElementById("paneTimeline");
+const paneOrganize = document.getElementById("paneOrganize");
+const paneSettings = document.getElementById("paneSettings");
+
+const greetingTitle = document.getElementById("greetingTitle");
+const greetingSub = document.getElementById("greetingSub");
+const filterSummaryBtn = document.getElementById("filterSummaryBtn");
+const filterStatsBtn = document.getElementById("filterStatsBtn");
+
+const metricEvents = document.getElementById("metricEvents");
+const metricProjects = document.getElementById("metricProjects");
+const metricTime = document.getElementById("metricTime");
+
+const answerCard = document.getElementById("answerCard");
 const userMsgRow = document.getElementById("userMsgRow");
 const userQuestionPill = document.getElementById("userQuestionPill");
 const roMainBubble = document.getElementById("roMainBubble");
 const subStatusText = document.getElementById("subStatusText");
-const layerHead = document.getElementById("layerHead");
-const layerBody = document.getElementById("layerBody");
-const layerBase = document.getElementById("layerBase");
-const eyesWrap = document.getElementById("eyesWrap");
-const eyeL = document.getElementById("eyeL");
-const eyeR = document.getElementById("eyeR");
-const ruleCard = document.getElementById("ruleCard");
-const ruleText = document.getElementById("ruleText");
+const feedbackBtns = document.getElementById("feedbackBtns");
+const fbDone = document.getElementById("fbDone");
+
 const writeCard = document.getElementById("writeCard");
-const orgCard = document.getElementById("orgCard");
-const orgToggleBtn = document.getElementById("orgToggleBtn");
+const writeText = document.getElementById("writeText");
+const ruleCard = document.getElementById("ruleCard");
+const ruleTitle = document.getElementById("ruleTitle");
+const ruleText = document.getElementById("ruleText");
+
 const orgSummary = document.getElementById("orgSummary");
 const orgCats = document.getElementById("orgCats");
 const orgQuar = document.getElementById("orgQuar");
 const orgScanBtn = document.getElementById("orgScanBtn");
 const orgUndoBtn = document.getElementById("orgUndoBtn");
 const orgMsg = document.getElementById("orgMsg");
-const writeText = document.getElementById("writeText");
-const feedbackBtns = document.getElementById("feedbackBtns");
-const fbDone = document.getElementById("fbDone");
-const ruleTitle = document.getElementById("ruleTitle");
-let fbDoneUntil = 0;
-const logsBox = document.getElementById("logsBox");
+
+const logCountBadge = document.getElementById("logCountBadge");
+const activityList = document.getElementById("activityList");
+const timelineCountText = document.getElementById("timelineCountText");
+const timelineList = document.getElementById("timelineList");
+
 const askForm = document.getElementById("askForm");
 const askInput = document.getElementById("askInput");
 const askSubmit = document.getElementById("askSubmit");
-const matBtn = document.getElementById("matBtn");
-const themeBtn = document.getElementById("themeBtn");
+const plusIcon = document.getElementById("plusIcon");
+const sendIcon = document.getElementById("sendIcon");
+
+const wanderToggle = document.getElementById("wanderToggle");
+
+const layerHead = document.getElementById("layerHead");
+const layerBody = document.getElementById("layerBody");
+const layerBase = document.getElementById("layerBase");
+const eyesWrap = document.getElementById("eyesWrap");
+const eyeL = document.getElementById("eyeL");
+const eyeR = document.getElementById("eyeR");
 
 let currentRuleId = null;
 let orgKey = "";
 let pendingKind = null;
+let fbDoneUntil = 0;
+// 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 답변 카드를 덮어쓰지 않게 한다
+let askNotice = null;
+let askNoticeUntil = 0;
+let lastLogsKey = "";
 let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
 let previewLockUntil = 0;
-// 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
-let askNotice = null;
-let askNoticeUntil = 0;
-let lastLogsKey = "";
-let dragStart = null;
-let didDrag = false;
-const MAT_LABELS = {
-  clay: "점토",
-  glass: "리퀴드 글라스",
-  jelly: "젤리",
-};
-const MAT_CYCLE = ["auto", "clay", "glass", "jelly"];
 let materialMode = "auto";
 let activeMaterial = "clay";
 let backdropLuminance = 0.5;
-let themeMode = "auto"; // "auto" | "ink" | "chalk"
+let themeMode = "auto";
 let backdropIsDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
 let isChalk = false;
 
+/* 탭 전환 */
+function switchTab(tabName) {
+  document.querySelectorAll(".nav-tab").forEach(t => {
+    t.classList.toggle("active", t.dataset.tab === tabName);
+  });
+  paneHome.classList.toggle("active", tabName === "home");
+  paneTimeline.classList.toggle("active", tabName === "timeline");
+  paneOrganize.classList.toggle("active", tabName === "organize");
+  paneSettings.classList.toggle("active", tabName === "settings");
+}
+
+document.querySelectorAll(".nav-tab").forEach(tab => {
+  tab.addEventListener("click", (e) => {
+    e.stopPropagation();
+    switchTab(tab.dataset.tab);
+  });
+});
+
+filterSummaryBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  filterSummaryBtn.classList.add("active");
+  filterStatsBtn.classList.remove("active");
+});
+
+filterStatsBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  switchTab("timeline");
+});
+
+/* 재질 & 테마 로직 */
 function computeAutoMaterial(mood, lum) {
   if (mood === "discovery" || mood === "resolved") return "jelly";
   if (mood === "recording" || mood === "focus") return "glass";
@@ -1859,6 +2344,7 @@ function computeAutoMaterial(mood, lum) {
   return "clay";
 }
 
+let dockCaption = null;  // 메뉴 막대로 끄는 중 원래 캡션 (onHostDockProgress)
 function updateMaterialUI() {
   activeMaterial = (materialMode === "auto")
     ? computeAutoMaterial(currentMood, backdropLuminance)
@@ -1866,31 +2352,28 @@ function updateMaterialUI() {
   for (const m of ["clay", "glass", "jelly"]) {
     document.body.classList.toggle(`material-${m}`, activeMaterial === m);
   }
-  const label = MAT_LABELS[activeMaterial] || "점토";
-  matBtn.textContent = label;
-  matBtn.title = (materialMode === "auto") ? `자동 감지 (${label}) — 클릭하여 전환` : `${label} 고정 — 클릭하여 전환`;
+  document.querySelectorAll(".mat-opt").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.mat === materialMode);
+  });
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
+  if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
 }
 
 function updateThemeUI() {
   if (themeMode === "auto") {
     isChalk = !!backdropIsDark;
-    themeBtn.textContent = isChalk ? "분필" : "먹";
-    themeBtn.title = isChalk ? "배경 자동 감지: 어두움(분필)" : "배경 자동 감지: 밝음(먹)";
   } else if (themeMode === "chalk") {
     isChalk = true;
-    themeBtn.textContent = "분필";
-    themeBtn.title = "분필 고정";
   } else {
     isChalk = false;
-    themeBtn.textContent = "먹";
-    themeBtn.title = "먹 고정";
   }
   document.body.classList.toggle("theme-chalk", isChalk);
+  document.querySelectorAll(".theme-opt").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.theme === themeMode);
+  });
 }
 
-/* macOS 호스트가 펫 뒤쪽 화면 밝기를 실시간 측정해 호출 */
 window.setAutoBackdropDark = function(isDark, lum) {
   backdropIsDark = !!isDark;
   if (typeof lum === "number") {
@@ -1898,12 +2381,8 @@ window.setAutoBackdropDark = function(isDark, lum) {
   } else {
     backdropLuminance = isDark ? 0.2 : 0.8;
   }
-  if (themeMode === "auto") {
-    updateThemeUI();
-  }
-  if (materialMode === "auto") {
-    updateMaterialUI();
-  }
+  if (themeMode === "auto") updateThemeUI();
+  if (materialMode === "auto") updateMaterialUI();
 };
 
 window.setThemeModeFromHost = function(mode) {
@@ -1912,9 +2391,15 @@ window.setThemeModeFromHost = function(mode) {
 };
 
 window.setMaterialFromHost = function(mode) {
-  if (MAT_CYCLE.includes(mode)) {
+  if (["auto", "clay", "glass", "jelly"].includes(mode)) {
     materialMode = mode;
     updateMaterialUI();
+  }
+};
+
+window.setWanderState = function(enabled) {
+  if (wanderToggle) {
+    wanderToggle.checked = !!enabled;
   }
 };
 
@@ -1949,7 +2434,7 @@ window.setBubblePlacement = function(isTop, isLeft) {
   document.body.classList.toggle("place-left", !!isLeft);
 };
 
-/* 6가지 표정을 즉시 시각적으로 적용하고 8초간 자동 폴링 덮어쓰기를 방지 */
+/* 6가지 표정 프리뷰 */
 window.setMoodPreview = function(mood, durationMs) {
   const meta = MOOD_META[mood];
   if (!meta) return;
@@ -1962,6 +2447,9 @@ window.setMoodPreview = function(mood, durationMs) {
   layerHead.style.width = `calc(${meta.headU} * var(--u))`;
   layerBody.style.width = `calc(${meta.bodyU} * var(--u))`;
   layerBase.style.width = `calc(${meta.baseU} * var(--u))`;
+  document.querySelectorAll(".mood-btn").forEach(b => {
+    b.classList.toggle("active", b.dataset.mood === mood);
+  });
   updateMaterialUI();
 };
 
@@ -1981,7 +2469,6 @@ petWrap.addEventListener("contextmenu", (e) => {
   else cycleMoodPreview();
 });
 
-/* 말풍선 바깥 투명 영역 클릭 시 말풍선 닫기 */
 stage.addEventListener("mousedown", (e) => {
   if (e.target === stage && !bubble.classList.contains("hidden")) {
     setBubbleOpen(false);
@@ -1996,7 +2483,7 @@ moreBtn.addEventListener("click", (e) => {
   notifyHost({ type: "menu" });
 });
 
-document.getElementById("closeBtn").addEventListener("click", (e) => {
+closeBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   setBubbleOpen(false);
 });
@@ -2008,33 +2495,38 @@ clearBtn.addEventListener("click", async (e) => {
   await refreshState();
 });
 
-matBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  const idx = (MAT_CYCLE.indexOf(materialMode) + 1) % MAT_CYCLE.length;
-  materialMode = MAT_CYCLE[idx];
-  updateMaterialUI();
+/* 설정 탭 핸들러 */
+document.querySelectorAll(".mood-btn").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    window.setMoodPreview(btn.dataset.mood, 8000);
+  });
 });
 
-themeBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (themeMode === "auto") themeMode = "ink";
-  else if (themeMode === "ink") themeMode = "chalk";
-  else themeMode = "auto";
-  updateThemeUI();
+document.querySelectorAll(".mat-opt").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    materialMode = btn.dataset.mat;
+    updateMaterialUI();
+  });
 });
 
-/* 상호작용 팔레트 토글 */
-actToggleBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  actPalette.classList.toggle("hidden");
-  actToggleBtn.textContent = actPalette.classList.contains("hidden") ? "상호작용 ▸" : "상호작용 ▾";
+document.querySelectorAll(".theme-opt").forEach(btn => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    themeMode = btn.dataset.theme;
+    updateThemeUI();
+  });
+});
+
+wanderToggle.addEventListener("change", (e) => {
+  notifyHost({ type: "toggleWander", enabled: wanderToggle.checked });
 });
 
 document.querySelectorAll(".act-btn").forEach((btn) => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
-    const act = btn.dataset.act;
-    window.triggerAction(act, 4500);
+    window.triggerAction(btn.dataset.act, 4500);
   });
 });
 
@@ -2042,20 +2534,18 @@ window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (document.activeElement === askInput && askInput.value) {
     askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
+    askInput.dispatchEvent(new Event("input"));
     return;
   }
   setBubbleOpen(false);
 });
 
-/* =========================================================
-   상호작용 컨트롤러 — 12종 즉시 발동 & 상태 전이
-   ========================================================= */
+/* 모션 상호작용 컨트롤러 */
 window.triggerAction = function(name, durationMs) {
   if (actionTimer) {
     clearTimeout(actionTimer);
     actionTimer = null;
   }
-  // 시선 추적 인라인 스타일 초기화 (키프레임 애니메이션과의 충돌 방지)
   eyesWrap.style.transform = "";
   layerHead.style.transform = "";
 
@@ -2064,13 +2554,8 @@ window.triggerAction = function(name, durationMs) {
   }
   currentAction = name;
 
-  // 모든 버튼의 active를 정리하고 현재 액션에만 정확히 설정
   document.querySelectorAll(".act-btn").forEach(b => {
-    if (name && b.dataset.act === name) {
-      b.classList.add("active");
-    } else {
-      b.classList.remove("active");
-    }
+    b.classList.toggle("active", !!(name && b.dataset.act === name));
   });
 
   if (!name) {
@@ -2081,7 +2566,6 @@ window.triggerAction = function(name, durationMs) {
     return { ok: true, cleared: true };
   }
 
-  currentAction = name;
   const cls = `action-${name.replace(/_/g, "-")}`;
   petWrap.classList.add(cls);
 
@@ -2100,17 +2584,13 @@ window.triggerAction = function(name, durationMs) {
   return { ok: true, action: name, duration: dur };
 };
 
-/* macOS 호스트 브리지 드래그·흔들기·착지 바운스 훅 */
+/* 호스트 드래그 브리지 */
 window.onHostDragStart = function(fromPet) {
-  if (fromPet) {
-    window.triggerAction("drag", 0);
-  }
+  if (fromPet) window.triggerAction("drag", 0);
 };
-
 window.onHostDragShake = function() {
   window.triggerAction("shake", 1200);
 };
-
 /* CPU 걸음 (07): 호스트가 단계를 넘기면 지금 사이클이 끝나는 순간에 바꿔 걸음이 끊기지 않게 한다 */
 const GAIT_PERIODS = { calm: 3.2, walk: 1.6, busy: 0.8, hot: 0.4 };
 let pendingGait = null;
@@ -2144,7 +2624,6 @@ layerBase.addEventListener("animationiteration", () => {
 });
 
 /* 메뉴 막대로 보내기: 위쪽 80px 구역 안에서의 진행률(0~1)을 호스트가 넘긴다 */
-let dockCaption = null;
 window.onHostDockProgress = function(p) {
   petWrap.style.setProperty("--dock", p);
   petWrap.classList.toggle("docking", p > 0);
@@ -2163,21 +2642,15 @@ window.onHostDocked = function() {
 };
 
 window.onHostDragEnd = function(moved) {
-  if (moved) {
-    window.triggerAction("drop", 650);
-  } else {
-    window.triggerAction(null);
-  }
+  if (moved) window.triggerAction("drop", 650);
+  else window.triggerAction(null);
 };
 
-/* 마우스 쓰다듬기 (Hover) 상호작용: 머리가 폭신하게 눌리고 눈웃음 */
+/* 마우스 쓰다듬기 */
 let isPetHover = false;
 petWrap.addEventListener("mouseenter", () => {
   if (currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
-  if (isDrowsy) {
-    wakeUpFromSleep();
-    return;
-  }
+  if (isDrowsy) { wakeUpFromSleep(); return; }
   isPetHover = true;
   window.triggerAction("pet", 0);
 });
@@ -2185,9 +2658,7 @@ petWrap.addEventListener("mouseenter", () => {
 petWrap.addEventListener("mouseleave", () => {
   if (isPetHover) {
     isPetHover = false;
-    if (currentAction === "pet") {
-      window.triggerAction(null);
-    }
+    if (currentAction === "pet") window.triggerAction(null);
   }
 });
 
@@ -2198,7 +2669,7 @@ document.documentElement.addEventListener("mouseleave", () => {
   layerHead.style.transform = "";
 });
 
-/* 마우스 시선 추적: 눈이 먼저 가고 머리가 살짝 뒤따른다 (호버/액션 진행 중에는 간섭 차단) */
+/* 마우스 시선 추적 */
 window.addEventListener("mousemove", (e) => {
   recordActivity();
   if (currentMood === "resolved" || currentMood === "recording" || currentMood === "focus") {
@@ -2230,12 +2701,9 @@ setInterval(() => {
 /* 졸음 및 활동 감지 */
 let lastUserActivity = Date.now();
 let isDrowsy = false;
-
 function recordActivity() {
   lastUserActivity = Date.now();
-  if (isDrowsy) {
-    wakeUpFromSleep();
-  }
+  if (isDrowsy) wakeUpFromSleep();
 }
 window.addEventListener("keydown", recordActivity);
 window.addEventListener("mousedown", recordActivity);
@@ -2245,7 +2713,6 @@ function wakeUpFromSleep() {
   window.triggerAction("alert", 2000);
 }
 
-// 75초 동안 마우스/키보드 입력이 없고 대화창이 닫혀 있을 때만 졸음(drowsy) 진입
 setInterval(() => {
   if (isPetHover || currentAction || currentMood !== "idle") return;
   if (!bubble.classList.contains("hidden")) return;
@@ -2255,7 +2722,6 @@ setInterval(() => {
   }
 }, 4000);
 
-// 조용한 대기 상태에서 가끔(16초마다) 스스로 두리번
 setInterval(() => {
   if (isDrowsy || isPetHover || currentAction || currentMood !== "idle") return;
   if (Math.random() < 0.40) {
@@ -2263,7 +2729,7 @@ setInterval(() => {
   }
 }, 16000);
 
-/* 드래그 이동 (웹 브라우저 및 네이티브 호스트 공용) */
+/* 드래그 */
 const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost);
 let webDragStart = null;
 let webDidDrag = false;
@@ -2298,9 +2764,7 @@ function beginDrag(e, fromPet) {
   webLastX = e.screenX;
   webDidDrag = false;
   webShakeCount = 0;
-  if (fromPet) {
-    window.triggerAction("drag", 0);
-  }
+  if (fromPet) window.triggerAction("drag", 0);
 }
 
 petWrap.addEventListener("mousedown", (e) => beginDrag(e, true));
@@ -2312,8 +2776,6 @@ window.addEventListener("mousemove", (e) => {
   const dy = e.screenY - webDragStart.y;
   const stepDx = e.screenX - webLastX;
   const now = Date.now();
-
-  // 웹 드래그 흔들기 감지
   if (Math.abs(stepDx) > 8) {
     const sign = stepDx > 0 ? 1 : -1;
     if (sign !== webLastDxSign && webLastDxSign !== 0) {
@@ -2331,8 +2793,6 @@ window.addEventListener("mousemove", (e) => {
     webLastDxSign = sign;
   }
   webLastX = e.screenX;
-
-  // 클릭 미세 흔들림 허용 임계치 (8px)
   if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
@@ -2343,27 +2803,20 @@ window.addEventListener("mousemove", (e) => {
 
 window.addEventListener("mouseup", () => {
   if (!isNativeHost && webDragStart) {
-    if (webDidDrag) {
-      window.triggerAction("drop", 650);
-    } else if (currentAction === "drag") {
-      window.triggerAction(null);
-    }
+    if (webDidDrag) window.triggerAction("drop", 650);
+    else if (currentAction === "drag") window.triggerAction(null);
   }
   webDragStart = null;
 });
 
 petWrap.addEventListener("click", () => {
   if (isNativeHost || webDidDrag) return;
-  if (isDrowsy) {
-    wakeUpFromSleep();
-  }
+  if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 });
 
 window.onPetClickFromHost = function() {
-  if (isDrowsy) {
-    wakeUpFromSleep();
-  }
+  if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 };
 
@@ -2376,6 +2829,14 @@ async function apiPost(path, body) {
   return await res.json();
 }
 
+/* 입력 필드 상태에 따른 '+' 아이콘 / 전송 아이콘 전환 */
+askInput.addEventListener("input", () => {
+  const hasText = askInput.value.trim().length > 0;
+  plusIcon.style.display = hasText ? "none" : "block";
+  sendIcon.style.display = hasText ? "block" : "none";
+});
+
+/* 상태 렌더링 */
 let lastHostStatus = "";
 function applyState(st) {
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
@@ -2399,9 +2860,12 @@ function applyState(st) {
     layerHead.style.width = `calc(${m.headU} * var(--u))`;
     layerBody.style.width = `calc(${m.bodyU} * var(--u))`;
     layerBase.style.width = `calc(${m.baseU} * var(--u))`;
+
+    document.querySelectorAll(".mood-btn").forEach(b => {
+      b.classList.toggle("active", b.dataset.mood === st.mood);
+    });
     updateMaterialUI();
 
-    // 서버가 명시적으로 상호작용 액션을 내려보냈거나 작업 상태에 따른 연동
     if (st.action && st.action !== currentAction) {
       window.triggerAction(st.action, 4500);
     } else if (!currentAction) {
@@ -2418,33 +2882,54 @@ function applyState(st) {
   const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
+  // 마지막 타임스탬프 계산
+  const lastTs = (st.recent_logs && st.recent_logs.length > 0)
+    ? (st.recent_logs[st.recent_logs.length - 1].ts || "").slice(0, 5)
+    : "";
+
+  // 1. 브리핑 타이틀 & 서브텍스트
+  const todayCount = (st.counts && st.counts.today_events) || 0;
+  if (todayCount > 0) {
+    greetingTitle.textContent = `오늘 ${todayCount}건 기록했어요.`;
+    greetingSub.textContent = lastTs ? `마지막 기록 ${lastTs} · 정상 동작 중` : "정상 동작 중";
+  } else {
+    greetingTitle.textContent = "오늘 새로 시작했어요.";
+    greetingSub.textContent = "기록이 시작되면 여기에 요약이 표시됩니다";
+  }
+
+  // 2. 3열 통계 메트릭
+  metricEvents.textContent = todayCount;
+  metricProjects.textContent = (st.counts && st.counts.projects) || 0;
+  metricTime.textContent = lastTs || "--:--";
+
+  // 3. 답변 카드 & 게이트 카드
   if (Date.now() < askNoticeUntil) {
+    answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = askNotice.q;
     roMainBubble.textContent = askNotice.msg;
+    subStatusText.textContent = askNotice.sub || "풀어내는 중...";
+    feedbackBtns.style.display = "none";
+    fbDone.style.display = "none";
   } else if (st.last_answer) {
+    answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = st.last_answer.question;
     roMainBubble.textContent = st.last_answer.output;
     const projs = (st.last_answer.projects || []).join(", ") || "-";
-    subStatusText.textContent = `${st.counts.today_events}건 기록 완료 · ${st.last_answer.engine} (${projs})`;
+    subStatusText.textContent = `${st.last_answer.engine} (${projs})`;
     feedbackBtns.style.display = st.last_answer.feedback_given ? "none" : "inline-flex";
     fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
-  } else if (!locked) {
-    userMsgRow.style.display = "none";
-    roMainBubble.textContent = st.status_line;
-    subStatusText.textContent = st.mood_caption || `${st.counts.today_events}건 기록 완료`;
-    feedbackBtns.style.display = "none";
+  } else {
+    answerCard.style.display = "none";
   }
 
   renderOrganize(st.organize);
-  const wasPending = pendingKind;
   pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
 
   if (st.write_pending) {
     writeCard.style.display = "flex";
     writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
-    if (!wasPending) writeCard.scrollIntoView({ block: "nearest" });  // 새 승인 요청은 보이는 곳으로
   } else {
     writeCard.style.display = "none";
   }
@@ -2462,18 +2947,55 @@ function applyState(st) {
     ruleCard.style.display = "none";
   }
 
-  const rows = (st.recent_logs || []).slice().reverse().map((item) => `${item.ts} · ${item.kind} · ${item.summary}`);
-  const logsKey = rows.join("\n");
-  if (logsKey !== lastLogsKey) {  // 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+  // 4·5. 최근 활동(기본 탭)·타임라인(타임라인 탭): 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+  const logs = st.recent_logs || [];
+  const logsKey = `${todayCount}\n` + logs.map((item) => `${item.ts} ${item.kind} ${item.summary}`).join("\n");
+  if (logsKey !== lastLogsKey) {
     lastLogsKey = logsKey;
-    logsBox.replaceChildren(...rows.map((text) => {
-      const div = document.createElement("div");
-      div.className = "log-row";
-      div.textContent = text;
-      div.title = text;  // 말줄임된 내용은 마우스를 올려 본다
-      return div;
+    renderLogs(logs, todayCount);
+  }
+}
+
+/* 기록 내용은 파일·웹에서 온 데이터일 수 있으니 textContent로만 넣는다(HTML로 해석하지 않는다) */
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderLogs(logs, todayCount) {
+  logCountBadge.textContent = `${logs.length}건`;
+  if (logs.length === 0) {
+    activityList.replaceChildren(el("div", "empty-note", "오늘 아직 기록이 없습니다."));
+  } else {
+    activityList.replaceChildren(...logs.slice().reverse().slice(0, 4).map((item) => {
+      const card = el("div", "activity-card");
+      const title = el("span", "act-summary", item.summary);
+      title.title = `${item.kind} · ${item.summary}`;  // 말줄임된 내용은 마우스를 올려 본다
+      card.append(el("span", `act-dot ${item.kind === "route" ? "route" : ""}`), title,
+                  el("span", "act-time", (item.ts || "").slice(0, 5)));
+      return card;
     }));
   }
+
+  timelineCountText.textContent = `오늘 ${todayCount}건`;
+  if (logs.length === 0) {
+    timelineList.replaceChildren(el("div", "empty-note", "기록된 내역이 없습니다."));
+    return;
+  }
+  // 번호는 오늘 몇 번째 기록인지: 버퍼(최근 10건) 안 위치가 아니라 위의 '오늘 N건'과 맞춘다
+  timelineList.replaceChildren(...logs.slice().reverse().map((item, idx) => {
+    const row = el("div", "timeline-row");
+    const body = el("div", "timeline-body");
+    const meta = el("div", "timeline-meta");
+    meta.append(el("span", "timeline-tag", item.kind), el("span", "timeline-time", item.ts));
+    const text = el("div", "timeline-text", item.summary);
+    text.title = item.summary;
+    body.append(meta, text);
+    row.append(el("span", "step-badge", String(todayCount - idx).padStart(2, "0")), body);
+    return row;
+  }));
 }
 
 async function refreshState() {
@@ -2487,17 +3009,25 @@ async function refreshState() {
 askForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = askInput.value.trim();
-  if (!q) return;
+  if (!q) {
+    askInput.focus();
+    return;
+  }
   askInput.value = "";
+  plusIcon.style.display = "block";
+  sendIcon.style.display = "none";
   askInput.disabled = true;
   askSubmit.disabled = true;
   previewLockUntil = 0;
+  switchTab("home");  // 답변 카드는 기본 탭에 있다
   askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
   askNoticeUntil = Infinity;
+  answerCard.style.display = "flex";
   userMsgRow.style.display = "flex";
   userQuestionPill.textContent = q;
   roMainBubble.textContent = askNotice.msg;
-  subStatusText.textContent = "기록 중...";
+  subStatusText.textContent = "풀어내는 중...";
+  answerCard.scrollIntoView({ block: "nearest" });
   petWrap.className = "pet-wrap mood-focus";
   let res = null;
   try {
@@ -2512,7 +3042,9 @@ askForm.addEventListener("submit", async (e) => {
   if (!res || !res.ok) {
     // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
     if (!askInput.value) askInput.value = q;
-    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
+    askInput.dispatchEvent(new Event("input"));
+    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다.",
+                  sub: "답을 받지 못했어요 · 질문은 입력창에 남겨 두었어요" };
     askNoticeUntil = Date.now() + 8000;
   }
   await refreshState();
@@ -2541,19 +3073,17 @@ document.getElementById("writeRejectBtn").addEventListener("click", async () => 
   await refreshState();
 });
 
-/* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
+/* 파일 정리 탭: 칩은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
 function fmtBytes(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
 }
 
 function orgChip(parent, text, title, body, cls) {
-  const b = document.createElement("button");
-  b.className = cls ? `chip-btn ${cls}` : "chip-btn";
-  b.textContent = text;
+  const b = el("button", cls ? `org-chip ${cls}` : "org-chip", text);
   b.title = title;
   b.addEventListener("click", async () => {
     const r = await apiPost("/api/organize/apply", body);
-    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
+    orgMsg.textContent = r.ok ? "위 승인 카드에서 승인하면 실행합니다." : (r.output || "");
     await refreshState();
   });
   parent.appendChild(b);
@@ -2563,8 +3093,8 @@ function renderOrganize(o) {
   const key = JSON.stringify(o || null);
   if (key === orgKey) return;
   orgKey = key;
-  orgCats.innerHTML = "";
-  orgQuar.innerHTML = "";
+  orgCats.replaceChildren();
+  orgQuar.replaceChildren();
   if (!o) {
     orgSummary.textContent = "정리안이 없습니다. 먼저 정리안을 만드세요.";
     orgUndoBtn.style.display = "none";
@@ -2592,14 +3122,6 @@ function renderOrganize(o) {
   }
 }
 
-orgToggleBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  orgCard.classList.toggle("hidden");
-  const open = !orgCard.classList.contains("hidden");
-  orgToggleBtn.textContent = open ? "정리 ▾" : "정리 ▸";
-  if (open && !actPalette.classList.contains("hidden")) actToggleBtn.click();  // 자리를 내준다
-  if (open) orgCard.scrollIntoView({ block: "nearest" });
-});
 orgScanBtn.addEventListener("click", async () => {
   orgScanBtn.disabled = true;
   orgMsg.textContent = "정리안을 만드는 중... (파일은 옮기지 않습니다)";
@@ -2613,9 +3135,10 @@ orgScanBtn.addEventListener("click", async () => {
 });
 orgUndoBtn.addEventListener("click", async () => {
   const r = await apiPost("/api/organize/undo", {});
-  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
+  orgMsg.textContent = r.ok ? "위 승인 카드에서 승인하면 되돌립니다." : (r.output || "");
   await refreshState();
 });
+
 async function sendFeedback(accepted) {
   let res = null;
   try {

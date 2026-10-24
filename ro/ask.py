@@ -211,7 +211,7 @@ def plan(question, mapdata, cwd=None, use_context=True, engine=None, rules=(), p
             "model": model or route.model_for(category, eng),
             "projects": [p["name"] for p in picked], "context": context,
             "question": question,
-            "prompt": build_prompt(question, context, history),
+            "prompt": build_prompt(log.redact(question), context, history),  # 질문에 붙여 넣은 비밀도 밖으로 보내지 않는다
             "cwd": picked[0]["path"] if project and picked else cwd}
 
 

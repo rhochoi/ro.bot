@@ -1,3 +1,5 @@
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +35,8 @@ class SelfUpdateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
                 mock.patch("shutil.which", return_value=None):
             self.assertIsNone(selfupdate.update_command()[0])
-            self.assertEqual(selfupdate.update(), 1)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(selfupdate.update(), 1)
 
     def test_user_routing_overrides(self):
         with tempfile.TemporaryDirectory() as d:

@@ -258,14 +258,26 @@ class PetTest(unittest.TestCase):
             self.assertFalse(rt.queue_organize_undo()["ok"])
 
     def test_bubble_fits_overlay_window(self):
-        # 오버레이 창(360×520)을 넘지 않게: 툴바·입력창 사이의 내용(팔레트·카드·기록)은 스크롤 영역 안에 있다
+        # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         html = pet.PET_HTML
-        order = [html.index(k) for k in ('id="bubbleTop"', 'id="bubbleScroll"', 'id="actPalette"', 'id="orgCard"',
-                                          'id="writeCard"', 'id="logsBox"', 'id="askForm"')]
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="writeCard"', 'id="paneHome"', 'id="paneTimeline"',
+                                          'id="paneOrganize"', 'id="orgCard"', 'id="paneSettings"', 'id="askForm"')]
         self.assertEqual(order, sorted(order))
-        between = html[html.index('id="logsBox"'):html.index('id="askForm"')]
-        self.assertEqual(between.count("</div>"), 2)  # logsBox를 닫고 스크롤 영역을 닫은 뒤 입력창
-        self.assertIn("max-height: 100%;", html[html.index(".bubble.hidden"):html.index(".bubble-scroll {")])
+        bubble_css = html[html.index("  .bubble {"):html.index(".bubble.hidden")]
+        self.assertIn("max-height: min(440px, 100%);", bubble_css)
+        self.assertIn("overflow: hidden;", bubble_css)
+        pane_css = html[html.index(".tab-pane.active {"):]
+        self.assertIn("overflow-y: auto;", pane_css[:pane_css.index("}")])
+
+    def test_organize_tab_and_logs_render_as_text(self):
+        html = pet.PET_HTML
+        self.assertIn('data-tab="organize"', html)
+        self.assertIn('paneOrganize.classList.toggle("active", tabName === "organize");', html)
+        for api in ("/api/organize/scan", "/api/organize/apply", "/api/organize/undo"):
+            self.assertIn(api, html)
+        # 기록 내용(파일·웹에서 온 데이터)을 HTML로 해석하지 않는다
+        self.assertNotIn(".innerHTML", html)
+        self.assertIn('fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } })', html)
 
     def test_http_server_localhost_only_and_token_protected(self):
         with tempfile.TemporaryDirectory() as d:
@@ -411,7 +423,7 @@ class PetTest(unittest.TestCase):
     def test_rule_counter_and_feedback_ack(self):
         html = pet.PET_HTML
         self.assertIn("ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total}", html)
-        self.assertIn('id="ruleText" class="gate-text"', html)
+        self.assertIn('id="ruleText" class="gate-text', html)
         self.assertIn('"수용 반영 ✓"', html)
 
     def test_menubar_icon_is_template_and_permission_hint(self):
@@ -461,7 +473,7 @@ class PetTest(unittest.TestCase):
 
     def test_panel_more_menu_and_icon_visibility_guard(self):
         html = pet.PET_HTML
-        self.assertIn('id="moreBtn" class="chip-btn" style="display:none;"', html)  # 브라우저에선 숨김
+        self.assertIn('id="moreBtn" class="close-x-btn" style="display:none;"', html)  # 브라우저에선 숨김
         more = html[html.index('const moreBtn = document.getElementById("moreBtn");'):]
         self.assertIn('notifyHost({ type: "menu" });', more[:400])
         # isNativeHost는 뒤에서 선언되므로 여기서 쓰면 TDZ 오류가 난다
@@ -475,6 +487,8 @@ class PetTest(unittest.TestCase):
         html = pet.PET_HTML
         self.assertIn("const GAIT_PERIODS = { calm: 3.2, walk: 1.6, busy: 0.8, hot: 0.4 };", html)
         self.assertIn('layerBase.addEventListener("animationiteration"', html)  # 사이클 끝에서만 바꾼다
+        self.assertIn('body[data-gait="calm"] { --gait-period: 3.2s; --gait-amp: 0.5; }', html)  # 한가해도 천천히 걷는다
+        self.assertIn("if (dockCaption !== null) return;", html)  # 끄는 중 캡션을 덮어쓰지 않는다
         self.assertIn('.mood-idle:not([class*="action-"])', html)  # 동작·표정이 우선
         self.assertIn("var(--gait-amp, 1)", html)  # 기존 걷기 동작은 진폭 1 그대로
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
@@ -503,8 +517,8 @@ class PetTest(unittest.TestCase):
         self.assertIn("if (!askInput.value) askInput.value = q;", submit)
         keydown = html[html.index('window.addEventListener("keydown"'):]
         self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))
-        self.assertIn("div.title = text;", html)
-        self.assertNotIn('logsBox.innerHTML = ""', html)
+        self.assertIn("text.title = item.summary;", html)  # 말줄임된 기록은 마우스를 올려 본다
+        self.assertIn("if (logsKey !== lastLogsKey) {", html)  # 폴링마다 같은 내용으로 다시 그리지 않는다
 
     def test_snapshot_rereads_disk_only_when_files_change(self):
         with tempfile.TemporaryDirectory() as d:
@@ -549,6 +563,28 @@ class PetTest(unittest.TestCase):
                 other.kill()
                 other.wait()
         self.assertFalse(pet._is_pet_process(1, "py_pid"))
+
+
+    def test_ask_without_map_does_not_scan(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            with mock.patch("ro.route.run") as run, mock.patch("ro.mapper.build_map") as build:
+                res = rt.ask_question("질문")
+            self.assertEqual((res["ok"], res["reason"]), (False, "needs_setup"))
+            run.assert_not_called()
+            build.assert_not_called()
+            self.assertFalse((Path(d) / "map.json").exists())
+
+    def test_ask_uses_preferred_engine_and_model(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "map.json").write_text(json.dumps({"projects": [], "tools": {}}))
+            (Path(d) / "config.json").write_text(json.dumps({"engine": "codex"}))
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            with mock.patch("ro.route.run", return_value={"ok": True, "code": 0, "duration": 0, "output": "x"}) as run, \
+                    mock.patch("ro.route.model_for", return_value="m-1"):
+                rt.ask_question("안녕")
+            self.assertEqual(run.call_args.args[0], "codex")
+            self.assertEqual(run.call_args.kwargs.get("model"), "m-1")
 
 
 if __name__ == "__main__":

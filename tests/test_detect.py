@@ -37,7 +37,10 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(sha, detect.sha256(old))
 
     def test_version_key(self):
-        self.assertEqual(detect.version_key("기획안_v13"), ("기획안", 13, True))
+        self.assertEqual(detect.version_key("기획안_v13"), ("기획안", (13,), True))
+        self.assertEqual(detect.version_key("app_v1.10"), ("app", (1, 10), True))
+        self.assertEqual(detect.version_key("report_final_final"), ("report", (2,), True))
+        self.assertEqual(detect.version_key("보고서 최종"), ("보고서", (1,), True))
         self.assertEqual(detect.version_key("문서 (2)"), ("문서", 2, False))
         self.assertEqual(detect.version_key("문서_1"), ("문서", 1, False))
         self.assertEqual(detect.version_key("Report"), ("report", None, False))
@@ -60,6 +63,16 @@ class DetectTest(unittest.TestCase):
     def test_norm_key_ignores_nfd(self):
         import unicodedata
         self.assertEqual(detect.norm_key(unicodedata.normalize("NFD", "/a/한글")), detect.norm_key("/a/한글"))
+
+
+    def test_version_groups_dotted_and_final(self):
+        self.w("app_v1.9.zip", "9", 2)
+        self.w("app_v1.10.zip", "10", 3)
+        self.w("report_final.docx", "a", 2)
+        self.w("report_final_final.docx", "b", 3)
+        got = {k[0].name: [p.name for p, _ in olds] for k, olds in detect.version_groups(self.files())}
+        self.assertEqual(got, {"app_v1.10.zip": ["app_v1.9.zip"],
+                               "report_final_final.docx": ["report_final.docx"]})
 
 
 if __name__ == "__main__":

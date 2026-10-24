@@ -2,6 +2,7 @@ import os
 import stat
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from ro import route
@@ -33,7 +34,7 @@ class RouteTest(unittest.TestCase):
     def test_run_with_fake_engine(self):
         with tempfile.TemporaryDirectory() as d:
             exe = os.path.join(d, "claude")
-            open(exe, "w").write("#!/bin/sh\necho fake-out\n")
+            Path(exe).write_text("#!/bin/sh\necho fake-out\n")
             os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
             with mock.patch.dict(os.environ, {"PATH": d}):
                 res = route.run("claude", "hi")
@@ -43,7 +44,7 @@ class RouteTest(unittest.TestCase):
     def test_engine_does_not_inherit_stdin(self):
         with tempfile.TemporaryDirectory() as d:
             exe = os.path.join(d, "claude")
-            open(exe, "w").write("#!/bin/sh\ncat\necho 끝\n")  # stdin을 읽으려는 엔진
+            Path(exe).write_text("#!/bin/sh\ncat\necho 끝\n")  # stdin을 읽으려는 엔진
             os.chmod(exe, os.stat(exe).st_mode | stat.S_IXUSR)
             with mock.patch.dict(os.environ, {"PATH": d}):
                 res = route.run("claude", "hi")  # stdin이 열려 있으면 여기서 멈춘다
