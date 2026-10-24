@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import CoreGraphics
 import Darwin
 import WebKit
@@ -354,11 +355,13 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var wanderTimer: Timer?
     private var backdropTimer: Timer?
     private var dragTimer: Timer?
+    private var fallTimer: Timer?
     private var isDragging: Bool = false
     private var backdropIsDark: Bool? = nil
     private var lastBackdropLum: Double = 0.5
     private var lastBackdropSampleTime: TimeInterval = 0
     private var cgWinImgFn: CGWinImgFn? = nil
+    private var hotKeyRef: EventHotKeyRef? = nil
 
     // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자+점프/흔들기 여유 공간(176x168)을 확보해 잘림 방지
     private let compactSize = NSSize(width: 176, height: 168)
@@ -407,6 +410,31 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         setupBackdropTimer()
         setupCPUSampler()
         observeIconConditions()
+        setupGlobalHotKey()
+    }
+
+    /// 어느 앱에서든 ⌥R로 명령 팔레트를 연다(Carbon 핫키: 접근성 권한 불필요).
+    private func setupGlobalHotKey() {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData = userData else { return noErr }
+            let delegate = Unmanaged<PetAppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { delegate.openPalette() }
+            return noErr
+        }, 1, &spec, me, nil)
+        let id = EventHotKeyID(signature: OSType(0x726f6274), id: 1)
+        RegisterEventHotKey(UInt32(kVK_ANSI_R), UInt32(optionKey), id, GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
+
+    @objc private func openPalette() {
+        if mode == .menubar && !bubbleOpen {
+            savedDesktopOrigin = savedDesktopOrigin ?? panel.frame.origin
+            panel.setFrameOrigin(menubarAnchorOrigin())
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        webView.evaluateJavaScript("window.openPaletteFromHost && window.openPaletteFromHost();", completionHandler: nil)
     }
 
     // 중복 실행 방지: 현재 프로세스 외에 다른 ro-pet-host가 떠 있으면 즉시 종료시킨다
@@ -566,10 +594,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let startMouse = NSEvent.mouseLocation
         let startOrigin = panel.frame.origin
         var moved = false
-        var prevMouse = startMouse
-        var lastDxSign = 0
-        var shakeCount = 0
-        var lastReversalTime = Date().timeIntervalSince1970
+        var tick = 0
         // 메뉴 막대로 보내기는 데스크톱 펫(말풍선 닫힘)을 끌 때만
         let canDock = fromPet && mode == .desktop && !bubbleOpen
         var inZone = false
@@ -577,6 +602,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         isDragging = true
 
         if fromPet {
+            // 누르는 순간 light 햅틱 1회 (트랙패드가 있는 맥에서만 느껴진다)
+            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
             webView.evaluateJavaScript(
                 "window.onHostDragStart && window.onHostDragStart(true);",
                 completionHandler: nil
@@ -591,30 +618,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let curMouse = NSEvent.mouseLocation
             let dx = curMouse.x - startMouse.x
             let dy = curMouse.y - startMouse.y
-            let stepDx = curMouse.x - prevMouse.x
-            let now = Date().timeIntervalSince1970
-
-            // 흔들기(shake) 감지: 0.35초 내에 좌우 방향 전환이 3회 이상 발생하면 shake 트리거
-            if abs(stepDx) > 6.0 {
-                let sign = stepDx > 0 ? 1 : -1
-                if sign != lastDxSign && lastDxSign != 0 {
-                    if (now - lastReversalTime) < 0.35 {
-                        shakeCount += 1
-                        if shakeCount >= 3 {
-                            self.webView.evaluateJavaScript(
-                                "window.onHostDragShake && window.onHostDragShake();",
-                                completionHandler: nil
-                            )
-                            shakeCount = 0
-                        }
-                    } else {
-                        shakeCount = 1
-                    }
-                    lastReversalTime = now
-                }
-                lastDxSign = sign
-            }
-            prevMouse = curMouse
+            tick += 1
 
             if hypot(dx, dy) > 8.0 {
                 moved = true
@@ -624,6 +628,13 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 let clamped = self.clampOrigin(target, size: self.panel.frame.size)
                 self.panel.setFrameOrigin(clamped)
                 self.updateBackdropTheme(force: false)
+                // 모션 엔진에 머리(창)의 위치를 스트리밍한다(약 60Hz). 속도·체인·기울기·흔들기 감지는 JS가 계산한다.
+                if fromPet && tick % 2 == 0 {
+                    self.webView.evaluateJavaScript(
+                        "window.onHostDragMove && window.onHostDragMove(\(clamped.x), \(-clamped.y));",
+                        completionHandler: nil
+                    )
+                }
             }
             if canDock && moved {
                 let top = (self.panel.screen ?? NSScreen.main)?.visibleFrame.maxY ?? curMouse.y
@@ -652,8 +663,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 }
                 self.updateBackdropTheme(force: true)
                 if fromPet {
+                    // 놓으면 중력(2400px/s²)으로 떨어진다. 낙하 거리는 최대 280ms 분량으로 제한한다.
+                    let fall = moved ? self.startFall() : 0
                     self.webView.evaluateJavaScript(
-                        "window.onHostDragEnd && window.onHostDragEnd(\(moved));",
+                        "window.onHostDragEnd && window.onHostDragEnd(\(moved), \(fall));",
                         completionHandler: nil
                     )
                 }
@@ -667,6 +680,33 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
         RunLoop.main.add(timer, forMode: .common)
         dragTimer = timer
+    }
+
+    /// 바닥(작업 영역 아래 여백)까지 떨어진다. 반환: 실제로 떨어진 거리(px). 최대 280ms 분량(≈94px).
+    private func startFall() -> CGFloat {
+        let g: CGFloat = 2400
+        let maxT: CGFloat = 0.28
+        let floorY = currentVisibleFrame().minY + edgeMargin
+        let startY = panel.frame.origin.y
+        let fall = min(max(0, startY - floorY), 0.5 * g * maxT * maxT)
+        if fall < 0.5 { return 0 }
+        let duration = sqrt(2 * fall / g)
+        let startX = panel.frame.origin.x
+        let begin = Date()
+        fallTimer?.invalidate()
+        fallTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            let t = CGFloat(Date().timeIntervalSince(begin))
+            if t >= duration {
+                self.panel.setFrameOrigin(NSPoint(x: startX, y: startY - fall))
+                self.updateBackdropTheme(force: true)
+                timer.invalidate()
+                self.fallTimer = nil
+                return
+            }
+            self.panel.setFrameOrigin(NSPoint(x: startX, y: startY - 0.5 * g * t * t))
+        }
+        return fall
     }
 
     // 놓는 순간 펫 창을 아이콘 자리로 빨아들이고 숨긴다. 다시 꺼내면 끌기 전 자리로 돌아온다
@@ -818,6 +858,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let talkItem = NSMenuItem(title: "패널 열기", action: #selector(toggleBubble), keyEquivalent: "k")
         talkItem.target = self
         menu.addItem(talkItem)
+        let paletteItem = NSMenuItem(title: "명령 팔레트 (⌥R)", action: #selector(openPalette), keyEquivalent: "")
+        paletteItem.target = self
+        menu.addItem(paletteItem)
 
         let moodMenu = NSMenu()
         let moods: [(String, String)] = [

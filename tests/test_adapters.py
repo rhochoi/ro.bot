@@ -16,6 +16,7 @@ class AdaptersTest(unittest.TestCase):
         self.assertIn(adapters.CANARY, adapters.render("agents", REPO))
         self.assertIn(adapters.CANARY, (REPO / adapters.PRINCIPLES).read_text())
         self.assertIn("@identity/principles.md", adapters.render("claude", REPO))
+        self.assertIn("scripts/delegate.sh", adapters.render("claude", REPO))
 
     def test_build_and_check_in_temp_root(self):
         with tempfile.TemporaryDirectory() as d:

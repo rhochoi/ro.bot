@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, config, fsutil, harden, learn, log, organize, route
+from . import ask, config, fsutil, harden, learn, log, mapper, organize, recall, records, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -104,6 +104,7 @@ ACTION_DESCS = {
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
+AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
@@ -132,6 +133,19 @@ def layer_widths(today_events_count, project_count=0, mood="idle"):
     return {"head": head, "body": body, "base": base,
             "head_u": HEAD_U, "body_u": 13 if mood == "resolved" else BODY_U,
             "base_u": MAX_U if mood in ("recording", "focus", "resolved") else BASE_U}
+
+
+BASE_PX_MIN = 60
+BASE_PX_STEP = 3
+BASE_PX_MAX = 140
+
+
+def ambient_state(today_count, hour, focus=False, held=0, attention=False):
+    """패널을 열지 않아도 몸이 상태를 말한다: 바닥 층 길이=60+3×오늘 기록 수(최대 140)."""
+    band = "아침" if hour < 12 else ("오후" if hour < 18 else "저녁")
+    return {"base_px": min(BASE_PX_MAX, BASE_PX_MIN + BASE_PX_STEP * today_count),
+            "band": band, "label": f"{band} · {today_count}건",
+            "focus": bool(focus), "held": int(held) if focus else 0, "attention": bool(attention)}
 
 
 def layer_offsets(mood="idle"):
@@ -229,10 +243,12 @@ class PetRuntime:
         self._last_event_count = None
         self._dismissed_fail_ts = None
         self._disk_cache = None
-        self.current_action = None
-        self.action_until = 0.0
         self.organize_root = organize.ROOT
         self.organize_dest = organize.DEST_ROOT
+        self.current_action = None
+        self.action_until = 0.0
+        self.focus_on = False
+        self._focus_base = 0
 
     def trigger_action(self, action, duration=4.0):
         """12가지 모션 상호작용(숨쉬기, 두리번, 걷기, 생각, 깜짝, 졸음, 시선, 쓰다듬기, 잡기, 흔들기, 착지, 성공, 실패)을 즉시 발동한다."""
@@ -254,6 +270,47 @@ class PetRuntime:
         now = now or time.time()
         with self._lock:
             self.recording_until = now + RECORDING_WINDOW_SEC
+
+    def _projects(self):
+        return (ask.load_map(self.map_path) or {}).get("projects", [])
+
+    def set_focus(self, on):
+        today = time.strftime("%Y-%m-%d")
+        with self._lock:
+            self.focus_on = bool(on)
+            self._focus_base = len([e for e in records.live(log.read_all(self.log_dir))
+                                    if str(e.get("ts", ""))[:10] == today])
+        return {"ok": True, "focus": self.focus_on}
+
+    def recall_question(self, question):
+        return recall.answer(question, log.read_all(self.log_dir), self._projects(), home=self.home)
+
+    def capture(self, kind, name, text, size):
+        return records.capture(kind, name, text, size, self._projects(), log_dir=self.log_dir)
+
+    def capture_undo(self, target_id):
+        return records.revoke(str(target_id or ""), log_dir=self.log_dir)
+
+    def capture_project(self, target_id, project):
+        names = {p["name"] for p in self._projects()}
+        if project not in names:
+            return {"ok": False, "error": "알 수 없는 프로젝트예요."}
+        events = log.read_all(self.log_dir)
+        if str(target_id) not in {records.eid(e) for e in events}:
+            return {"ok": False, "error": "해당 기록을 찾을 수 없어요."}
+        records._write({"batch": f"m{int(time.time())}", "ts": time.time(), "assign": {str(target_id): project}},
+                       self.home)
+        return {"ok": True}
+
+    def records_plan(self):
+        return records.plan(records.live(log.read_all(self.log_dir)), self._projects(), home=self.home)
+
+    def records_apply(self, picks):
+        picks = picks if isinstance(picks, dict) else {}
+        return records.apply(log.read_all(self.log_dir), self._projects(), picks, home=self.home)
+
+    def records_undo(self):
+        return records.undo(home=self.home)
 
     def clear_notice(self):
         """직전 답변 표시나 실패 알림을 닫고 기본 상태 화면으로 돌아간다."""
@@ -422,7 +479,7 @@ class PetRuntime:
         mono = time.monotonic()
         if cached and cached[0] == (day, sig) and mono - cached[1] < AUDIT_TTL_SEC:
             return cached[2]
-        today_events = log.read(day, self.log_dir)
+        today_events = records.live(log.read(day, self.log_dir))
         if cached and cached[0] == (day, sig):
             cands = cached[2][1]  # 로그·학습 파일이 그대로면 감사만 TTL마다 다시 돈다
         else:
@@ -489,6 +546,7 @@ class PetRuntime:
 
         recent_logs = [
             {
+                "id": records.eid(e),
                 "ts": e.get("ts", "")[11:19],
                 "kind": e.get("kind", ""),
                 "summary": log.redact(str(e.get("summary", ""))),
@@ -518,6 +576,10 @@ class PetRuntime:
             "material_label": MATERIAL_LABELS[material],
             "status_line": log.redact(status_line),
             "layers": layer_widths(len(today_events), len(projects), mood),
+            "ambient": ambient_state(
+                len(today_events), time.localtime(now).tm_hour, focus=self.focus_on,
+                held=max(0, len(today_events) - self._focus_base),
+                attention=bool(write_pending or findings or last_route_failed or cands)),
             "offsets": layer_offsets(mood),
             "counts": {
                 "today_events": len(today_events),
@@ -525,6 +587,7 @@ class PetRuntime:
                 "pending_rules": len(cands),
                 "audit_findings": len(findings),
             },
+            "project_names": [p["name"] for p in projects][:40],
             "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
             "organize": self.organize_summary(),
@@ -625,6 +688,8 @@ PET_HTML = r"""<!DOCTYPE html>
     --chalk-soft: #EFE9DC;
     --chalk-muted: #7E786D;
     --accent: #FF4B1F;
+    --accent-strong: #D93A12;
+    --accent-text: #C73310;
     --accent-hover: #E03E15;
     --accent-soft: rgba(255, 75, 31, 0.12);
     --bot-fill: var(--ink);
@@ -634,7 +699,7 @@ PET_HTML = r"""<!DOCTYPE html>
     --panel-soft: #F4F0E8;
     --panel-border: rgba(26, 25, 23, 0.12);
     --divider: #EAE7E0;
-    --muted: #7E786D;
+    --muted: #6E695F;
     --bubble-fill: var(--ink);
     --bubble-fg: var(--chalk);
   }
@@ -649,6 +714,7 @@ PET_HTML = r"""<!DOCTYPE html>
     --divider: #33312E;
     --muted: #9E988C;
     --chalk-muted: #9E988C;
+    --accent-text: #FF6A42;
     --bubble-fill: #F3EFE6;
     --bubble-fg: #1A1917;
   }
@@ -702,14 +768,9 @@ PET_HTML = r"""<!DOCTYPE html>
     transition: opacity 0.16s ease, transform 0.16s cubic-bezier(.22,1,.36,1), background-color 0.2s ease, border-color 0.2s ease;
     transform-origin: bottom right;
     position: relative;
-    /* 창(오버레이 360×530) 안에 맞춘다: 상단 바·입력창은 고정, 탭 내용만 스크롤 */
-    flex: 0 1 auto;
-    min-height: 0;
-    max-height: min(440px, 100%);
-    overflow: hidden;
+    max-height: 440px;
     box-sizing: border-box;
   }
-  .stage > .pet-wrap { flex-shrink: 0; }
   .bubble.hidden {
     display: none;
   }
@@ -789,7 +850,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .mood-tag:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .nav-tabs {
     display: flex;
@@ -865,13 +926,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .tab-pane.active {
     display: flex;
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    scrollbar-width: thin;
   }
-  .tab-pane > * { flex-shrink: 0; }
 
   /* 기본 (Home) 뷰 - 브리핑 & 필터 */
   .greeting-section {
@@ -963,7 +1018,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .gate-head {
     font-size: 10px;
     font-weight: 800;
-    color: var(--accent);
+    color: var(--accent-text);
     text-transform: uppercase;
     letter-spacing: 0.02em;
   }
@@ -998,43 +1053,6 @@ PET_HTML = r"""<!DOCTYPE html>
     border-color: var(--panel-border);
   }
   .action-btn.ghost:hover { background: var(--divider); }
-  .action-btn:disabled { opacity: 0.5; cursor: default; }
-  .gate-text {  /* 긴 후보 문장이 카드를 한없이 키우지 않게: 4줄까지, 전체는 title로 */
-    display: -webkit-box;
-    -webkit-line-clamp: 4;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .fb-done { font-size: 10px; color: var(--muted); }
-
-  /* 파일 정리 탭: 정리안(카테고리별 건수) → 칩 = 쓰기 승인 요청 → 위 승인 카드에서 실행 */
-  .org-box {
-    background: var(--panel-soft);
-    border: 1px solid var(--panel-border);
-    border-radius: 12px;
-    padding: 9px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .org-summary { font-size: 11px; line-height: 1.4; color: var(--panel-fg); }
-  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
-  .org-cats:empty { display: none; }
-  .org-chip {
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 2.5px 8px;
-    font-size: 10px;
-    font-weight: 700;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .org-chip:hover { border-color: var(--accent); color: var(--accent); }
-  .org-chip.quar { border-style: dashed; }
-  .org-msg { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
-  .org-msg:empty { display: none; }
 
   /* 최근 질문 답변 뷰 (답변 스트림) */
   .qa-card {
@@ -1182,7 +1200,6 @@ PET_HTML = r"""<!DOCTYPE html>
     overflow-y: auto;
     padding-right: 2px;
   }
-  .empty-note { font-size: 10.5px; color: var(--muted); text-align: center; padding: 14px 0; }
   .activity-card {
     display: flex;
     align-items: center;
@@ -1290,7 +1307,7 @@ PET_HTML = r"""<!DOCTYPE html>
     padding-bottom: 2px;
   }
   .orange-tag {
-    background: var(--accent);
+    background: var(--accent-strong);
     color: #FFFFFF;
     font-size: 9.5px;
     font-weight: 800;
@@ -1324,7 +1341,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .step-badge {
     font-size: 11px;
     font-weight: 800;
-    color: var(--accent);
+    color: var(--accent-text);
     min-width: 17px;
     line-height: 1.3;
   }
@@ -1394,12 +1411,12 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .mood-btn:hover {
     border-color: var(--accent);
-    color: var(--accent);
+    color: var(--accent-text);
   }
   .mood-btn.active {
-    background: var(--accent);
+    background: var(--accent-strong);
     color: #FFFFFF;
-    border-color: var(--accent);
+    border-color: var(--accent-strong);
     font-weight: 800;
   }
   .options-row {
@@ -1506,9 +1523,9 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-bg);
   }
   .act-btn.active {
-    background: var(--accent) !important;
+    background: var(--accent-strong) !important;
     color: #FFFFFF !important;
-    border-color: var(--accent) !important;
+    border-color: var(--accent-strong) !important;
     font-weight: 800;
   }
 
@@ -1932,10 +1949,158 @@ PET_HTML = r"""<!DOCTYPE html>
     color: #16161a;
     box-shadow: 0 1.5px 4px rgba(0, 0, 0, 0.16);
   }
+  :root {
+    --spring: linear(0, 0.031, 0.107, 0.208, 0.319, 0.429, 0.534, 0.628, 0.71, 0.78, 0.838, 0.884, 0.921, 0.949, 0.97, 0.985, 0.996, 1.003, 1.008, 1.01, 1);
+  }
+  [hidden] { display: none !important; }
+  .gate-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .fb-done { font-size: 10.5px; color: var(--muted); }
+  .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
+  .org-cats:empty, .org-msg:empty { display: none; }
+  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; }
+  .mini-btn.quar { background: transparent; }
+  .bubble { max-width: 100%; }
+  /* E · 앰비언트: 바닥 층 길이가 오늘 기록 수를 말한다 */
+  .ro-bot { width: max(calc(23 * var(--u)), var(--base-px, 0px)); }
+  .mood-idle .pill-base, .mood-discovery .pill-base, .mood-anxious .pill-base {
+    width: var(--base-px, calc(23 * var(--u))) !important;
+  }
+  .pill-base { transition: width 400ms var(--spring), transform 0.28s cubic-bezier(.22, 1, .36, 1), background-color 0.2s ease; }
+  .pet-wrap.focus-mode .eye-l, .pet-wrap.focus-mode .eye-r {
+    width: calc(2.2 * var(--u)) !important;
+    height: 2.5px !important;
+  }
+  .attn-dot {
+    position: absolute; top: -3px; right: -3px; width: 9px; height: 9px;
+    border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 2px var(--panel-bg);
+  }
+  .mute-badge {
+    position: absolute; top: -17px; right: -20px; display: flex; align-items: center; gap: 3px;
+    background: var(--panel-fg); color: var(--panel-bg); border-radius: 999px;
+    padding: 1px 6px; font-size: 10px; font-weight: 800;
+  }
+  /* A · 끌어다 놓기 */
+  .pet-wrap.drop-ready::before {
+    content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 2px solid var(--accent); animation: dropPulse 1s ease-in-out infinite; pointer-events: none;
+  }
+  @keyframes dropPulse { 0%, 100% { opacity: 0.55; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1.03); } }
+  .toast {
+    background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
+    padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; position: relative; overflow: hidden;
+  }
+  .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
+  .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
+  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+  .toast-row select {
+    background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
+    font: inherit; font-weight: 800; padding: 3px 8px;
+  }
+  .toast-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); width: 100%;
+    transform-origin: left; animation: toastBar 6s linear forwards; }
+  .toast:hover .toast-bar, .toast:focus-within .toast-bar { animation-play-state: paused; }
+  @keyframes toastBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+  .mini-btn {
+    border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg);
+    border-radius: 999px; font: inherit; font-size: 10.5px; font-weight: 700; padding: 3px 9px; cursor: pointer;
+  }
+  .mini-btn.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
+  body.theme-chalk .mini-btn.primary { background: var(--chalk); color: var(--ink); border-color: var(--chalk); }
+  /* C · 근거 붙은 답 · D · 정리 카드 */
+  .rc-card, .rec-org-card {
+    background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
+    padding: 10px 11px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .rc-q { align-self: flex-end; background: var(--ink); color: var(--chalk); border-radius: 999px; padding: 4px 10px; font-size: 11px; }
+  body.theme-chalk .rc-q { background: var(--chalk); color: var(--ink); }
+  .rc-head { font-size: 14px; font-weight: 800; }
+  .rc-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
+  .rc-n {
+    display: inline-block; min-width: 15px; text-align: center; margin-left: 5px; border-radius: 5px;
+    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 9.5px; font-weight: 800; color: var(--muted);
+  }
+  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 10.5px; }
+  .rc-ev summary { cursor: pointer; font-weight: 700; color: var(--muted); }
+  .rc-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--divider); }
+  .rc-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rc-row .d { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .rc-foot { font-size: 10px; color: var(--muted); }
+  .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .rec-org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
+  body.theme-chalk .rec-org-bar { background: var(--chalk); }
+  .rec-org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
+  .rec-org-row { display: flex; flex-direction: column; gap: 3px; }
+  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
+  .rec-org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
+  .rec-org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+  .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
+  /* B · ⌥R 명령 팔레트 */
+  .palette {
+    position: absolute; inset: 0; z-index: 6; border-radius: 20px; padding: 10px;
+    background: rgba(20, 19, 17, 0.38); display: flex; align-items: flex-start;
+  }
+  .pal-box {
+    width: 100%; background: var(--panel-bg); color: var(--panel-fg); border: 1px solid var(--panel-border);
+    border-radius: 14px; box-shadow: 0 12px 28px rgba(15, 14, 13, 0.3); overflow: hidden;
+  }
+  .pal-input-row { display: flex; align-items: center; gap: 6px; padding: 9px 11px; border-bottom: 1px solid var(--divider); }
+  .pal-slash { color: var(--accent-text); font-weight: 800; }
+  .pal-input { flex: 1; border: none; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12.5px; user-select: text; -webkit-user-select: text; }
+  .pal-list { max-height: 270px; overflow-y: auto; padding: 4px 5px; }
+  .pal-sec { font-size: 9.5px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
+  .pal-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 9px; font-size: 11.5px; cursor: pointer; }
+  .pal-item[aria-selected="true"] { background: var(--panel-soft); }
+  .pal-item b { font-weight: 800; min-width: 44px; }
+  .pal-item span { color: var(--muted); font-size: 10.5px; }
+  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 9.5px; color: var(--muted); }
+  kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
+  /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
+  .tab-pane.active { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+  .tab-pane.active > * { flex-shrink: 0; }
+  .streak { position: absolute; height: 2.5px; width: 12px; border-radius: 2px; background: var(--muted); opacity: 0; pointer-events: none; }
+  .pet-wrap[data-motion] .pet-label { opacity: 0; }
+  .pet-label { transition: opacity 0.18s ease; }
+  /* 모션 엔진 눈 모양: > <  ∩ ∩  - -  ◍ ◍  C ɔ */
+  .pet-wrap[data-motion] .pill { animation: none !important; }
+  .pet-wrap[data-eyes] .eye { transition: none !important; box-sizing: border-box; }
+  .pet-wrap[data-eyes="squint"] .eye, .pet-wrap[data-eyes="happy"] .eye, .pet-wrap[data-eyes="swirl"] .eye {
+    background: transparent !important; border: 0 solid var(--bot-eye); border-radius: 0;
+  }
+  .pet-wrap[data-eyes="squint"] .eye { width: calc(2.7 * var(--u)) !important; height: calc(2.7 * var(--u)) !important; }
+  .pet-wrap[data-eyes="squint"] .eye-l { border-top-width: 3px; border-right-width: 3px; transform: rotate(45deg) scale(0.8) !important; border-top-right-radius: 1px; }
+  .pet-wrap[data-eyes="squint"] .eye-r { border-top-width: 3px; border-left-width: 3px; transform: rotate(-45deg) scale(0.8) !important; border-top-left-radius: 1px; }
+  .pet-wrap[data-eyes="happy"] .eye {
+    width: calc(3 * var(--u)) !important; height: calc(2 * var(--u)) !important;
+    border-width: 2.5px 2.5px 0 2.5px; border-radius: 999px 999px 0 0; transform: none !important;
+  }
+  .pet-wrap[data-eyes="dash"] .eye { width: calc(2.4 * var(--u)) !important; height: 2.5px !important; border-radius: 2px; transform: none !important; }
+  .pet-wrap[data-eyes="big"] .eye { transform: scale(1.22) !important; }
+  .pet-wrap[data-eyes="swirl"] .eye {
+    width: calc(3 * var(--u)) !important; height: calc(3 * var(--u)) !important; border-width: 2.5px; border-radius: 50%;
+    animation: eyeSpin 0.6s linear infinite;
+  }
+  .pet-wrap[data-eyes="swirl"] .eye-l { border-right-color: transparent; }
+  .pet-wrap[data-eyes="swirl"] .eye-r { border-left-color: transparent; }
+  @keyframes eyeSpin { to { rotate: 360deg; } }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
 </style>
 </head>
 <body class="material-clay">
-<div id="stage" class="stage">
+<main id="stage" class="stage">
+  <h1 class="sr-only">ro.bot 펫</h1>
   <!-- 말풍선 패널 (Ro의 말풍선) -->
   <div id="bubble" class="bubble hidden">
     <div class="bubble-tail" aria-hidden="true"></div>
@@ -1949,23 +2114,12 @@ PET_HTML = r"""<!DOCTYPE html>
       <div class="nav-tabs">
         <button id="tabBtnHome" class="nav-tab active" data-tab="home">기본</button>
         <button id="tabBtnTimeline" class="nav-tab" data-tab="timeline">타임라인</button>
-        <button id="tabBtnOrganize" class="nav-tab" data-tab="organize" title="다운로드 폴더 분류·이름 정리">정리</button>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
         <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변/알림 닫기">초기화</button>
         <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
-      </div>
-    </div>
-
-    <!-- 쓰기 승인 게이트 카드: 어느 탭에서 요청했든 보이도록 탭 밖에 둔다 -->
-    <div id="writeCard" class="gate-box" style="display:none;">
-      <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
-      <div id="writeText" class="gate-body"></div>
-      <div class="gate-actions">
-        <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
-        <button id="writeRejectBtn" class="action-btn ghost">취소</button>
       </div>
     </div>
 
@@ -1999,7 +2153,27 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- 질문 답변 카드: 방금 한 질문의 결과라 승인 대기 카드보다 위에 둔다 -->
+      <!-- 쓰기 승인 게이트 카드 -->
+      <div id="writeCard" class="gate-box" style="display:none;">
+        <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
+        <div id="writeText" class="gate-body"></div>
+        <div class="gate-actions">
+          <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
+          <button id="writeRejectBtn" class="action-btn ghost">취소</button>
+        </div>
+      </div>
+
+      <!-- 규칙 학습 게이트 카드 -->
+      <div id="ruleCard" class="gate-box" style="display:none;">
+        <div id="ruleTitle" class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
+        <div id="ruleText" class="gate-body gate-text"></div>
+        <div class="gate-actions">
+          <button id="ruleApproveBtn" class="action-btn primary">승인</button>
+          <button id="ruleRejectBtn" class="action-btn ghost">거절</button>
+        </div>
+      </div>
+
+      <!-- 질문 답변 카드 -->
       <div id="answerCard" class="qa-card" style="display:none;">
         <div id="userMsgRow" class="user-msg-row">
           <div id="userQuestionPill" class="user-pill"></div>
@@ -2022,15 +2196,10 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- 규칙 학습 게이트 카드 -->
-      <div id="ruleCard" class="gate-box" style="display:none;">
-        <div id="ruleTitle" class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
-        <div id="ruleText" class="gate-text gate-body"></div>
-        <div class="gate-actions">
-          <button id="ruleApproveBtn" class="action-btn primary">승인</button>
-          <button id="ruleRejectBtn" class="action-btn ghost">거절</button>
-        </div>
-      </div>
+      <!-- C · 근거 붙은 답 -->
+      <div id="recallCard" class="rc-card" style="display:none;" aria-live="polite"></div>
+      <!-- D · 미리 보고 되돌리는 정리 -->
+      <div id="recOrgCard" class="rec-org-card" style="display:none;" aria-live="polite"></div>
 
       <!-- 최근 활동 섹션 -->
       <div class="section-row">
@@ -2049,27 +2218,29 @@ PET_HTML = r"""<!DOCTYPE html>
       <div id="timelineList" class="timeline-stream"></div>
     </div>
 
-    <!-- 3. 정리 (Organize) 탭: 칩을 누르면 승인 요청만 올라가고, 위 승인 카드에서 실행한다 -->
-    <div id="paneOrganize" class="tab-pane">
-      <div class="timeline-head-row">
-        <span class="orange-tag">파일 정리</span>
-        <span class="timeline-counter">승인 전에는 옮기지 않음</span>
-      </div>
-      <div id="orgCard" class="org-box">
-        <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
-        <div id="orgCats" class="org-cats"></div>
-        <div id="orgQuar" class="org-cats"></div>
-        <div class="gate-actions">
-          <button id="orgScanBtn" class="action-btn ghost">정리안 만들기</button>
-          <button id="orgUndoBtn" class="action-btn ghost" style="display:none;">되돌리기</button>
-        </div>
-        <div id="orgMsg" class="org-msg"></div>
-      </div>
-    </div>
-
-    <!-- 4. 설정 (Settings) 탭 -->
+    <!-- 3. 설정 (Settings) 탭 -->
     <div id="paneSettings" class="tab-pane">
       <div class="settings-stream">
+        <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 홈의 승인 카드에서 실행 -->
+        <div class="setting-block" id="fileOrgBlock">
+          <div class="block-title">파일 정리 (승인 전에는 옮기지 않음)</div>
+          <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
+          <div id="orgCats" class="org-cats"></div>
+          <div id="orgQuar" class="org-cats"></div>
+          <div class="options-row">
+            <button id="orgScanBtn" class="opt-btn">정리안 만들기</button>
+            <button id="orgUndoBtn" class="opt-btn" style="display:none;">되돌리기</button>
+          </div>
+          <div id="orgMsg" class="org-msg"></div>
+        </div>
+
+        <!-- 집중 모드 -->
+        <div class="setting-block">
+          <div class="block-title">집중 모드</div>
+          <div class="options-row">
+            <button id="focusBtn" class="opt-btn" aria-pressed="false">눈 감고 알림 모아두기</button>
+          </div>
+        </div>
         <!-- 표정 6종 -->
         <div class="setting-block">
           <div class="block-title">표정 (6종)</div>
@@ -2112,7 +2283,7 @@ PET_HTML = r"""<!DOCTYPE html>
               <span class="toggle-sub">화면 하단을 스스로 천천히 배회합니다</span>
             </div>
             <label class="switch">
-              <input id="wanderToggle" type="checkbox">
+              <input id="wanderToggle" type="checkbox" aria-label="돌아다니기">
               <span class="slider"></span>
             </label>
           </div>
@@ -2129,6 +2300,7 @@ PET_HTML = r"""<!DOCTYPE html>
             <button class="act-btn" data-act="alert">깜짝</button>
             <button class="act-btn" data-act="drowsy">졸음</button>
             <button class="act-btn" data-act="gaze">시선</button>
+            <button class="act-btn" data-act="press">누름</button>
             <button class="act-btn" data-act="pet">쓰다듬기</button>
             <button class="act-btn" data-act="drag">잡기</button>
             <button class="act-btn" data-act="shake">흔들기</button>
@@ -2137,6 +2309,23 @@ PET_HTML = r"""<!DOCTYPE html>
             <button class="act-btn" data-act="failure">실패</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- A · 기록 토스트 -->
+    <div id="toast" class="toast" role="status" aria-live="polite" style="display:none;"></div>
+
+    <!-- B · ⌥R 명령 팔레트 -->
+    <div id="palette" class="palette" hidden>
+      <div class="pal-box" role="dialog" aria-modal="true" aria-label="명령 팔레트">
+        <div class="pal-input-row">
+          <span class="pal-slash" aria-hidden="true">/</span>
+          <input id="palInput" class="pal-input" type="text" role="combobox" aria-expanded="true"
+                 aria-controls="palList" aria-label="명령을 고르거나 그냥 물어보세요" autocomplete="off"
+                 placeholder="명령을 고르거나 그냥 물어보세요">
+        </div>
+        <div id="palList" class="pal-list" role="listbox" aria-label="명령 목록"></div>
+        <div class="pal-foot"><span><kbd>↑↓</kbd> 이동</span><span><kbd>↵</kbd> 실행</span><span><kbd>esc</kbd> 닫기</span></div>
       </div>
     </div>
 
@@ -2160,7 +2349,10 @@ PET_HTML = r"""<!DOCTYPE html>
   <!-- RO 캐릭터: 층 셋, 눈 둘 (왼쪽 정렬) -->
   <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 메뉴 · 드래그: 이동 (위로 끌면 메뉴 막대로)">
     <div id="roBot" class="ro-bot">
+      <span id="streak" class="streak" aria-hidden="true"></span>
       <div id="layerHead" class="pill pill-head">
+        <span id="attnDot" class="attn-dot" aria-hidden="true" hidden></span>
+        <span id="muteBadge" class="mute-badge" hidden><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1H3z"/><line x1="2" y1="2" x2="14" y2="14"/></svg><span>0</span></span>
         <div id="eyesWrap" class="eyes">
           <div id="eyeL" class="eye eye-l"></div>
           <div id="eyeR" class="eye eye-r"></div>
@@ -2174,7 +2366,7 @@ PET_HTML = r"""<!DOCTYPE html>
     </div>
     <div id="petCaption" class="pet-label">기본</div>
   </div>
-</div>
+</main>
 
 <script>
 const TOKEN = "__RO_TOKEN__";
@@ -2189,6 +2381,7 @@ const MOOD_META = {
 const MOOD_ORDER = ["idle", "recording", "focus", "anxious", "discovery", "resolved"];
 
 const ACTION_META = {
+  press:       { label: "누름",        desc: "80ms 납작 → 스프링 · 반가운 눈 (클릭·탭)" },
   breathe:     { label: "숨쉬기",      desc: "3개 층 시차 숨쉬기 (3초 루프)" },
   look_around: { label: "두리번",      desc: "눈이 먼저 가는 두리번" },
   walk:        { label: "걷기",        desc: "바닥-몸-머리 순차 이동" },
@@ -2216,7 +2409,6 @@ const closeBtn = document.getElementById("closeBtn");
 
 const paneHome = document.getElementById("paneHome");
 const paneTimeline = document.getElementById("paneTimeline");
-const paneOrganize = document.getElementById("paneOrganize");
 const paneSettings = document.getElementById("paneSettings");
 
 const greetingTitle = document.getElementById("greetingTitle");
@@ -2234,20 +2426,26 @@ const userQuestionPill = document.getElementById("userQuestionPill");
 const roMainBubble = document.getElementById("roMainBubble");
 const subStatusText = document.getElementById("subStatusText");
 const feedbackBtns = document.getElementById("feedbackBtns");
-const fbDone = document.getElementById("fbDone");
-
-const writeCard = document.getElementById("writeCard");
-const writeText = document.getElementById("writeText");
-const ruleCard = document.getElementById("ruleCard");
 const ruleTitle = document.getElementById("ruleTitle");
-const ruleText = document.getElementById("ruleText");
-
 const orgSummary = document.getElementById("orgSummary");
 const orgCats = document.getElementById("orgCats");
 const orgQuar = document.getElementById("orgQuar");
 const orgScanBtn = document.getElementById("orgScanBtn");
 const orgUndoBtn = document.getElementById("orgUndoBtn");
 const orgMsg = document.getElementById("orgMsg");
+const fbDone = document.getElementById("fbDone");
+let fbDoneUntil = 0;
+let askNotice = null;   // 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
+let askNoticeUntil = 0;
+let lastActKey = "";
+let lastTlKey = "";
+let orgKey = "";
+let pendingKind = null;
+
+const writeCard = document.getElementById("writeCard");
+const writeText = document.getElementById("writeText");
+const ruleCard = document.getElementById("ruleCard");
+const ruleText = document.getElementById("ruleText");
 
 const logCountBadge = document.getElementById("logCountBadge");
 const activityList = document.getElementById("activityList");
@@ -2270,13 +2468,6 @@ const eyeL = document.getElementById("eyeL");
 const eyeR = document.getElementById("eyeR");
 
 let currentRuleId = null;
-let orgKey = "";
-let pendingKind = null;
-let fbDoneUntil = 0;
-// 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 답변 카드를 덮어쓰지 않게 한다
-let askNotice = null;
-let askNoticeUntil = 0;
-let lastLogsKey = "";
 let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
@@ -2295,7 +2486,6 @@ function switchTab(tabName) {
   });
   paneHome.classList.toggle("active", tabName === "home");
   paneTimeline.classList.toggle("active", tabName === "timeline");
-  paneOrganize.classList.toggle("active", tabName === "organize");
   paneSettings.classList.toggle("active", tabName === "settings");
 }
 
@@ -2516,11 +2706,12 @@ window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (document.activeElement === askInput && askInput.value) {
     askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
-    askInput.dispatchEvent(new Event("input"));
     return;
   }
   setBubbleOpen(false);
 });
+
+const MOTION_DEMOS = ["press", "drag", "shake", "drop"];
 
 /* 모션 상호작용 컨트롤러 */
 window.triggerAction = function(name, durationMs) {
@@ -2548,6 +2739,12 @@ window.triggerAction = function(name, durationMs) {
     return { ok: true, cleared: true };
   }
 
+  if (MOTION_DEMOS.includes(name)) {                  // 누름·잡기·흔들기·놓기는 모션 엔진이 재생한다
+    const meta = ACTION_META[name];
+    if (meta) { petCaption.textContent = meta.label; subStatusText.textContent = meta.desc; }
+    if (!RoMotion.busy()) RoMotion.demo(name);
+    return { ok: true, action: name, duration: 0 };
+  }
   const cls = `action-${name.replace(/_/g, "-")}`;
   petWrap.classList.add(cls);
 
@@ -2567,12 +2764,10 @@ window.triggerAction = function(name, durationMs) {
 };
 
 /* 호스트 드래그 브리지 */
-window.onHostDragStart = function(fromPet) {
-  if (fromPet) window.triggerAction("drag", 0);
-};
-window.onHostDragShake = function() {
-  window.triggerAction("shake", 1200);
-};
+window.onHostDragStart = function(fromPet) {};   /* 누름은 JS mousedown이 시작한다 */
+window.onHostDragMove = function(x, y) { RoMotion.move(x, y, performance.now(), true); };
+window.onHostDragShake = function() {};          /* 흔들기 감지는 모션 엔진이 속도에서 직접 한다 */
+window.onHostDragEnd = function(moved, fallPx) { RoMotion.up(performance.now(), !!moved, fallPx || 0); };
 /* 메뉴 막대로 보내기: 위쪽 80px 구역 안에서의 진행률(0~1)을 호스트가 넘긴다 */
 window.onHostDockProgress = function(p) {
   petWrap.style.setProperty("--dock", p);
@@ -2586,20 +2781,18 @@ window.onHostDockProgress = function(p) {
   }
 };
 
+/* 메뉴 막대로 들어가면 호스트가 onHostDragEnd 대신 이걸 부른다. 잡힌 자세를 풀어 다음에 꺼낼 때 깨끗하게 */
 window.onHostDocked = function() {
   window.onHostDockProgress(0);
+  RoMotion.reset();
+  RoMotion.clearStyles();
   window.triggerAction(null);
-};
-
-window.onHostDragEnd = function(moved) {
-  if (moved) window.triggerAction("drop", 650);
-  else window.triggerAction(null);
 };
 
 /* 마우스 쓰다듬기 */
 let isPetHover = false;
 petWrap.addEventListener("mouseenter", () => {
-  if (currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
+  if (RoMotion.busy() || currentAction === "drag" || currentAction === "shake" || currentAction === "drop") return;
   if (isDrowsy) { wakeUpFromSleep(); return; }
   isPetHover = true;
   window.triggerAction("pet", 0);
@@ -2612,13 +2805,6 @@ petWrap.addEventListener("mouseleave", () => {
   }
 });
 
-/* 마우스가 창 밖으로 나가면 시선을 가운데로 되돌린다 */
-document.documentElement.addEventListener("mouseleave", () => {
-  if (currentAction) return;
-  eyesWrap.style.transform = "";
-  layerHead.style.transform = "";
-});
-
 /* 마우스 시선 추적 */
 window.addEventListener("mousemove", (e) => {
   recordActivity();
@@ -2627,7 +2813,7 @@ window.addEventListener("mousemove", (e) => {
     layerHead.style.transform = "";
     return;
   }
-  if (isPetHover || currentAction) return;
+  if (isPetHover || currentAction || RoMotion.busy()) return;
   const rect = layerHead.getBoundingClientRect();
   const cx = rect.left + rect.width * 0.68;
   const cy = rect.top + rect.height * 0.5;
@@ -2673,7 +2859,7 @@ setInterval(() => {
 }, 4000);
 
 setInterval(() => {
-  if (isDrowsy || isPetHover || currentAction || currentMood !== "idle") return;
+  if (isDrowsy || isPetHover || currentAction || RoMotion.busy() || currentMood !== "idle") return;
   if (Math.random() < 0.40) {
     window.triggerAction("look_around", 3200);
   }
@@ -2706,6 +2892,10 @@ function moveStageBy(dx, dy) {
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
   if (e.target.closest("button") || e.target.closest("input")) return;
+  if (fromPet) {
+    if (currentAction === "pet") window.triggerAction(null);   // 쓰다듬기 호버와 겹치지 않게
+    RoMotion.down(performance.now());
+  }
   if (isNativeHost) {
     notifyHost({ type: "dragStart", fromPet: !!fromPet });
     return;
@@ -2714,7 +2904,6 @@ function beginDrag(e, fromPet) {
   webLastX = e.screenX;
   webDidDrag = false;
   webShakeCount = 0;
-  if (fromPet) window.triggerAction("drag", 0);
 }
 
 petWrap.addEventListener("mousedown", (e) => beginDrag(e, true));
@@ -2722,27 +2911,9 @@ bubbleTop.addEventListener("mousedown", (e) => beginDrag(e, false));
 
 window.addEventListener("mousemove", (e) => {
   if (isNativeHost || !webDragStart) return;
+  RoMotion.move(e.screenX, e.screenY, performance.now());
   const dx = e.screenX - webDragStart.x;
   const dy = e.screenY - webDragStart.y;
-  const stepDx = e.screenX - webLastX;
-  const now = Date.now();
-  if (Math.abs(stepDx) > 8) {
-    const sign = stepDx > 0 ? 1 : -1;
-    if (sign !== webLastDxSign && webLastDxSign !== 0) {
-      if (now - webLastReversal < 320) {
-        webShakeCount++;
-        if (webShakeCount >= 3) {
-          window.triggerAction("shake", 1200);
-          webShakeCount = 0;
-        }
-      } else {
-        webShakeCount = 1;
-      }
-      webLastReversal = now;
-    }
-    webLastDxSign = sign;
-  }
-  webLastX = e.screenX;
   if (Math.abs(dx) > 7 || Math.abs(dy) > 7) {
     webDidDrag = true;
     webDragStart = { x: e.screenX, y: e.screenY };
@@ -2752,20 +2923,18 @@ window.addEventListener("mousemove", (e) => {
 });
 
 window.addEventListener("mouseup", () => {
-  if (!isNativeHost && webDragStart) {
-    if (webDidDrag) window.triggerAction("drop", 650);
-    else if (currentAction === "drag") window.triggerAction(null);
-  }
+  if (!isNativeHost && webDragStart) RoMotion.up(performance.now(), webDidDrag, 0);
   webDragStart = null;
 });
 
 petWrap.addEventListener("click", () => {
-  if (isNativeHost || webDidDrag) return;
+  if (isNativeHost || webDidDrag || !RoMotion.consumeClick()) return;
   if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 });
 
 window.onPetClickFromHost = function() {
+  if (!RoMotion.consumeClick()) return;
   if (isDrowsy) wakeUpFromSleep();
   setBubbleOpen(bubble.classList.contains("hidden"));
 };
@@ -2858,9 +3027,6 @@ function applyState(st) {
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = askNotice.q;
     roMainBubble.textContent = askNotice.msg;
-    subStatusText.textContent = askNotice.sub || "풀어내는 중...";
-    feedbackBtns.style.display = "none";
-    fbDone.style.display = "none";
   } else if (st.last_answer) {
     answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
@@ -2875,11 +3041,13 @@ function applyState(st) {
   }
 
   renderOrganize(st.organize);
+  const wasPending = pendingKind;
   pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
 
   if (st.write_pending) {
     writeCard.style.display = "flex";
     writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
+    if (!wasPending) writeCard.scrollIntoView({ block: "nearest" });  // 새 승인 요청은 보이는 곳으로
   } else {
     writeCard.style.display = "none";
   }
@@ -2897,55 +3065,70 @@ function applyState(st) {
     ruleCard.style.display = "none";
   }
 
-  // 4·5. 최근 활동(기본 탭)·타임라인(타임라인 탭): 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+  // 4. 최근 활동 리스트 (기본 탭)
   const logs = st.recent_logs || [];
-  const logsKey = `${todayCount}\n` + logs.map((item) => `${item.ts} ${item.kind} ${item.summary}`).join("\n");
-  if (logsKey !== lastLogsKey) {
-    lastLogsKey = logsKey;
-    renderLogs(logs, todayCount);
-  }
-}
-
-/* 기록 내용은 파일·웹에서 온 데이터일 수 있으니 textContent로만 넣는다(HTML로 해석하지 않는다) */
-function el(tag, cls, text) {
-  const node = document.createElement(tag);
-  if (cls) node.className = cls;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function renderLogs(logs, todayCount) {
   logCountBadge.textContent = `${logs.length}건`;
-  if (logs.length === 0) {
-    activityList.replaceChildren(el("div", "empty-note", "오늘 아직 기록이 없습니다."));
-  } else {
-    activityList.replaceChildren(...logs.slice().reverse().slice(0, 4).map((item) => {
-      const card = el("div", "activity-card");
-      const title = el("span", "act-summary", item.summary);
-      title.title = `${item.kind} · ${item.summary}`;  // 말줄임된 내용은 마우스를 올려 본다
-      card.append(el("span", `act-dot ${item.kind === "route" ? "route" : ""}`), title,
-                  el("span", "act-time", (item.ts || "").slice(0, 5)));
-      return card;
-    }));
+  const actKey = JSON.stringify(logs.slice(-4));
+  if (actKey !== lastActKey) {  // 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
+    lastActKey = actKey;
+    activityList.innerHTML = "";
+    if (logs.length === 0) {
+      activityList.innerHTML = '<div style="font-size:10.5px;color:var(--muted);text-align:center;padding:12px 0;">오늘 아직 기록이 없습니다.</div>';
+    } else {
+      logs.slice().reverse().slice(0, 4).forEach((item) => {
+        const card = document.createElement("div");
+        card.className = "activity-card";
+
+        const dot = document.createElement("span");
+        dot.className = `act-dot ${item.kind === "route" ? "route" : ""}`;
+
+        const title = document.createElement("span");
+        title.className = "act-summary";
+        title.textContent = item.summary;
+        title.title = `${item.kind} · ${item.summary}`;
+
+        const time = document.createElement("span");
+        time.className = "act-time";
+        time.textContent = (item.ts || "").slice(0, 5);
+
+        card.appendChild(dot);
+        card.appendChild(title);
+        card.appendChild(time);
+        activityList.appendChild(card);
+      });
+    }
   }
 
+  // 5. 타임라인 리스트 (타임라인 탭)
   timelineCountText.textContent = `오늘 ${todayCount}건`;
-  if (logs.length === 0) {
-    timelineList.replaceChildren(el("div", "empty-note", "기록된 내역이 없습니다."));
-    return;
+  const tlKey = JSON.stringify(logs);
+  if (tlKey !== lastTlKey) {
+    lastTlKey = tlKey;
+    timelineList.innerHTML = "";
+    if (logs.length === 0) {
+      timelineList.innerHTML = '<div style="font-size:11px;color:var(--muted);text-align:center;padding:24px 0;">기록된 내역이 없습니다.</div>';
+    } else {
+      const total = logs.length;
+      logs.slice().reverse().forEach((item, idx) => {
+        const stepIndex = String(total - idx).padStart(2, "0");
+        const row = document.createElement("div");
+        row.className = "timeline-row";
+        row.dataset.id = item.id || "";
+        row.innerHTML = `
+          <span class="step-badge">${stepIndex}</span>
+          <div class="timeline-body">
+            <div class="timeline-meta">
+              <span class="timeline-tag">${esc(item.kind)}</span>
+              <span class="timeline-time">${esc(item.ts)}</span>
+            </div>
+            <div class="timeline-text">${esc(item.summary)}</div>
+          </div>
+        `;
+        timelineList.appendChild(row);
+      });
+    }
   }
-  // 번호는 오늘 몇 번째 기록인지: 버퍼(최근 10건) 안 위치가 아니라 위의 '오늘 N건'과 맞춘다
-  timelineList.replaceChildren(...logs.slice().reverse().map((item, idx) => {
-    const row = el("div", "timeline-row");
-    const body = el("div", "timeline-body");
-    const meta = el("div", "timeline-meta");
-    meta.append(el("span", "timeline-tag", item.kind), el("span", "timeline-time", item.ts));
-    const text = el("div", "timeline-text", item.summary);
-    text.title = item.summary;
-    body.append(meta, text);
-    row.append(el("span", "step-badge", String(todayCount - idx).padStart(2, "0")), body);
-    return row;
-  }));
+  applyAmbient(st);
 }
 
 /* 상태 폴링: 말풍선이 열려 있을 때만 0.45초, 닫혀 있으면 2초.
@@ -2977,7 +3160,6 @@ askForm.addEventListener("submit", async (e) => {
   askInput.disabled = true;
   askSubmit.disabled = true;
   previewLockUntil = 0;
-  switchTab("home");  // 답변 카드는 기본 탭에 있다
   askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
   askNoticeUntil = Infinity;
   answerCard.style.display = "flex";
@@ -2985,7 +3167,6 @@ askForm.addEventListener("submit", async (e) => {
   userQuestionPill.textContent = q;
   roMainBubble.textContent = askNotice.msg;
   subStatusText.textContent = "풀어내는 중...";
-  answerCard.scrollIntoView({ block: "nearest" });
   petWrap.className = "pet-wrap mood-focus";
   let res = null;
   try {
@@ -3000,9 +3181,7 @@ askForm.addEventListener("submit", async (e) => {
   if (!res || !res.ok) {
     // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
     if (!askInput.value) askInput.value = q;
-    askInput.dispatchEvent(new Event("input"));
-    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다.",
-                  sub: "답을 받지 못했어요 · 질문은 입력창에 남겨 두었어요" };
+    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
     askNoticeUntil = Date.now() + 8000;
   }
   await refreshState();
@@ -3030,18 +3209,19 @@ document.getElementById("writeRejectBtn").addEventListener("click", async () => 
   if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
   await refreshState();
 });
-
-/* 파일 정리 탭: 칩은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
+/* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
 function fmtBytes(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
 }
 
 function orgChip(parent, text, title, body, cls) {
-  const b = el("button", cls ? `org-chip ${cls}` : "org-chip", text);
+  const b = document.createElement("button");
+  b.className = cls ? `mini-btn ${cls}` : "mini-btn";
+  b.textContent = text;
   b.title = title;
   b.addEventListener("click", async () => {
     const r = await apiPost("/api/organize/apply", body);
-    orgMsg.textContent = r.ok ? "위 승인 카드에서 승인하면 실행합니다." : (r.output || "");
+    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
     await refreshState();
   });
   parent.appendChild(b);
@@ -3093,10 +3273,9 @@ orgScanBtn.addEventListener("click", async () => {
 });
 orgUndoBtn.addEventListener("click", async () => {
   const r = await apiPost("/api/organize/undo", {});
-  orgMsg.textContent = r.ok ? "위 승인 카드에서 승인하면 되돌립니다." : (r.output || "");
+  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
   await refreshState();
 });
-
 async function sendFeedback(accepted) {
   let res = null;
   try {
@@ -3109,6 +3288,726 @@ async function sendFeedback(accepted) {
 }
 document.getElementById("fbYes").addEventListener("click", () => sendFeedback(true));
 document.getElementById("fbNo").addEventListener("click", () => sendFeedback(false));
+
+/* 마우스가 창 밖으로 나가면 시선을 가운데로 되돌린다 */
+document.documentElement.addEventListener("mouseleave", () => {
+  if (currentAction || RoMotion.busy()) return;
+  eyesWrap.style.transform = "";
+  layerHead.style.transform = "";
+});
+
+/* ===== 모션 엔진: 07 누름 · 08 잡기·끌기 · 09 흔들기 · 10 놓기 =====
+   시간(ms)을 인자로 받는 결정적 상태기계다. 실제 구동은 rAF가, 테스트는 advance(t)가 맡는다. */
+const RoMotion = (() => {
+  const SPEC = {
+    press: { ms: 80, sx: 1.08, sy: 0.86, rel: [600, 15], delay: [60, 30, 0], happyAfter: 240, happyMs: 600, doneMs: 1000 },
+    grab: { holdMs: 300, moveStart: 8, hang: [5, 17], hangSpring: [400, 24], follow: [1.0, 0.35, 0.2], damping: 0.65, tilt: 0.25, tiltMax: 8,
+            maxLag: 60, wobbleDeg: 1.4, wobbleHz: 1.5 },
+    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 10, dizzyAfter: 1500, dizzyMs: 1200,
+             spinMs: 600, endGap: 450, calmMs: 900, stopSpeed: 150, stopMs: 100, calmDamping: 12 },
+    drop: { g: 2400, maxFallMs: 280, stretch: [0.94, 1.08], landMs: 90, land: [1.12, 0.82], bounce: 0.2,
+            bounceSpring: [500, 18], stack: [0, 60, 120], restMs: 360, fadeMs: 150 },
+    gap: 1,
+  };
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const powerOut = (t, p = 2) => 1 - Math.pow(1 - clamp(t, 0, 1), p);
+
+  /* 질량 1, spring(stiffness, damping)의 단위 스텝 응답(0→1, 오버슈트 포함) */
+  function springStep(k, c, sec) {
+    if (sec <= 0) return 0;
+    const w0 = Math.sqrt(k), z = c / (2 * w0);
+    if (z < 1) {
+      const wd = w0 * Math.sqrt(1 - z * z);
+      return 1 - Math.exp(-z * w0 * sec) * (Math.cos(wd * sec) + (z * w0 / wd) * Math.sin(wd * sec));
+    }
+    if (z === 1) return 1 - Math.exp(-w0 * sec) * (1 + w0 * sec);
+    const s = Math.sqrt(z * z - 1), r1 = -w0 * (z - s), r2 = -w0 * (z + s);
+    return 1 - (r2 * Math.exp(r1 * sec) - r1 * Math.exp(r2 * sec)) / (r2 - r1);
+  }
+  /* 임펄스 응답의 첫 마루를 1로 정규화한 한 번의 튕김(0→1→0) */
+  const [BK, BC] = SPEC.drop.bounceSpring;
+  const BW0 = Math.sqrt(BK), BZ = BC / (2 * BW0), BWD = BW0 * Math.sqrt(1 - BZ * BZ);
+  const BHALF = Math.PI / BWD;
+  let BPEAK = 0;
+  for (let i = 0; i <= 200; i++) { const s = i / 200 * BHALF; BPEAK = Math.max(BPEAK, Math.exp(-BZ * BW0 * s) * Math.sin(BWD * s)); }
+  const bounce1 = (sec) => (sec <= 0 || sec >= BHALF) ? 0 : Math.exp(-BZ * BW0 * sec) * Math.sin(BWD * sec) / BPEAK;
+
+  let S;
+  let dims = null;
+  let manual = false;
+  let raf = null;
+  const now = () => performance.now();
+  const reducedNow = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+  const mkPos = (x, y) => ({ x, y, vx: 0, vy: 0 });
+  function reset() {
+    S = { phase: "idle", downAt: null, upAt: null, grabAt: null, grabbed: false, tap: false,
+          anchor: null, head: { x: 0, y: 0 }, pos: [mkPos(0, 0), mkPos(0, 0), mkPos(0, 0)],
+          vx: 0, vy: 0, lastMoveT: null, peak: 0, sign: 0, revs: [], tau: 80,
+          shakeActive: false, shakeStart: null, shakeLast: -1e9, shakeEnd: null, dizzyUntil: 0, sg: 0, slowSince: null,
+          hist: [], osc: [{ th: 0, w: 0 }, { th: 0, w: 0 }, { th: 0, w: 0 }], simT: 0,
+          dropAt: null, fall: 0, tFall: 0.1, L0: null, reduced: false };
+  }
+  reset();
+
+  function measure() {
+    const bot = document.getElementById("roBot");
+    const els = [layerHead, layerBody, layerBase];
+    if (!bot || !els[0]) { dims = null; return; }
+    dims = els.map(e => {
+      const cs = getComputedStyle(e);
+      return { x: e.offsetLeft, y: e.offsetTop, w: parseFloat(cs.width) || e.offsetWidth, h: parseFloat(cs.height) || e.offsetHeight };
+    });
+  }
+
+  function down(t) {
+    reset();
+    S.reduced = reducedNow();
+    measure();
+    S.phase = "press";
+    S.downAt = t;
+    S.simT = t;
+    ensureLoop();
+  }
+
+  function enterGrab(t) {
+    S.phase = "grab";
+    S.grabAt = t;
+    S.grabbed = true;
+    S.upAt = t;                       // 눌림은 스프링으로 풀린다
+    S.pos = S.pos.map(() => mkPos(S.head.x, S.head.y));
+  }
+
+  function pushReversal(t) {
+    S.revs.push(t);
+    S.revs = S.revs.filter(r => t - r <= SPEC.shake.windowMs);
+    if (S.revs.length >= 2) {
+      const iv = S.revs[S.revs.length - 1] - S.revs[S.revs.length - 2];
+      S.tau = clamp(iv * 0.667, 40, 160);   // 층별 위상 120° 차이
+    }
+    if (S.revs.length >= SPEC.shake.reversals) {
+      if (!S.shakeActive) { S.shakeActive = true; S.shakeStart = S.shakeStart ?? t; }
+      S.shakeLast = t;
+    }
+  }
+
+  function move(x, y, t, force = false) {
+    if (S.phase === "idle" || S.phase === "drop") return;
+    advance(t);
+    if (S.phase === "press") {
+      if (S.upAt != null) return;
+      if (!S.anchor) S.anchor = { x, y };
+      S.head = { x, y };
+      if (force || Math.hypot(x - S.anchor.x, y - S.anchor.y) > SPEC.grab.moveStart) { enterGrab(t); S.head = { x, y }; S.pos = S.pos.map(() => mkPos(x, y)); S.lastMoveT = t; }
+      return;
+    }
+    const dtm = Math.max(1, t - (S.lastMoveT ?? t - 16));
+    const rawX = (x - S.head.x) / dtm * 1000, rawY = (y - S.head.y) / dtm * 1000;
+    S.vx = 0.5 * S.vx + 0.5 * rawX;
+    S.vy = 0.5 * S.vy + 0.5 * rawY;
+    S.head = { x, y };
+    S.lastMoveT = t;
+    S.hist.push({ t, v: S.vx });
+    while (S.hist.length && t - S.hist[0].t > 1500) S.hist.shift();
+    const sign = S.vx > 60 ? 1 : S.vx < -60 ? -1 : 0;
+    if (sign !== 0) {
+      if (S.sign !== 0 && sign !== S.sign) {
+        if (S.peak >= SPEC.shake.speed) pushReversal(t);
+        S.peak = 0;
+      }
+      S.sign = sign;
+      S.peak = Math.max(S.peak, Math.abs(S.vx));
+    }
+  }
+
+  function up(t, moved = false, fall = 0) {
+    if (S.phase === "idle") return;
+    advance(t);
+    if (S.phase === "press") {
+      if (S.upAt == null) { S.upAt = t; S.tap = true; }
+      return;
+    }
+    if (S.phase === "grab") startDrop(t, fall);
+  }
+
+  function startDrop(t, fall) {
+    S.L0 = grabLayers(t);                              // 놓는 순간의 매달린 자세를 기억한다
+    if (S.shakeActive) { S.shakeActive = false; S.shakeEnd = S.shakeLast; }
+    if (S.shakeEnd != null && S.shakeLast - S.shakeStart >= SPEC.shake.dizzyAfter) S.dizzyUntil = Math.max(S.dizzyUntil, t + SPEC.shake.dizzyMs);
+    S.phase = "drop";
+    S.dropAt = t;
+    S.fall = Math.max(0, fall);
+    const sec = S.fall > 0.5 ? Math.sqrt(2 * S.fall / SPEC.drop.g) : 0.1;
+    S.tFall = clamp(sec, 0.04, SPEC.drop.maxFallMs / 1000);
+  }
+
+  function stepSim(cur, dt) {
+    // 체인: 프레임당 추종률 k의 정상 지연(τ)을 유지하면서, 멈출 때 관성으로 살짝 넘어가도록 감쇠 스프링으로 푼다
+    const f = SPEC.grab.follow, Z = SPEC.grab.damping, sec = dt / 1000;
+    for (let i = 1; i < 3; i++) {
+      const w = 2 * Z / (0.016667 / -Math.log(1 - f[i]));
+      const p = S.pos[i];
+      p.vx += (w * w * (S.head.x - p.x) - 2 * Z * w * p.vx) * sec;
+      p.vy += (w * w * (S.head.y - p.y) - 2 * Z * w * p.vy) * sec;
+      p.x += p.vx * sec;
+      p.y += p.vy * sec;
+    }
+    S.pos[0] = mkPos(S.head.x, S.head.y);
+    const gate = S.shakeActive || (S.shakeEnd != null && cur - S.shakeEnd < SPEC.shake.calmMs) ? 1 : 0;
+    const [k, c0] = SPEC.shake.spring;
+    const c = S.shakeActive ? c0 : SPEC.shake.calmDamping;      // 멈춘 뒤엔 900ms 안에 가라앉도록 조금 더 감쇠
+    S.sg += ((S.shakeActive ? 1 : 0) - S.sg) * (1 - Math.exp(-dt / (S.shakeActive ? 40 : 150)));
+    for (let i = 0; i < 3; i++) {
+      const u = gate ? clamp(velAt(cur - i * S.tau) / SPEC.shake.speed, -1, 1) * SPEC.shake.maxRot : 0;
+      const o = S.osc[i];
+      o.w += (k * (u - o.th) - c * o.w) * dt / 1000;
+      o.th += o.w * dt / 1000;
+    }
+  }
+
+  function velAt(t) {
+    const h = S.hist;
+    if (!h.length) return 0;
+    if (t >= h[h.length - 1].t) return t - h[h.length - 1].t > 120 ? 0 : h[h.length - 1].v;
+    for (let i = h.length - 1; i >= 0; i--) if (h[i].t <= t) return h[i].v;
+    return 0;
+  }
+
+  function advance(t) {
+    if (S.phase === "idle") return;
+    if (S.phase === "press" && S.upAt == null && t - S.downAt >= SPEC.grab.holdMs) enterGrab(t);
+    if (S.shakeActive) {
+      if (Math.abs(velAt(t)) < SPEC.shake.stopSpeed) { if (S.slowSince == null) S.slowSince = t; } else S.slowSince = null;
+    }
+    const stopped = S.shakeActive && S.slowSince != null && t - S.slowSince >= SPEC.shake.stopMs;
+    if (S.shakeActive && (stopped || t - S.shakeLast > SPEC.shake.endGap)) {
+      S.shakeActive = false;
+      S.shakeEnd = S.shakeLast;
+      if (S.shakeLast - S.shakeStart >= SPEC.shake.dizzyAfter) S.dizzyUntil = S.shakeEnd + SPEC.shake.dizzyMs;
+      S.shakeStart = null; S.revs = [];
+    }
+    let cur = S.simT;
+    while (cur < t) { const dt = Math.min(4, t - cur); cur += dt; stepSim(cur, dt); }
+    S.simT = Math.max(S.simT, t);
+    const P = SPEC.press, D = SPEC.drop;
+    if (S.phase === "press" && S.upAt != null && !S.grabbed && t > S.upAt + P.doneMs) S.phase = "idle";
+    if (S.phase === "drop") {
+      const end = S.reduced ? D.fadeMs : S.tFall * 1000 + D.landMs + D.restMs;
+      if (t > S.dropAt + end && t > S.dizzyUntil) S.phase = "idle";
+    }
+  }
+
+  /* 누름 스케일: 80ms power2.out → 뗄 때 spring(600,15) (층마다 지연) */
+  function pressScale(t, delay) {
+    if (S.downAt == null) return [1, 1];
+    const tt = t - delay;
+    if (tt < S.downAt) return [1, 1];
+    const P = SPEC.press;
+    const held = (S.upAt == null || tt < S.upAt) ? tt - S.downAt : S.upAt - S.downAt;
+    const p = powerOut(held / P.ms);
+    const sx = 1 + (P.sx - 1) * p, sy = 1 + (P.sy - 1) * p;
+    if (S.upAt == null || tt < S.upAt) return [sx, sy];
+    const r = springStep(P.rel[0], P.rel[1], (tt - S.upAt) / 1000);
+    return [lerp(sx, 1, r), lerp(sy, 1, r)];
+  }
+
+  function grabLayers(t) {
+    const G = SPEC.grab;
+    const L = [0, 1, 2].map(() => ({ tx: 0, ty: 0, rot: 0 }));
+    if (S.reduced) return L;
+    const h = springStep(G.hangSpring[0], G.hangSpring[1], (t - S.grabAt) / 1000);
+    L[1].ty = G.hang[0] * h;
+    L[2].ty = G.hang[1] * h;
+    for (let i = 1; i < 3; i++) {
+      L[i].tx = clamp(S.pos[i].x - S.head.x, -G.maxLag, G.maxLag);
+      L[i].ty += clamp(S.pos[i].y - S.head.y, -G.maxLag, G.maxLag);
+    }
+    const calm = 1 - S.sg;                                        // 흔드는 동안엔 끌기 기울기·매달림 흔들림을 끈다
+    const tilt = clamp(L[2].tx * G.tilt, -G.tiltMax, G.tiltMax) * calm;
+    L[2].rot = tilt;
+    L[1].rot = tilt * 0.5;
+    const wob = G.wobbleDeg * calm * clamp((t - S.grabAt) / 300, 0, 1) * Math.exp(-Math.hypot(S.vx, S.vy) / 600);
+    for (let i = 0; i < 3; i++) {
+      L[i].rot += wob * Math.sin(2 * Math.PI * G.wobbleHz * (t - S.grabAt) / 1000 + i * 1.3);
+      L[i].rot += S.osc[i].th;
+      L[i].rot = clamp(L[i].rot, -SPEC.shake.maxRot, SPEC.shake.maxRot);   // 층 회전 최대 10°
+    }
+    return L;
+  }
+
+  function separate(L) {
+    if (!dims) return;
+    const oy = dims[2].y + dims[2].h;
+    const ext = (i) => {                                          // 회전·스케일된 층의 세로 반높이
+      const r = Math.abs(L[i].rot) * Math.PI / 180;
+      return (dims[i].h * L[i].sy * Math.cos(r) + dims[i].w * L[i].sx * Math.sin(r)) / 2;
+    };
+    const center = (i) => {                                       // apply()와 같은 변환으로 옮겨진 중심 y
+      const cy = dims[i].y + dims[i].h / 2;
+      return cy + L[i].ty + (L[i].sy - 1) * (cy - oy);
+    };
+    for (let i = 1; i < 3; i++) {
+      const need = center(i - 1) + ext(i - 1) + ext(i) + SPEC.gap;
+      const c = center(i);
+      if (c < need) L[i].ty += need - c;
+    }
+  }
+
+  function eyesAt(t) {
+    const D = SPEC.drop, P = SPEC.press, K = SPEC.shake;
+    const swirl = (S.shakeActive && S.shakeStart != null && t - S.shakeStart >= K.dizzyAfter) || t < S.dizzyUntil;
+    if (S.reduced && swirl) return S.shakeActive ? "squint" : "big";
+    if (S.phase === "grab") {
+      if (swirl) return "swirl";
+      if (S.shakeActive) return "squint";
+      return "big";
+    }
+    if (S.phase === "drop") {
+      if (swirl) return "swirl";
+      const tt = t - S.dropAt, tl = S.tFall * 1000;
+      if (S.reduced) return "";
+      if (tt < tl) return "big";
+      const a = tt - tl;
+      return a < 110 ? "squint" : a < 260 ? "" : a < 380 ? "dash" : "";
+    }
+    if (S.phase === "press") {
+      if (t <= S.downAt) return "";
+      if (S.upAt == null || t < S.upAt) return "squint";
+      if (!S.tap) return "";
+      const a = t - S.upAt;
+      return a < P.happyAfter ? "big" : (a < P.happyAfter + P.happyMs ? "happy" : "");
+    }
+    return "";
+  }
+
+  function pose(t) {
+    const P = { l: [0, 1, 2].map(() => ({ tx: 0, ty: 0, sx: 1, sy: 1, rot: 0 })), op: 1, eyes: { shape: "", lx: 0, ly: 0 }, streak: { o: 0, w: 12, dir: -1 } };
+    if (S.phase === "idle") return P;
+    const D = SPEC.drop;
+    P.eyes.shape = eyesAt(t);
+    if (S.phase === "press" || S.phase === "grab") {
+      if (!S.reduced) for (let i = 0; i < 3; i++) { const s = pressScale(t, SPEC.press.delay[i]); P.l[i].sx = s[0]; P.l[i].sy = s[1]; }
+      if (S.phase === "grab") {
+        const L = grabLayers(t);
+        for (let i = 0; i < 3; i++) Object.assign(P.l[i], L[i]);
+        separate(P.l);
+        if (P.eyes.shape === "big") { P.eyes.lx = clamp(S.vx / 900, -1, 1) * 3; P.eyes.ly = clamp(S.vy / 900, -1, 1) * 2; }
+        if (!S.reduced) {                                              // 빠르게 움직이면 머리 뒤에 속도선이 생긴다
+          const sp = Math.abs(S.vx);
+          P.streak = { o: clamp((sp - 250) / 600, 0, 1) * 0.85, w: 8 + clamp(sp / 150, 0, 8), dir: S.vx > 0 ? -1 : 1 };
+        }
+      }
+      return P;
+    }
+    // drop
+    const tt = (t - S.dropAt) / 1000;
+    if (S.reduced) { P.op = lerp(0.4, 1, clamp(tt * 1000 / D.fadeMs, 0, 1)); return P; }
+    if (tt < S.tFall) {
+      const h = 1 - Math.pow(tt / S.tFall, 2);                 // 중력: 거리 ∝ t²
+      const b = powerOut(tt * 1000 / 60);
+      for (let i = 0; i < 3; i++) {
+        P.l[i].tx = S.L0[i].tx * h; P.l[i].ty = S.L0[i].ty * h; P.l[i].rot = S.L0[i].rot * h;
+        P.l[i].sx = lerp(1, D.stretch[0], b); P.l[i].sy = lerp(1, D.stretch[1], b);
+      }
+      return P;
+    }
+    const a = tt - S.tFall;                                   // 착지 후 경과(초)
+    const hop = D.bounce * Math.max(S.fall, 24);
+    for (let i = 0; i < 3; i++) {
+      if (a * 1000 < D.landMs) {
+        const p = powerOut(a * 1000 / D.landMs);
+        P.l[i].sx = lerp(D.stretch[0], D.land[0], p); P.l[i].sy = lerp(D.stretch[1], D.land[1], p);
+      } else {
+        const ab = a - D.landMs / 1000;
+        const r = springStep(BK, BC, ab - D.stack[i] / 1000);
+        P.l[i].sx = lerp(D.land[0], 1, r); P.l[i].sy = lerp(D.land[1], 1, r);
+        P.l[i].ty = -hop * bounce1(ab - Math.max(0, D.stack[i] / 1000 - 0.0));
+      }
+    }
+    return P;
+  }
+
+  function apply(P) {
+    if (!dims) measure();
+    const bot = document.getElementById("roBot");
+    if (!bot || !dims) return;
+    const els = [layerHead, layerBody, layerBase];
+    const ox = dims[2].x + dims[2].w / 2, oy = dims[2].y + dims[2].h;
+    els.forEach((el, i) => {
+      const l = P.l[i], d = dims[i];
+      const cx = d.x + d.w / 2, cy = d.y + d.h / 2;
+      const tx = l.tx + (l.sx - 1) * (cx - ox), ty = l.ty + (l.sy - 1) * (cy - oy);
+      el.style.translate = `${tx.toFixed(2)}px ${ty.toFixed(2)}px`;
+      el.style.rotate = `${l.rot.toFixed(2)}deg`;
+      el.style.scale = `${l.sx.toFixed(4)} ${l.sy.toFixed(4)}`;
+    });
+    bot.style.opacity = P.op === 1 ? "" : String(P.op);
+    const st = document.getElementById("streak");
+    if (st) {
+      st.style.opacity = P.streak.o.toFixed(2);
+      st.style.width = P.streak.w.toFixed(1) + "px";
+      const hx = dims[0].x + P.l[0].tx, hy = dims[0].y + dims[0].h * 0.38 + P.l[0].ty;
+      st.style.left = (P.streak.dir < 0 ? hx - P.streak.w - 6 : hx + dims[0].w + 6).toFixed(1) + "px";
+      st.style.top = hy.toFixed(1) + "px";
+    }
+    petWrap.dataset.eyes = P.eyes.shape;
+    eyesWrap.style.translate = (P.eyes.lx || P.eyes.ly) ? `${P.eyes.lx.toFixed(2)}px ${P.eyes.ly.toFixed(2)}px` : "";
+    petWrap.dataset.motion = S.phase;
+  }
+
+  function clearStyles() {
+    [layerHead, layerBody, layerBase].forEach(el => { el.style.translate = ""; el.style.rotate = ""; el.style.scale = ""; });
+    const bot = document.getElementById("roBot");
+    if (bot) bot.style.opacity = "";
+    const st = document.getElementById("streak");
+    if (st) st.style.opacity = "";
+    eyesWrap.style.translate = "";
+    delete petWrap.dataset.eyes;
+    delete petWrap.dataset.motion;
+  }
+
+  function loop() {
+    const t = now();
+    advance(t);
+    apply(pose(t));
+    if (S.phase !== "idle") raf = requestAnimationFrame(loop);
+    else { raf = null; clearStyles(); if (api.onIdle) api.onIdle(); }
+  }
+  function ensureLoop() { if (!manual && raf == null) raf = requestAnimationFrame(loop); }
+
+  /* 설정 화면·메뉴의 미리보기용 합성 입력 */
+  let demoTimer = null;
+  function demo(name, done) {
+    clearInterval(demoTimer);
+    const t0 = now();
+    down(t0);
+    const plan = {
+      press: { upAt: 90, end: 90 },
+      drag: { moveFrom: 340, upAt: 1900, path: (s) => ({ x: 150 * Math.sin(s * 2.2), y: 18 * Math.sin(s * 1.1) }) },
+      shake: { moveFrom: 340, upAt: 2600, path: (s) => ({ x: 60 * Math.sin(s * 2 * Math.PI * 4), y: 0 }) },
+      drop: { moveFrom: 1e9, upAt: 450, fall: 60 },
+    }[name];
+    if (!plan) return false;
+    demoTimer = setInterval(() => {
+      const t = now(), e = t - t0;
+      if (plan.moveFrom != null && e >= plan.moveFrom) { const p = plan.path ? plan.path((e - plan.moveFrom) / 1000) : { x: 0, y: 0 }; move(p.x, p.y, t); }
+      if (e >= plan.upAt) { clearInterval(demoTimer); up(t, true, plan.fall || 0); if (done) done(); }
+    }, 8);
+    return true;
+  }
+
+  const api = {
+    SPEC, springStep, bounce1, down, move, up, advance, pose, apply, demo, reset, clearStyles,
+    get state() { return S; },
+    set manual(v) { manual = !!v; },
+    busy: () => S.phase !== "idle",
+    consumeClick: () => { const g = S.grabbed; S.grabbed = false; return !g; },
+  };
+  return api;
+})();
+
+RoMotion.onIdle = () => { if (MOTION_DEMOS.includes(currentAction)) window.triggerAction(null); };
+
+/* ===== UX 확장: 앰비언트(E) · 근거 있는 답(C) · 정리(D) · ⌥R 팔레트(B) · 끌어다 놓기(A) ===== */
+const attnDot = document.getElementById("attnDot");
+const muteBadge = document.getElementById("muteBadge");
+const toastEl = document.getElementById("toast");
+const recallCard = document.getElementById("recallCard");
+const recOrgCard = document.getElementById("recOrgCard");
+const palette = document.getElementById("palette");
+const palInput = document.getElementById("palInput");
+const palList = document.getElementById("palList");
+const focusBtn = document.getElementById("focusBtn");
+let ambient = null;
+let dropActive = false;
+let projectNames = [];
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v === true ? "" : v);
+  }
+  kids.flat().forEach(c => c != null && el.append(c));
+  return el;
+}
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* E · 앰비언트 몸 */
+function applyAmbient(st) {
+  projectNames = st.project_names || projectNames;
+  ambient = st.ambient || null;
+  if (!ambient) return;
+  petWrap.style.setProperty("--base-px", ambient.base_px + "px");
+  petWrap.classList.toggle("focus-mode", ambient.focus);
+  petWrap.classList.toggle("drop-ready", dropActive);
+  attnDot.hidden = !ambient.attention;
+  muteBadge.hidden = !(ambient.focus && ambient.held > 0);
+  muteBadge.querySelector("span").textContent = ambient.held;
+  muteBadge.setAttribute("aria-label", `알림 ${ambient.held}건 모아둠`);
+  focusBtn.setAttribute("aria-pressed", ambient.focus ? "true" : "false");
+  petWrap.setAttribute("aria-label", `ro · ${ambient.focus ? "집중 모드" : ambient.label}${ambient.attention ? " · 확인 필요" : ""}`);
+  if (!currentAction && Date.now() >= previewLockUntil) {
+    petCaption.textContent = dropActive ? "놓으면 기록해요" : (ambient.focus ? "집중 모드" : ambient.label);
+  }
+}
+focusBtn.addEventListener("click", async () => {
+  await apiPost("/api/focus", { on: !(ambient && ambient.focus) });
+  await refreshState();
+});
+
+/* A · 토스트 */
+let toastTimer = null;
+function hideToast() {
+  clearTimeout(toastTimer);
+  toastEl.style.display = "none";
+  toastEl.replaceChildren();
+}
+function showToast(nodes, ms) {
+  clearTimeout(toastTimer);
+  toastEl.replaceChildren(...nodes);
+  toastEl.style.display = "flex";
+  if (ms) toastTimer = setTimeout(hideToast, ms);
+}
+function showCaptured(res) {
+  if (!res.ok) {
+    showToast([h("div", { class: "toast-head", text: res.error || "기록하지 못했어요" })], 4000);
+    return;
+  }
+  const sel = h("select", { "aria-label": "프로젝트 분류" },
+    h("option", { value: "", text: "분류 없음" }),
+    projectNames.map(n => h("option", { value: n, text: n })));
+  sel.value = res.project || "";
+  sel.addEventListener("change", async () => {
+    if (sel.value) await apiPost("/api/capture_project", { id: res.id, project: sel.value });
+  });
+  const undo = h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
+    const r = await apiPost("/api/capture_undo", { id: res.id });
+    showToast([h("div", { class: "toast-head", text: r.ok ? "되돌렸어요" : (r.error || "되돌리지 못했어요") })], 2200);
+    await refreshState();
+  } });
+  showToast([
+    h("div", { class: "toast-head" }, h("span", { text: "기록했어요" }), undo),
+    h("div", { class: "toast-file", text: res.summary }),
+    h("div", { class: "toast-row" }, h("span", { text: "분류" }), sel,
+      h("span", { text: res.project ? "내용을 보고 Ro가 골랐어요" : "분류를 골라주세요" })),
+    h("div", { class: "toast-bar", "aria-hidden": "true" }),
+  ], 6000);
+}
+async function capture(kind, name, text, size) {
+  const res = await apiPost("/api/capture", { kind, name, text: String(text || "").slice(0, 4000), size });
+  setBubbleOpen(true);
+  switchTab("home");
+  showCaptured(res);
+  await refreshState();
+}
+const TEXT_EXT = /\.(md|txt|csv|json|py|js|ts|tsx|log|ya?ml|toml|html|css|swift|sh|rs|go)$/i;
+async function handleDrop(dt) {
+  const file = dt.files && dt.files[0];
+  if (file) {
+    const readable = file.type.startsWith("text/") || TEXT_EXT.test(file.name);
+    const text = readable ? await file.slice(0, 20000).text() : `${file.name} (${Math.round(file.size / 1024)}KB)`;
+    return capture("file", file.name, text, file.size);
+  }
+  const uri = (dt.getData("text/uri-list") || "").split("\n").find(l => l && !l.startsWith("#"));
+  const plain = (dt.getData("text/plain") || "").trim();
+  const link = uri || (/^https?:\/\/\S+$/.test(plain) ? plain : "");
+  if (link) {
+    let host = "링크";
+    try { host = new URL(link).host; } catch (e) {}
+    return capture("link", host, link, 0);
+  }
+  if (plain) return capture("text", "끌어다 놓은 텍스트", plain, plain.length);
+}
+function setDropActive(on) {
+  if (dropActive === on) return;
+  dropActive = on;
+  petWrap.classList.toggle("drop-ready", on);
+  if (on) petCaption.textContent = "놓으면 기록해요";
+}
+window.addEventListener("dragenter", (e) => { e.preventDefault(); setDropActive(true); });
+window.addEventListener("dragover", (e) => { e.preventDefault(); setDropActive(true); });
+window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) setDropActive(false); });
+window.addEventListener("drop", (e) => { e.preventDefault(); setDropActive(false); handleDrop(e.dataTransfer); });
+
+/* C · 근거 붙은 답 */
+function openRecord(id) {
+  switchTab("timeline");
+  const row = timelineList.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (row) {
+    row.scrollIntoView({ block: "center" });
+    row.classList.add("flash");
+    setTimeout(() => row.classList.remove("flash"), 1600);
+  }
+}
+async function runRecall(q) {
+  pushRecent(q);
+  const r = await apiPost("/api/recall", { question: q });
+  setBubbleOpen(true);
+  switchTab("home");
+  recOrgCard.style.display = "none";
+  const items = (r.items || []).map(i => h("li", {}, h("span", { text: i.text }), h("sup", { class: "rc-n", text: i.n })));
+  const ev = (r.evidence || []).length ? h("details", { class: "rc-ev" },
+    h("summary", { text: `근거 · 기록 ${r.evidence.length}건` }),
+    r.evidence.map(e => h("div", { class: "rc-row" },
+      h("span", { class: "rc-n", text: e.n }), h("span", { class: "t", text: e.summary }),
+      h("span", { class: "d", text: e.ts }),
+      h("button", { class: "mini-btn", type: "button", "aria-label": `기록 ${e.n} 열기`, text: "↗", onclick: () => openRecord(e.id) })))) : null;
+  const chips = h("div", { class: "chip-row" },
+    r.found ? h("button", { class: "mini-btn", type: "button", text: (r.followups || [])[0] || "오늘 이어서 할 일은?",
+      onclick: () => runRecall("오늘 뭐 했지?") }) : null,
+    r.found ? h("button", { class: "mini-btn", type: "button", text: "메모로 저장", onclick: () =>
+      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null);
+  recallCard.replaceChildren(
+    h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: r.headline }),
+    items.length ? h("ul", { class: "rc-list" }, items) : null, ev, chips,
+    h("div", { class: "rc-foot", text: r.note || "" }));
+  recallCard.style.display = "flex";
+  answerCard.style.display = "none";
+}
+
+/* D · 미리 보고 되돌리는 정리 */
+async function showRecordOrganize() {
+  const p = await apiPost("/api/records/plan", {});
+  setBubbleOpen(true);
+  switchTab("home");
+  recallCard.style.display = "none";
+  const max = Math.max(1, ...p.groups.map(g => g.count));
+  const picks = {};
+  const amb = p.ambiguous.length ? h("div", { class: "rec-org-amb" },
+    h("div", { class: "rec-org-line" }, h("span", {}, h("i", { class: "rec-org-dot" }), `확인 필요`), h("span", { text: `${p.ambiguous.length}건 골라주기` })),
+    p.ambiguous.slice(0, 8).map(a => {
+      const s = h("select", { "aria-label": `${a.summary} 분류` }, h("option", { value: "", text: "고르기" }),
+        a.candidates.map(c => h("option", { value: c, text: c })));
+      s.addEventListener("change", () => { picks[a.id] = s.value; });
+      return h("label", {}, h("div", { text: a.summary }), s);
+    })) : null;
+  const apply = h("button", { class: "mini-btn primary", type: "button", text: "적용하기", onclick: async () => {
+    const r = await apiPost("/api/records/apply", { picks });
+    if (!r.ok) { recOrgCard.replaceChildren(h("div", { class: "rc-head", text: r.error || "적용하지 못했어요" })); return; }
+    recOrgCard.replaceChildren(h("div", { class: "rc-head", text: `적용했어요 · ${r.applied}건` }),
+      h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
+        const u = await apiPost("/api/records/undo", {});
+        recOrgCard.replaceChildren(h("div", { class: "rc-head", text: u.ok ? `되돌렸어요 · ${u.reverted}건` : (u.error || "되돌리지 못했어요") }));
+      } }),
+      h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
+  } });
+  const cancel = h("button", { class: "mini-btn", type: "button", text: "취소", onclick: () => { recOrgCard.style.display = "none"; } });
+  recOrgCard.replaceChildren(
+    h("div", { class: "rc-head", text: "이렇게 묶을게요" }),
+    h("div", { class: "rc-foot", text: `기록 ${p.total}건 → 프로젝트 ${p.groups.length}개. 아직 아무것도 바뀌지 않았어요.` }),
+    ...p.groups.map(g => h("div", { class: "rec-org-row" },
+      h("div", { class: "rec-org-line" }, h("span", { text: g.project }), h("span", { text: `${g.count}건` })),
+      h("div", { class: "rec-org-bar", style: `width:${Math.round(g.count / max * 100)}%` }))),
+    amb,
+    h("div", { class: "chip-row" }, apply, cancel),
+    h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
+  recOrgCard.style.display = "flex";
+}
+
+/* B · ⌥R 팔레트 */
+const COMMANDS = [
+  { id: "record", label: "/기록", desc: "지금 한 일 한 줄로 남기기", arg: true },
+  { id: "organize", label: "/정리", desc: "흩어진 기록을 프로젝트별로" },
+  { id: "today", label: "/오늘", desc: "오늘 요약 보기" },
+  { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true },
+  { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기" },
+];
+const RECALL_INTENT = /(뭐\s*했|무엇을\s*했|했[어지니]|기록|오늘|어제|그제|이번\s*주|지난\s*주|찾)/;
+let palIndex = 0, palRows = [], lastFocus = null;
+function recentList() {
+  try { return JSON.parse(localStorage.getItem("ro.recent") || "[]"); } catch (e) { return []; }
+}
+function pushRecent(q) {
+  try { localStorage.setItem("ro.recent", JSON.stringify([q, ...recentList().filter(x => x !== q)].slice(0, 5))); } catch (e) {}
+}
+function parsePalette(raw) {
+  const t = raw.replace(/^\s+/, "");
+  const m = t.match(/^\/(\S*)\s*(.*)$/s);
+  return m ? { slash: true, name: m[1], arg: m[2].trim() } : { slash: false, text: t.trim() };
+}
+function buildRows() {
+  const p = parsePalette(palInput.value);
+  const rows = [];
+  if (p.slash) {
+    COMMANDS.filter(c => c.label.slice(1).startsWith(p.name)).forEach(c => rows.push({ sec: "명령", cmd: c, arg: p.arg }));
+  } else if (!p.text) {
+    COMMANDS.forEach(c => rows.push({ sec: "명령", cmd: c }));
+    recentList().forEach(q => rows.push({ sec: "최근에 물어본 것", ask: q }));
+  } else {
+    rows.push({ sec: "질문", ask: p.text });
+  }
+  return rows;
+}
+function renderPalette() {
+  palRows = buildRows();
+  palIndex = Math.min(palIndex, Math.max(0, palRows.length - 1));
+  palList.replaceChildren();
+  let sec = null;
+  palRows.forEach((r, i) => {
+    if (r.sec !== sec) { sec = r.sec; palList.append(h("div", { class: "pal-sec", role: "presentation", text: sec })); }
+    const item = h("div", { class: "pal-item", role: "option", id: `palOpt${i}`, "aria-selected": i === palIndex ? "true" : "false",
+      onmousedown: (e) => { e.preventDefault(); palIndex = i; runPalette(); } },
+      r.cmd ? [h("b", { text: r.cmd.label }), h("span", { text: r.cmd.desc })] : [h("b", { text: r.sec === "질문" ? "질문" : "다시" }), h("span", { text: r.ask })]);
+    palList.append(item);
+  });
+  palInput.setAttribute("aria-activedescendant", palRows.length ? `palOpt${palIndex}` : "");
+}
+function openPalette() {
+  if (!palette.hidden) return;
+  lastFocus = document.activeElement;
+  palette.hidden = false;
+  palInput.value = "";
+  palIndex = 0;
+  renderPalette();
+  palInput.focus();
+}
+function closePalette() {
+  if (palette.hidden) return;
+  palette.hidden = true;
+  if (lastFocus && lastFocus.focus) lastFocus.focus();
+}
+window.openPaletteFromHost = function() { setBubbleOpen(true); openPalette(); };
+async function runPalette() {
+  const r = palRows[palIndex];
+  if (!r) return;
+  if (r.cmd) {
+    const c = r.cmd;
+    if (c.arg && !r.arg) { palInput.value = c.label + " "; renderPalette(); return; }
+    closePalette();
+    if (c.id === "record") await capture("text", "직접 기록", r.arg, r.arg.length);
+    else if (c.id === "organize") await showRecordOrganize();
+    else if (c.id === "today") await runRecall("오늘 뭐 했지?");
+    else if (c.id === "find") await runRecall(`${r.arg} 기록 찾아줘`);
+    else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+    return;
+  }
+  closePalette();
+  if (RECALL_INTENT.test(r.ask)) { await runRecall(r.ask); return; }
+  pushRecent(r.ask);
+  askInput.value = r.ask;
+  askForm.requestSubmit();
+}
+palInput.addEventListener("input", () => { palIndex = 0; renderPalette(); });
+window.addEventListener("keydown", (e) => {
+  if (e.altKey && e.code === "KeyR" && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (palette.hidden) window.openPaletteFromHost(); else closePalette();
+    return;
+  }
+  if (palette.hidden) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closePalette(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); palIndex = (palIndex + 1) % Math.max(1, palRows.length); renderPalette(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palIndex = (palIndex - 1 + palRows.length) % Math.max(1, palRows.length); renderPalette(); }
+  else if (e.key === "Enter") { e.preventDefault(); runPalette(); }
+  else if (e.key === "Tab") { e.preventDefault(); }
+}, true);
 
 if (!isNativeHost) {
   // 브라우저에서는 처음부터 대화창을 연다: 봇만 덩그러니 있으면 무엇을 할지 알기 어렵다
@@ -3211,6 +4110,21 @@ def make_handler(runtime):
                 self._send_json(200, runtime.decide_rule(data.get("action"), data.get("id")))
             elif parsed.path == "/api/write_gate":
                 self._send_json(200, runtime.resolve_write_approval(bool(data.get("approve"))))
+            elif parsed.path == "/api/recall":
+                self._send_json(200, runtime.recall_question(data.get("question", "")))
+            elif parsed.path == "/api/capture":
+                self._send_json(200, runtime.capture(data.get("kind", ""), data.get("name", ""),
+                                                     data.get("text", ""), data.get("size", 0)))
+            elif parsed.path == "/api/capture_undo":
+                self._send_json(200, runtime.capture_undo(data.get("id")))
+            elif parsed.path == "/api/capture_project":
+                self._send_json(200, runtime.capture_project(data.get("id"), data.get("project")))
+            elif parsed.path == "/api/records/plan":
+                self._send_json(200, runtime.records_plan())
+            elif parsed.path == "/api/records/apply":
+                self._send_json(200, runtime.records_apply(data.get("picks")))
+            elif parsed.path == "/api/records/undo":
+                self._send_json(200, runtime.records_undo())
             elif parsed.path == "/api/organize/scan":
                 self._send_json(200, runtime.organize_scan())
             elif parsed.path == "/api/organize/apply":
@@ -3222,6 +4136,8 @@ def make_handler(runtime):
                                                                       kind or None))
             elif parsed.path == "/api/organize/undo":
                 self._send_json(200, runtime.queue_organize_undo())
+            elif parsed.path == "/api/focus":
+                self._send_json(200, runtime.set_focus(bool(data.get("on"))))
             elif parsed.path == "/api/clear":
                 self._send_json(200, runtime.clear_notice())
             elif parsed.path == "/api/action":
@@ -3258,7 +4174,7 @@ def ensure_mac_binary(force_build=False):
     bin_path = cache_dir / "ro-pet-host"
     if not force_build and bin_path.exists() and bin_path.stat().st_mtime >= src.stat().st_mtime:
         return bin_path
-    cmd = ["swiftc", "-O", str(src), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit"]
+    cmd = ["swiftc", "-O", str(src), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit", "-framework", "Carbon"]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"macOS 펫 오버레이 컴파일 실패:\n{r.stderr}")
