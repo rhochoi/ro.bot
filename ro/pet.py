@@ -1862,6 +1862,15 @@ PET_HTML = r"""<!DOCTYPE html>
     transform: translateY(calc(1.4 * var(--u)));
   }
 
+  /* 메뉴 막대 쪽으로 끌 때: 위로 떠오르며 아이콘 크기로 줄고, 눈은 위를 본다 (--dock 0→1) */
+  .pet-wrap.docking {
+    transform: translateY(-6px) scale(calc(1.04 - 0.82 * var(--dock, 0)));
+    transform-origin: 50% 20%;
+    transition: transform 90ms linear;
+  }
+  .pet-wrap.docking .eyes { top: 18%; }
+  .pet-wrap.docking .pet-label { opacity: calc(1 - 2 * var(--dock, 0)); }
+
   .action-shake .ro-bot {
     animation: shakeAnim 0.35s infinite ease-in-out;
   }
@@ -2109,6 +2118,7 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
       <div class="top-right">
         <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변/알림 닫기">초기화</button>
+        <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
     </div>
@@ -2337,7 +2347,7 @@ PET_HTML = r"""<!DOCTYPE html>
   </div>
 
   <!-- RO 캐릭터: 층 셋, 눈 둘 (왼쪽 정렬) -->
-  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 표정 전환 · 드래그: 이동">
+  <div id="petWrap" class="pet-wrap mood-idle" title="클릭: 말풍선 열기 · 우클릭: 메뉴 · 드래그: 이동 (위로 끌면 메뉴 막대로)">
     <div id="roBot" class="ro-bot">
       <span id="streak" class="streak" aria-hidden="true"></span>
       <div id="layerHead" class="pill pill-head">
@@ -2505,6 +2515,7 @@ function computeAutoMaterial(mood, lum) {
   return "clay";
 }
 
+let dockCaption = null;  // 메뉴 막대로 끄는 중 원래 캡션 (onHostDockProgress)
 function updateMaterialUI() {
   activeMaterial = (materialMode === "auto")
     ? computeAutoMaterial(currentMood, backdropLuminance)
@@ -2516,6 +2527,7 @@ function updateMaterialUI() {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
   });
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
+  if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
 }
 
@@ -2581,6 +2593,7 @@ function notifyHost(payload) {
 function setBubbleOpen(open) {
   bubble.classList.toggle("hidden", !open);
   notifyHost({ type: "bubble", open: !!open });
+  if (window._poll !== undefined) setPollRate(open);
 }
 
 window.toggleBubbleFromHost = function(forceOpen) {
@@ -2624,13 +2637,22 @@ moodPill.addEventListener("click", (e) => {
 
 petWrap.addEventListener("contextmenu", (e) => {
   e.preventDefault();
-  cycleMoodPreview();
+  if (isNativeHost) notifyHost({ type: "menu" });  // 네이티브 메뉴(표정 미리보기 포함)
+  else cycleMoodPreview();
 });
 
 stage.addEventListener("mousedown", (e) => {
   if (e.target === stage && !bubble.classList.contains("hidden")) {
     setBubbleOpen(false);
   }
+});
+
+/* ⋯: 네이티브 메뉴(데스크톱에 꺼내기 포함). 브라우저에는 호스트가 없어 숨긴다 */
+const moreBtn = document.getElementById("moreBtn");
+if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost) moreBtn.style.display = "";
+moreBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  notifyHost({ type: "menu" });
 });
 
 closeBtn.addEventListener("click", (e) => {
@@ -2746,6 +2768,26 @@ window.onHostDragStart = function(fromPet) {};   /* 누름은 JS mousedown이 �
 window.onHostDragMove = function(x, y) { RoMotion.move(x, y, performance.now(), true); };
 window.onHostDragShake = function() {};          /* 흔들기 감지는 모션 엔진이 속도에서 직접 한다 */
 window.onHostDragEnd = function(moved, fallPx) { RoMotion.up(performance.now(), !!moved, fallPx || 0); };
+/* 메뉴 막대로 보내기: 위쪽 80px 구역 안에서의 진행률(0~1)을 호스트가 넘긴다 */
+window.onHostDockProgress = function(p) {
+  petWrap.style.setProperty("--dock", p);
+  petWrap.classList.toggle("docking", p > 0);
+  if (p > 0 && dockCaption === null) {
+    dockCaption = petCaption.textContent;
+    petCaption.textContent = "놓으면 메뉴 막대로";
+  } else if (p === 0 && dockCaption !== null) {
+    petCaption.textContent = dockCaption;
+    dockCaption = null;
+  }
+};
+
+/* 메뉴 막대로 들어가면 호스트가 onHostDragEnd 대신 이걸 부른다. 잡힌 자세를 풀어 다음에 꺼낼 때 깨끗하게 */
+window.onHostDocked = function() {
+  window.onHostDockProgress(0);
+  RoMotion.reset();
+  RoMotion.clearStyles();
+  window.triggerAction(null);
+};
 
 /* 마우스 쓰다듬기 */
 let isPetHover = false;
@@ -2914,7 +2956,14 @@ askInput.addEventListener("input", () => {
 });
 
 /* 상태 렌더링 */
+let lastHostStatus = "";
 function applyState(st) {
+  // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
+  const hostStatus = { type: "status", today: (st.counts && st.counts.today_events) || 0 };
+  if (JSON.stringify(hostStatus) !== lastHostStatus) {
+    lastHostStatus = JSON.stringify(hostStatus);
+    notifyHost(hostStatus);
+  }
   const locked = Date.now() < previewLockUntil;
   if (!locked) {
     currentMood = st.mood;
@@ -3080,6 +3129,14 @@ function applyState(st) {
     }
   }
   applyAmbient(st);
+}
+
+/* 상태 폴링: 말풍선이 열려 있을 때만 0.45초, 닫혀 있으면 2초.
+   펫만 떠 있을 때 0.45초 폴링이 파이썬·WebKit 네트워킹·WebContent에 코어 하나의 약 4%를 썼다 (9단계 실측) */
+function setPollRate(fast) {
+  clearInterval(window._poll);
+  window._poll = setInterval(refreshState, fast ? 450 : 2000);
+  if (fast) refreshState();
 }
 
 async function refreshState() {
@@ -3958,7 +4015,7 @@ if (!isNativeHost) {
   setBubbleOpen(true);
 }
 refreshState();
-window._poll = setInterval(refreshState, 450);
+setPollRate(!bubble.classList.contains("hidden"));
 </script>
 </body>
 </html>

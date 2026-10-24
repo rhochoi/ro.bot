@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -416,9 +417,116 @@ class PetTest(unittest.TestCase):
     def test_menubar_icon_is_template_and_permission_hint(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn("img.isTemplate = true", src)  # 다크 메뉴바에서도 보인다
-        self.assertIn("fill(using: .clear)", src)  # 눈은 템플릿 알파로 뚫는다
+        self.assertIn("NSGraphicsContext.current?.compositingOperation = .clear", src)  # 눈은 템플릿 알파로 뚫는다
         self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
         self.assertIn("Privacy_ScreenCapture", src)
+
+    def test_menubar_mode_state_and_pet_menu(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn('UserDefaults(suiteName: "ro.pet")', src)  # 다음 실행도 같은 모드
+        self.assertIn('defaults.set(next.rawValue, forKey: "ro.mode")', src)
+        self.assertIn("statusItem.isVisible = (next == .menubar)", src)  # 한 번에 한 곳에만
+        self.assertIn('statusItem.autosaveName = "ro.pet"', src)
+        self.assertNotIn(".fullScreenAuxiliary", src)  # 전체 화면 앱 위에는 띄우지 않는다
+        self.assertIn("self.mode == .desktop, self.wanderEnabled", src)  # 숨은 펫은 산책하지 않는다
+        self.assertIn("mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)", src)
+        self.assertIn('if (isNativeHost) notifyHost({ type: "menu" });', pet.PET_HTML)
+        self.assertIn("else cycleMoodPreview();", pet.PET_HTML)  # 브라우저는 기존 동작
+
+    def test_drag_up_docks_into_menubar(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("private let dockZone: CGFloat = 80.0", src)
+        self.assertIn("let canDock = fromPet && mode == .desktop && !bubbleOpen", src)
+        self.assertIn("self.statusItem.isVisible = nowIn", src)  # 구역에 들면 자리가 열린다
+        self.assertIn("let progress = nowIn ? min(1, 1 - d / self.dockZone) : 0", src)
+        self.assertIn("self.dockToMenubar(returnOrigin: startOrigin)", src)
+        self.assertIn("ctx.duration = 0.28", src)
+        self.assertIn("win.occlusionState.contains(.visible)", src)  # 노치 뒤로 숨으면 되돌린다
+        html = pet.PET_HTML
+        self.assertIn("window.onHostDockProgress = function(p)", html)
+        self.assertIn("scale(calc(1.04 - 0.82 * var(--dock, 0)))", html)  # 1.04 → 0.22
+        self.assertIn('"놓으면 메뉴 막대로"', html)
+
+    def test_menubar_icon_menu_and_pull_down(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertNotIn("statusItem.menu = ", src)  # 메뉴를 붙이면 버튼 액션이 오지 않는다
+        self.assertIn("btn.sendAction(on: [.leftMouseDown, .rightMouseDown])", src)
+        self.assertIn("if start.y - cur.y > self.popOutDistance {", src)  # 끌어 내리면 펫으로
+        self.assertIn("self.popOut(at: cur)", src)
+        self.assertIn("RunLoop.main.add(timer, forMode: .common)", src)  # 트래킹 중에도 돈다
+        self.assertIn('NSMenuItem(title: "패널 열기", action: #selector(toggleBubble), keyEquivalent: "k")', src)
+        self.assertIn("panel.setFrameOrigin(menubarAnchorOrigin())", src)  # 패널은 아이콘 아래로
+        self.assertIn('headerTitle.stringValue = "오늘 \\(today)건 기록"', src)
+        self.assertIn('type: "status", today:', pet.PET_HTML)
+
+    def test_panel_more_menu_and_icon_visibility_guard(self):
+        html = pet.PET_HTML
+        self.assertIn('id="moreBtn" class="close-x-btn" style="display:none;"', html)  # 브라우저에선 숨김
+        more = html[html.index('const moreBtn = document.getElementById("moreBtn");'):]
+        self.assertIn('notifyHost({ type: "menu" });', more[:400])
+        # isNativeHost는 뒤에서 선언되므로 여기서 쓰면 TDZ 오류가 난다
+        self.assertLess(html.index('const moreBtn'), html.index("const isNativeHost"))
+        self.assertNotIn("isNativeHost", more[:300])
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("ensureIconVisible(announceSuccess: false)", src)  # 시작할 때도 노치 확인
+        self.assertIn("} else if NSMenu.menuBarVisible() {", src)  # 전체 화면은 가려진 것으로 보지 않는다
+
+    def test_cpu_gait_jumps_menubar_icon_only(self):
+        # 데스크톱 펫은 CPU에 맞춰 움직이지 않는다 (2026-10-24 결정). 점프는 메뉴 막대 아이콘에만
+        self.assertNotIn("setGait", pet.PET_HTML)
+        self.assertNotIn("data-gait", pet.PET_HTML)
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertNotIn("window.setGait", src)
+        self.assertIn("let delay = (nextAt - step.at) * iconGait.menubarPeriod", src)  # 0.8초 상한
+        self.assertIn("(0.00, .crouch), (0.30, .rise), (0.45, .apex), (0.60, .rise), (0.75, .crouch),", src)
+        self.assertIn("if self.jumpStep == 0 {", src)  # 착지할 때만 빠르기를 바꾼다
+        self.assertIn("!NSWorkspace.shared.accessibilityDisplayShouldReduceMotion", src)  # 동작 줄이기면 멈춤
+        self.assertIn("gait.capped(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)", src)
+        self.assertIn("narrowEyes: gait == .hot", src)  # 과열이면 가는 눈
+        self.assertIn("let iconCanvas: CGFloat = 18", src)  # 위쪽 여유로 뛴다
+        self.assertIn("NSWindow.didChangeOcclusionStateNotification", src)  # 가려지면 그리기를 멈춘다
+
+    def test_overheat_alert_wiring(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("if overheatGate.push(pct) {", src)  # 원시 CPU의 60초 평균
+        self.assertIn("DispatchQueue.global(qos: .utility).async", src)  # 프로세스 스캔은 메인 밖에서
+        self.assertIn("machToSeconds(info.ri_user_time + info.ri_system_time, numer: tb.numer, denom: tb.denom)", src)
+        self.assertIn("return overheatCulprit(usage, unreadable: max(0, busy - readable))", src)
+        self.assertIn('"Mac이 힘들어해요"', src)
+        self.assertIn('NSButton(title: "활동 모니터 열기"', src)
+        self.assertIn('NSButton(title: "오늘은 그만"', src)
+        self.assertIn('withBundleIdentifier: "com.apple.ActivityMonitor"', src)
+        # 앱 이름은 이 Mac 안의 동작 상태로만 둔다: 로그·엔진·~/.ro로 보내지 않는다
+        scan = src[src.index("// MARK: 과열 알림."):src.index("@objc private func muteOverheatToday")]
+        for leak in ("evaluateJavaScript", "print(", "NSLog", "FileManager", "URLSession"):
+            self.assertNotIn(leak, scan)
+
+    def test_self_load_fixes(self):
+        # 9단계 실측: 말풍선이 닫혀 있으면 상태 폴링을 2초로 늦춘다 (데스크톱 6.3% → 3.8%, 코어 하나 기준)
+        html = pet.PET_HTML
+        self.assertIn("window._poll = setInterval(refreshState, fast ? 450 : 2000);", html)
+        self.assertIn("if (window._poll !== undefined) setPollRate(open);", html)
+        self.assertIn('setPollRate(!bubble.classList.contains("hidden"));', html)
+        self.assertNotIn("setInterval(refreshState, 450);", html)
+        # 아이콘은 기기 픽셀에 맞춰 그려 1x 화면에서도 층 사이와 눈이 번지지 않는다
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("let px = max(1, NSGraphicsContext.current?.cgContext.ctm.a ?? 2)", src)
+        self.assertIn("body.origin.y = base.minY - max(1 / px, round(pose.base.minY - pose.body.maxY)) - body.height", src)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
+    def test_cpu_gait_selftest(self):
+        # 앱을 띄우지 않고 계산만 확인한다: idle 인덱스, UInt32 wrap, 순간 튐, 50% 흔들림, 계단 반응, 과열 해제
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_path = Path(tmp) / "ro-pet-selftest"
+            build = subprocess.run(
+                ["swiftc", str(pet.swift_source_path()), "-o", str(bin_path), "-framework", "AppKit", "-framework", "WebKit"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(build.returncode, 0, build.stderr[-2000:])
+            r = subprocess.run([str(bin_path), "--selftest"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("selftest passed", r.stdout)
+        self.assertNotIn("FAIL", r.stdout)
 
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML

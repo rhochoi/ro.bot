@@ -16,11 +16,336 @@ final class FloatingPetPanel: NSPanel {
     }
 }
 
+// MARK: - CPU 걸음 (07). 순수 계산만 두어 --selftest로 GUI 없이 확인한다
+
+// host_statistics(HOST_CPU_LOAD_INFO)의 누적 틱. 배열 순서는 USER, SYSTEM, IDLE, NICE (idle은 인덱스 2)
+struct CPUTicks: Equatable {
+    var user: UInt32
+    var system: UInt32
+    var idle: UInt32
+    var nice: UInt32
+
+    // 카운터는 UInt32라 몇 달 켜 두면 한 바퀴 돈다. 합과 차를 모두 &+ / &- 로 해야 wrap에도 맞는다
+    var busy: UInt32 { user &+ system &+ nice }
+    var total: UInt32 { busy &+ idle }
+
+    init(user: UInt32, system: UInt32, idle: UInt32, nice: UInt32) {
+        self.user = user
+        self.system = system
+        self.idle = idle
+        self.nice = nice
+    }
+
+    // 커널이 주는 cpu_ticks 튜플을 이름 붙은 필드로. 순서를 틀리면 사용률이 100%로 나온다
+    init(machTicks t: (UInt32, UInt32, UInt32, UInt32)) {
+        self.init(user: t.0, system: t.1, idle: t.2, nice: t.3)
+    }
+
+    static func read() -> CPUTicks? {
+        var info = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let rc = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard rc == KERN_SUCCESS else { return nil }
+        return CPUTicks(machTicks: info.cpu_ticks)
+    }
+}
+
+// 두 표본 사이 전체 CPU 사용률(0~100). 틱이 안 늘었으면(잠자기 직후 등) nil
+func cpuPercent(from prev: CPUTicks, to cur: CPUTicks) -> Double? {
+    let total = cur.total &- prev.total
+    guard total > 0 else { return nil }
+    let busy = cur.busy &- prev.busy
+    return min(100, Double(busy) / Double(total) * 100)
+}
+
+// 걸음 4단계. 경계는 20/50/80이고 메뉴 막대는 0.8초보다 빨라지지 않는다
+enum Gait: Int, CaseIterable {
+    case calm = 0, walk, busy, hot
+
+    static let edges: [Double] = [20, 50, 80]
+    var period: Double { [3.2, 1.6, 0.8, 0.4][rawValue] }
+    var rate: Double { 3.2 / period }
+    var menubarPeriod: Double { max(period, 0.8) }
+    var label: String { ["느긋", "보통 걸음", "바쁨", "과열"][rawValue] }
+    // 아이콘 점프 높이(pt)와 웅크림·늘어남 정도. 바쁨은 더 높이·더 크게 찌그러지고, 과열은 낮고 잦게
+    var jumpHeight: Double { [1.0, 1.6, 2.2, 1.0][rawValue] }
+    var squash: Double { [0.08, 0.12, 0.18, 0.10][rawValue] }
+
+    // 저전력 모드에서는 '보통 걸음'까지만
+    func capped(lowPower: Bool) -> Gait {
+        lowPower ? Gait(rawValue: min(rawValue, Gait.walk.rawValue))! : self
+    }
+}
+
+// MARK: 메뉴 막대 아이콘 점프 (07 시안: 제자리에서 콩). 프레임 3장을 f1·f2·f3·f2·f1 순서로 바꾼다
+
+enum JumpFrame: Int {
+    case crouch = 0, rise, apex  // f1 웅크림, f2 솟음, f3 정점
+}
+
+// 한 사이클 안에서 프레임을 바꾸는 시점(비율). 이륙 15%·정점 45%·착지 75%, 남은 25%는 바닥에서 숨 고르기.
+// 메뉴 막대는 보간이 없으니 시안의 타임라인(0 / 480 / 720 / 960 / 1200ms @1.6초) 그대로 바꾼다
+let jumpSchedule: [(at: Double, frame: JumpFrame)] = [
+    (0.00, .crouch), (0.30, .rise), (0.45, .apex), (0.60, .rise), (0.75, .crouch),
+]
+
+// 아이콘 캔버스 18×18pt. 몸은 16pt 디자인 그대로 두고 위쪽 여유로 뛴다
+let iconCanvas: CGFloat = 18
+
+struct IconPose {
+    var head: CGRect
+    var body: CGRect
+    var base: CGRect
+    var narrowEyes: Bool
+}
+
+// frame이 nil이면 서 있는 기본 자세. 층은 바닥부터 쌓고, 솟을 때는 머리가 먼저 가고 받침이 늦게 따라온다
+func iconPose(_ frame: JumpFrame?, gait: Gait) -> IconPose {
+    let s = CGFloat(gait.squash), h = CGFloat(gait.jumpHeight)
+    var k: CGFloat = 1, wk: CGFloat = 1
+    var lift: (head: CGFloat, body: CGFloat, base: CGFloat) = (0, 0, 0)
+    switch frame {
+    case .crouch?: k = 1 - s; wk = 1 + s / 2
+    case .rise?: k = 1 + s / 3; wk = 1 - s / 4; lift = (0.6 * h, 0.5 * h, 0.4 * h)
+    case .apex?: lift = (h, h, h)
+    case nil: break
+    }
+    let x: CGFloat = 2, ground: CGFloat = iconCanvas - 1.3, gap = 0.8 * k
+    let baseH = 3.8 * k, bodyH = 3.8 * k, headH = 5.0 * k
+    let baseY = ground - baseH, bodyY = baseY - gap - bodyH, headY = bodyY - gap - headH
+    return IconPose(
+        head: CGRect(x: x, y: headY - lift.head, width: 11.5 * wk, height: headH),
+        body: CGRect(x: x, y: bodyY - lift.body, width: 9.1 * wk, height: bodyH),
+        base: CGRect(x: x, y: baseY - lift.base, width: 14.0 * wk, height: baseH),
+        narrowEyes: gait == .hot
+    )
+}
+
+// 최근 3개 중앙값(순간 튐 제거) → 지수 평균 α=0.3 → 모든 경계에 ±5% 히스테리시스.
+// 시뮬레이션(docs/PET-MENUBAR-MODE.md): 50% 근처 10분 140회 → 13회 전환
+struct CPUSmoother {
+    static let alpha = 0.3
+    static let gap = 5.0
+    private(set) var recent: [Double] = []
+    private(set) var smoothed: Double? = nil
+    private(set) var gait: Gait = .calm
+
+    mutating func push(_ raw: Double) -> Gait {
+        recent.append(raw)
+        if recent.count > 3 { recent.removeFirst() }
+        let median = recent.sorted()[recent.count / 2]
+        let value = smoothed.map { Self.alpha * median + (1 - Self.alpha) * $0 } ?? median
+        smoothed = value
+        // 한 번에 여러 단계를 건너뛸 수 있다 (5% → 90% 계단)
+        while gait != .hot && value >= Gait.edges[gait.rawValue] + Self.gap {
+            gait = Gait(rawValue: gait.rawValue + 1)!
+        }
+        while gait != .calm && value < Gait.edges[gait.rawValue - 1] - Self.gap {
+            gait = Gait(rawValue: gait.rawValue - 1)!
+        }
+        return gait
+    }
+
+    // 잠자기·화면 꺼짐 뒤에는 이전 값이 의미 없으니 처음부터
+    mutating func reset() {
+        recent = []
+        smoothed = nil
+        gait = .calm
+    }
+}
+
+// MARK: - 과열 알림 (07). "Mac이 힘들어해요"는 1분 넘게 바쁠 때 한 번만
+
+struct RollingMean {
+    let capacity: Int
+    private(set) var values: [Double] = []
+
+    init(capacity: Int) {
+        self.capacity = capacity
+    }
+
+    mutating func push(_ v: Double) {
+        values.append(v)
+        if values.count > capacity { values.removeFirst() }
+    }
+
+    var isFull: Bool { values.count == capacity }
+    var mean: Double { values.isEmpty ? 0 : values.reduce(0, +) / Double(values.count) }
+
+    mutating func reset() {
+        values = []
+    }
+}
+
+// 원시 CPU의 60초 평균이 85% 이상이면 한 번 울린다. 평균이 75% 아래로 내려가야 다시 울릴 수 있다.
+// (시뮬레이션: 진입/해제 규칙은 빌드처럼 잠깐씩 꺼지는 부하에서 안 울리고 평균 83%에서 울렸다)
+struct OverheatGate {
+    static let enter = 85.0
+    static let rearm = 75.0
+    private(set) var window = RollingMean(capacity: 60)
+    private(set) var armed = true
+
+    mutating func push(_ raw: Double) -> Bool {
+        window.push(raw)
+        if !armed {
+            if window.mean < Self.rearm { armed = true }
+            return false
+        }
+        if window.isFull && window.mean >= Self.enter {
+            armed = false
+            return true
+        }
+        return false
+    }
+
+    mutating func reset() {
+        window.reset()
+        armed = true
+    }
+}
+
+// proc_pid_rusage의 시간은 나노초가 아니라 mach 틱이다 (Apple Silicon timebase 125/3)
+func machToSeconds(_ ticks: UInt64, numer: UInt32, denom: UInt32) -> Double {
+    Double(ticks) * Double(numer) / Double(denom) / 1e9
+}
+
+// 실행 파일 경로에서 가장 바깥 .app 이름. Chrome Helper 수십 개가 'Google Chrome' 하나로 묶인다
+func appName(forExecutablePath path: String) -> String {
+    let parts = path.split(separator: "/")
+    if let app = parts.first(where: { $0.hasSuffix(".app") }) {
+        return String(app.dropLast(4))
+    }
+    return String(parts.last ?? "")
+}
+
+// 1위 앱의 몫(%)이 읽지 못한 몫(시스템·root 프로세스)보다 클 때만 이름을 댄다. 엉뚱한 앱을 지목하지 않게
+func overheatCulprit(_ usage: [String: Double], unreadable: Double) -> (name: String, share: Double)? {
+    guard let top = usage.max(by: { $0.value < $1.value }), top.value > 0, top.value > unreadable else { return nil }
+    return (top.key, top.value)
+}
+
+// 같은 앱은 하루 한 번, '오늘은 그만'이면 그날은 더 없다. 앱 이름이 없으면 ""로 센다
+func shouldAlertOverheat(app: String?, today: String, memoDay: String?, muted: Bool, alerted: [String]) -> Bool {
+    guard memoDay == today else { return true }
+    if muted { return false }
+    return !alerted.contains(app ?? "")
+}
+
+// GUI 없이 계산만 확인한다. 실패 항목을 출력하고 실패 수를 돌려준다
+func runCPUSelfTest() -> Int {
+    var failures = 0
+    func check(_ ok: Bool, _ name: String) {
+        print("\(ok ? "ok  " : "FAIL") \(name)")
+        if !ok { failures += 1 }
+    }
+    func feed(_ values: [Double]) -> [Gait] {
+        var s = CPUSmoother()
+        return values.map { s.push($0) }
+    }
+    func switches(_ gaits: [Gait]) -> Int {
+        zip(gaits, gaits.dropFirst()).filter { $0 != $1 }.count
+    }
+
+    // 커널 순서 (USER, SYSTEM, IDLE, NICE) 그대로 넣는다
+    let a = CPUTicks(machTicks: (100, 100, 700, 0))
+    let b = CPUTicks(machTicks: (110, 110, 780, 0))
+    check(cpuPercent(from: a, to: b) == 20, "idle은 인덱스 2: 바쁨 20틱 / 전체 100틱 = 20%")
+
+    // 카운터 셋이 함께 한 바퀴 돌아도 (합에서도 넘친다) 차이는 맞아야 한다
+    let nearMax = CPUTicks(user: UInt32.max - 5, system: UInt32.max - 3, idle: UInt32.max - 50, nice: 0)
+    let wrapped = CPUTicks(user: 4, system: 6, idle: 29, nice: 0)  // user +10, system +10, idle +80
+    let wrapPct = cpuPercent(from: nearMax, to: wrapped) ?? -1
+    check(abs(wrapPct - 20) < 0.01, "UInt32 wrap에도 사용률이 맞다 (\(String(format: "%.2f", wrapPct)))")
+    check(cpuPercent(from: a, to: a) == nil, "틱이 안 늘면 nil")
+
+    var spikes = Array(repeating: 6.0, count: 60)
+    spikes[20] = 76
+    spikes[41] = 76
+    check(feed(spikes).allSatisfy { $0 == .calm }, "한가할 때 순간 튐 한 번은 무시한다")
+
+    let hover = (0..<240).map { $0 % 2 == 0 ? 44.0 : 56.0 }
+    check(switches(feed(hover)) <= 1, "50% 근처에서 단계가 흔들리지 않는다")
+
+    let step = Array(repeating: 5.0, count: 30) + Array(repeating: 90.0, count: 30)
+    let stepGaits = feed(step)
+    let hotAt = stepGaits.firstIndex(of: .hot).map { $0 - 30 } ?? -1
+    check(hotAt >= 0 && hotAt <= 10, "5% → 90% 계단은 10초 안에 과열 (\(hotAt)초)")
+
+    var s = CPUSmoother()
+    for _ in 0..<30 { _ = s.push(95) }
+    for _ in 0..<30 { _ = s.push(78) }
+    check(s.gait == .hot, "과열은 75% 아래로 내려가야 풀린다 (78%는 유지)")
+    for _ in 0..<30 { _ = s.push(70) }
+    check(s.gait == .busy, "70%면 바쁨으로 내려온다")
+
+    check(Gait.allCases.map(\.period) == [3.2, 1.6, 0.8, 0.4], "사이클 3.2 / 1.6 / 0.8 / 0.4초")
+    check(Gait.hot.menubarPeriod == 0.8 && Gait.calm.menubarPeriod == 3.2, "메뉴 막대는 0.8초 상한")
+    check(Gait.hot.capped(lowPower: true) == .walk && Gait.busy.capped(lowPower: false) == .busy
+          && Gait.calm.capped(lowPower: true) == .calm, "저전력은 '보통 걸음'까지")
+    check(jumpSchedule.map(\.frame) == [.crouch, .rise, .apex, .rise, .crouch]
+          && jumpSchedule.first?.at == 0 && jumpSchedule.last?.at == 0.75, "f1 → f2 → f3 → f2 → f1, 착지 75%")
+    check(zip(jumpSchedule, jumpSchedule.dropFirst()).allSatisfy { $0.at < $1.at }, "프레임 시점이 앞으로만 간다")
+    let canvas = CGRect(x: 0, y: 0, width: iconCanvas, height: iconCanvas)
+    let inside = Gait.allCases.allSatisfy { g in
+        ([nil] + [JumpFrame.crouch, .rise, .apex]).allSatisfy { f in
+            let p = iconPose(f, gait: g)
+            return [p.head, p.body, p.base].allSatisfy { canvas.contains($0) }
+        }
+    }
+    check(inside, "모든 단계·프레임이 18pt 캔버스 안에 있다")
+    let apexTop = { (g: Gait) in iconPose(.apex, gait: g).head.minY }
+    check(apexTop(.busy) < apexTop(.walk) && apexTop(.walk) < apexTop(.calm), "바쁠수록 더 높이 뛴다")
+    check(apexTop(.hot) > apexTop(.busy), "과열은 낮게 뛴다")
+    let crouch = iconPose(.crouch, gait: .walk), stand = iconPose(nil, gait: .walk)
+    check(crouch.base.width > stand.base.width && crouch.head.minY > stand.head.minY, "웅크리면 낮고 넓어진다")
+    let rise = iconPose(.rise, gait: .walk)
+    check(stand.base.minY - rise.base.minY < stand.head.minY - rise.head.minY, "솟을 때 받침이 머리보다 늦게 따라온다")
+    check(iconPose(.apex, gait: .hot).narrowEyes && !iconPose(.apex, gait: .busy).narrowEyes, "과열만 눈을 가늘게")
+
+    func fires(_ values: [Double]) -> [Int] {
+        var g = OverheatGate()
+        return values.enumerated().compactMap { g.push($0.element) ? $0.offset : nil }
+    }
+    check(fires(Array(repeating: 95, count: 120)) == [59], "95%가 60초 이어지면 60초째에 한 번만")
+    check(fires(Array(repeating: 95, count: 70) + Array(repeating: 60, count: 70) + Array(repeating: 95, count: 70)).count == 2,
+          "평균이 75% 아래로 내려간 뒤에만 다시 울린다")
+    check(fires((0..<300).map { _ in 83.0 }).isEmpty, "평균 83%로 오래 바빠도 울리지 않는다")
+    let build = (0..<200).map { $0 % 40 < 34 ? 92.0 : 60.0 }  // 링크 때마다 6초씩 60%로 꺼짐 → 평균 87%
+    check(!fires(build).isEmpty, "빌드처럼 잠깐씩 꺼지는 부하도 평균이 85% 넘으면 울린다")
+    check(machToSeconds(24_000_000, numer: 125, denom: 3) == 1.0, "mach 틱을 timebase로 초로 바꾼다")
+    let helper = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)"
+    check(appName(forExecutablePath: helper) == "Google Chrome", "Chrome Helper는 Google Chrome으로 묶는다")
+    check(appName(forExecutablePath: "/usr/sbin/mds_stores") == "mds_stores", ".app 밖이면 실행 파일 이름")
+    check(overheatCulprit(["Chrome": 40, "Xcode": 10], unreadable: 30)?.name == "Chrome", "1위가 읽지 못한 몫보다 크면 이름을 댄다")
+    check(overheatCulprit(["Chrome": 40, "Xcode": 10], unreadable: 50) == nil, "읽지 못한 몫이 더 크면 이름 없이")
+    check(shouldAlertOverheat(app: "Chrome", today: "d2", memoDay: "d1", muted: true, alerted: ["Chrome"]), "날이 바뀌면 다시 알린다")
+    check(!shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: true, alerted: []), "'오늘은 그만'이면 그날은 없다")
+    check(!shouldAlertOverheat(app: "Chrome", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "같은 앱은 하루 한 번")
+    check(shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "다른 앱은 알린다")
+    print(failures == 0 ? "selftest passed" : "selftest failed: \(failures)")
+    return failures
+}
+
+// 데스크톱 펫과 메뉴 막대 아이콘은 같은 Ro다. 한 번에 한 곳에만 보인다
+enum PetMode: String {
+    case desktop
+    case menubar
+}
+
 final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var panel: FloatingPetPanel!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
     private var wanderItem: NSMenuItem!
+    private var modeItem: NSMenuItem!
+    private var mainMenu: NSMenu!
+    // 번들 없는 swiftc 실행 파일이라 .standard 도메인이 실행 파일 이름에 묶이므로 suite를 고정한다
+    private let defaults = UserDefaults(suiteName: "ro.pet") ?? .standard
+    private var mode: PetMode = .desktop
     private var urlString: String = "http://127.0.0.1:8765/"
     private var wanderEnabled: Bool = false
     private var bubbleOpen: Bool = false
@@ -42,6 +367,27 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private let compactSize = NSSize(width: 176, height: 168)
     private let expandedSize = NSSize(width: 360, height: 530)
     private let edgeMargin: CGFloat = 6.0
+    // 화면 위 이 거리 안으로 끌고 오면 메뉴 막대에 Ro 자리가 열린다
+    private let dockZone: CGFloat = 80.0
+    private var toastPanel: NSPanel?
+    // 아이콘을 이만큼 아래로 끌면 펫으로 꺼낸다
+    private let popOutDistance: CGFloat = 24.0
+    private var iconTimer: Timer?
+    private var headerTitle: NSTextField!
+    private var headerDetail: NSTextField!
+    // 메뉴 막대 모드에서 패널을 아이콘 아래로 옮기기 전 데스크톱 자리
+    private var savedDesktopOrigin: NSPoint?
+    private var cpuTimer: Timer?
+    private var lastTicks: CPUTicks?
+    private var smoother = CPUSmoother()
+    private(set) var gait: Gait = .calm
+    private var iconJumpTimer: Timer?
+    private var jumpStep = 0
+    private var iconGait: Gait = .calm  // 지금 아이콘이 뛰고 있는 단계. 착지(f1)할 때만 gait를 따라간다
+    private var iconImages: [Int: NSImage] = [:]
+    private var overheatGate = OverheatGate()
+    private var overheatScanning = false
+    private var alertPanel: NSPanel?
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -55,10 +401,15 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     func applicationDidFinishLaunching(_ notification: Notification) {
         killOtherInstances()
         NSApp.setActivationPolicy(.accessory)
+        mode = PetMode(rawValue: defaults.string(forKey: "ro.mode") ?? "") ?? .desktop
         setupStatusItem()
         setupFloatingPanel()
+        setMode(mode)
+        ensureIconVisible(announceSuccess: false)  // 지난번 메뉴 막대 모드로 시작했는데 아이콘이 가려진 경우
         setupWanderTimer()
         setupBackdropTimer()
+        setupCPUSampler()
+        observeIconConditions()
         setupGlobalHotKey()
     }
 
@@ -77,6 +428,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     @objc private func openPalette() {
+        if mode == .menubar && !bubbleOpen {
+            savedDesktopOrigin = savedDesktopOrigin ?? panel.frame.origin
+            panel.setFrameOrigin(menubarAnchorOrigin())
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         webView.evaluateJavaScript("window.openPaletteFromHost && window.openPaletteFromHost();", completionHandler: nil)
@@ -228,7 +583,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let newFrame = NSRect(origin: newOrigin, size: compactSize)
             panel.setFrame(newFrame, display: true)
             webView.frame = NSRect(origin: .zero, size: compactSize)
-            panel.orderFrontRegardless()
+            revealPet()
         }
         updateBackdropTheme(force: true)
     }
@@ -240,6 +595,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let startOrigin = panel.frame.origin
         var moved = false
         var tick = 0
+        // 메뉴 막대로 보내기는 데스크톱 펫(말풍선 닫힘)을 끌 때만
+        let canDock = fromPet && mode == .desktop && !bubbleOpen
+        var inZone = false
+        var lastProgress: CGFloat = 0
         isDragging = true
 
         if fromPet {
@@ -251,7 +610,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             )
         }
 
-        dragTimer = Timer.scheduledTimer(withTimeInterval: 0.008, repeats: true) { [weak self] timer in
+        let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -277,10 +636,31 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                     )
                 }
             }
+            if canDock && moved {
+                let top = (self.panel.screen ?? NSScreen.main)?.visibleFrame.maxY ?? curMouse.y
+                let d = max(0, top - curMouse.y)
+                let nowIn = d < self.dockZone
+                if nowIn != inZone {
+                    inZone = nowIn
+                    self.statusItem.isVisible = nowIn  // 막대에 자리를 열고 닫는다
+                }
+                let progress = nowIn ? min(1, 1 - d / self.dockZone) : 0
+                if abs(progress - lastProgress) > 0.02 || (progress == 0) != (lastProgress == 0) {
+                    lastProgress = progress
+                    self.webView.evaluateJavaScript(
+                        "window.onHostDockProgress && window.onHostDockProgress(\(String(format: "%.3f", progress)));",
+                        completionHandler: nil
+                    )
+                }
+            }
             if (NSEvent.pressedMouseButtons & 1) == 0 {
                 timer.invalidate()
                 self.dragTimer = nil
                 self.isDragging = false
+                if inZone {
+                    self.dockToMenubar(returnOrigin: startOrigin)
+                    return
+                }
                 self.updateBackdropTheme(force: true)
                 if fromPet {
                     // 놓으면 중력(2400px/s²)으로 떨어진다. 낙하 거리는 최대 280ms 분량으로 제한한다.
@@ -298,6 +678,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        dragTimer = timer
     }
 
     /// 바닥(작업 영역 아래 여백)까지 떨어진다. 반환: 실제로 떨어진 거리(px). 최대 280ms 분량(≈94px).
@@ -327,26 +709,132 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         return fall
     }
 
-    private func make16pxIcon() -> NSImage {
-        let size = NSSize(width: 16, height: 16)
-        let img = NSImage(size: size, flipped: true) { _ in
+    // 놓는 순간 펫 창을 아이콘 자리로 빨아들이고 숨긴다. 다시 꺼내면 끌기 전 자리로 돌아온다
+    private func dockToMenubar(returnOrigin: NSPoint) {
+        guard let iconFrame = statusItem.button?.window?.frame else {
+            setMode(.menubar)
+            return
+        }
+        let size = panel.frame.size
+        let target = NSPoint(x: iconFrame.midX - size.width / 2, y: iconFrame.midY - size.height / 2)
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.28
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.panel.animator().setFrameOrigin(target)
+        }, completionHandler: { [weak self] in
+            guard let self = self else { return }
+            self.setMode(.menubar)
+            self.panel.setFrameOrigin(self.clampOrigin(returnOrigin, size: size))
+            self.webView.evaluateJavaScript("window.onHostDocked && window.onHostDocked();", completionHandler: nil)
+            self.bounceIcon()
+            // 아이템이 많으면 노치 뒤로 숨는다. 가려졌으면 알리고 데스크톱으로 되돌린다
+            self.ensureIconVisible(announceSuccess: true)
+        })
+    }
+
+    // 아이템이 많으면 아이콘이 노치 뒤로 숨는다. 가려졌으면 알리고 데스크톱으로 되돌린다.
+    // 전체 화면 앱 때문에 메뉴 막대가 숨은 경우는 가려진 것으로 보지 않는다
+    private func ensureIconVisible(announceSuccess: Bool) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self, self.mode == .menubar,
+                  let win = self.statusItem.button?.window else { return }
+            if win.occlusionState.contains(.visible) {
+                if announceSuccess {
+                    self.showToast("메뉴 막대로 옮겼어요", "아이콘을 끌어 내리면 다시 꺼낼 수 있어요")
+                }
+            } else if NSMenu.menuBarVisible() {
+                self.setMode(.desktop)
+                self.showToast("메뉴 막대가 가득 찼어요", "아이콘이 노치 뒤로 가려져 데스크톱에 남겨 두었어요")
+            }
+        }
+    }
+
+    // 착지 바운스 1회: 살짝 올라간 아이콘을 잠깐 보여 준 뒤 제자리로
+    private func bounceIcon() {
+        guard let btn = statusItem.button else { return }
+        btn.image = makeIcon(iconPose(.apex, gait: .walk))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.statusItem.button?.image = self?.makeIcon(iconPose(nil, gait: .calm))
+        }
+    }
+
+    // 펫 창이 숨은 상태에서도 보이도록 메뉴 막대 아래에 잠깐 띄우는 알림
+    private func showToast(_ title: String, _ detail: String) {
+        toastPanel?.orderOut(nil)
+        let label = NSTextField(labelWithAttributedString: {
+            let s = NSMutableAttributedString(string: title + "\n", attributes: [.font: NSFont.boldSystemFont(ofSize: 13)])
+            s.append(NSAttributedString(string: detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor
+            ]))
+            return s
+        }())
+        label.sizeToFit()
+        let size = NSSize(width: label.frame.width + 32, height: label.frame.height + 22)
+        let box = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        box.material = .popover
+        box.state = .active
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 12
+        label.frame.origin = NSPoint(x: 16, y: 11)
+        box.addSubview(label)
+
+        let vf = (statusItem.button?.window?.screen ?? NSScreen.main)?.visibleFrame ?? .zero
+        let anchorX = statusItem.isVisible ? (statusItem.button?.window?.frame.midX ?? vf.midX) : vf.midX
+        let x = min(max(anchorX - size.width / 2, vf.minX + 8), vf.maxX - size.width - 8)
+        let toast = NSPanel(contentRect: NSRect(x: x, y: vf.maxY - size.height - 8, width: size.width, height: size.height),
+                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        toast.isOpaque = false
+        toast.backgroundColor = .clear
+        toast.hasShadow = true
+        toast.level = .statusBar
+        toast.ignoresMouseEvents = true
+        toast.contentView = box
+        toast.orderFrontRegardless()
+        toastPanel = toast
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self, weak toast] in
+            toast?.orderOut(nil)
+            if self?.toastPanel === toast { self?.toastPanel = nil }
+        }
+    }
+
+    private func makeIcon(_ pose: IconPose) -> NSImage {
+        let img = NSImage(size: NSSize(width: iconCanvas, height: iconCanvas), flipped: true) { _ in
             let ink = NSColor(calibratedRed: 0x1A/255.0, green: 0x19/255.0, blue: 0x17/255.0, alpha: 1.0)
-
-            let head = NSBezierPath(roundedRect: NSRect(x: 1, y: 0.8, width: 11.5, height: 5.0), xRadius: 2.5, yRadius: 2.5)
             ink.setFill()
-            head.fill()
-
-            // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다
-            NSRect(x: 6.5, y: 2.0, width: 1.3, height: 2.5).fill(using: .clear)
-            NSRect(x: 9.0, y: 2.2, width: 1.2, height: 2.1).fill(using: .clear)
-
-            let body = NSBezierPath(roundedRect: NSRect(x: 1, y: 6.6, width: 9.1, height: 3.8), xRadius: 1.9, yRadius: 1.9)
-            ink.setFill()
-            body.fill()
-
-            let base = NSBezierPath(roundedRect: NSRect(x: 1, y: 11.2, width: 14.0, height: 3.8), xRadius: 1.9, yRadius: 1.9)
-            ink.setFill()
-            base.fill()
+            // 기기 픽셀에 맞춘다. 안 맞추면 1x 화면에서 0.8pt 층 사이와 1.3pt 눈이 회색으로 번진다 (9단계 확인).
+            // 위치와 크기를 따로 반올림해 두 눈 크기가 같게, 층은 받침부터 쌓아 층 사이가 1px 아래로 붙지 않게 한다
+            let px = max(1, NSGraphicsContext.current?.cgContext.ctm.a ?? 2)
+            func round(_ v: CGFloat) -> CGFloat { (v * px).rounded() / px }
+            func snap(_ r: NSRect) -> NSRect {
+                NSRect(x: round(r.minX), y: round(r.minY), width: max(1 / px, round(r.width)), height: max(1 / px, round(r.height)))
+            }
+            let base = snap(pose.base)
+            var body = snap(pose.body)
+            body.origin.y = base.minY - max(1 / px, round(pose.base.minY - pose.body.maxY)) - body.height
+            var head = snap(pose.head)
+            head.origin.y = body.minY - max(1 / px, round(pose.body.minY - pose.head.maxY)) - head.height
+            for r in [head, body, base] {
+                let radius = min(r.height / 2, 2.5)
+                NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+            }
+            // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다. 과열이면 가늘게 뜬다
+            let hd = head
+            let eyes = pose.narrowEyes
+                ? [NSRect(x: hd.minX + 5.3, y: hd.minY + hd.height * 0.42, width: 1.7, height: 1.0),
+                   NSRect(x: hd.minX + 7.9, y: hd.minY + hd.height * 0.42, width: 1.5, height: 1.0)]
+                : [NSRect(x: hd.minX + 5.5, y: hd.minY + hd.height * 0.24, width: 1.3, height: hd.height * 0.5),
+                   NSRect(x: hd.minX + 8.0, y: hd.minY + hd.height * 0.28, width: 1.2, height: hd.height * 0.42)]
+            NSGraphicsContext.current?.compositingOperation = .clear
+            // 눈은 크기를 먼저 반올림하고 원래 중심에 다시 놓는다 (두 눈 높이가 어긋나 보이지 않게)
+            func snapEye(_ e: NSRect) -> NSRect {
+                // 높이는 내림: 1x에서 2.5pt·2.1pt 눈이 3px·2px로 갈려 한쪽이 들려 보이던 것을 막는다 (2x는 5px·4px 유지)
+                let w = max(1 / px, round(e.width)), h = max(1 / px, (e.height * px).rounded(.down) / px)
+                return NSRect(x: round(e.midX - w / 2), y: round(e.midY - h / 2), width: w, height: h)
+            }
+            for e in eyes.map(snapEye) {
+                NSBezierPath(roundedRect: e, xRadius: 0.5, yRadius: 0.5).fill()
+            }
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
             return true
         }
         img.isTemplate = true  // 다크 메뉴바에서는 시스템이 흰색으로 바꿔 그린다
@@ -355,12 +843,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem.autosaveName = "ro.pet"  // ⌘-드래그로 바꾼 막대 안 위치를 기억한다
         if let btn = statusItem.button {
-            btn.image = make16pxIcon()
+            // 메뉴를 직접 띄워야 '끌어 내리기'와 '눌러서 메뉴'를 구분할 수 있다
+            btn.target = self
+            btn.action = #selector(statusButtonPressed)
+            btn.sendAction(on: [.leftMouseDown, .rightMouseDown])
+            btn.image = makeIcon(iconPose(nil, gait: .calm))
             btn.toolTip = "ro — 층 셋, 눈 둘. 기록하고, 풀어낸다."
         }
         let menu = NSMenu()
-        let talkItem = NSMenuItem(title: "말 걸기 (대화창 열기/닫기)", action: #selector(toggleBubble), keyEquivalent: "r")
+        menu.addItem(makeHeaderItem())
+        menu.addItem(NSMenuItem.separator())
+        let talkItem = NSMenuItem(title: "패널 열기", action: #selector(toggleBubble), keyEquivalent: "k")
         talkItem.target = self
         menu.addItem(talkItem)
         let paletteItem = NSMenuItem(title: "명령 팔레트 (⌥R)", action: #selector(openPalette), keyEquivalent: "")
@@ -434,6 +929,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         wanderItem.target = self
         menu.addItem(wanderItem)
 
+        modeItem = NSMenuItem(title: "", action: #selector(toggleMode), keyEquivalent: "")
+        modeItem.target = self
+        menu.addItem(modeItem)
+
         let resetItem = NSMenuItem(title: "우측 하단으로 부르기", action: #selector(resetPosition), keyEquivalent: "0")
         resetItem.target = self
         menu.addItem(resetItem)
@@ -451,7 +950,112 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         quitItem.target = self
         menu.addItem(quitItem)
 
-        statusItem.menu = menu
+        mainMenu = menu
+    }
+
+    // 메뉴 첫 줄: 오늘 기록 수와 지금 표정. 숫자는 웹이 폴링할 때 넘겨준다
+    private func makeHeaderItem() -> NSMenuItem {
+        headerTitle = NSTextField(labelWithString: "오늘 기록 불러오는 중")
+        headerTitle.font = NSFont.boldSystemFont(ofSize: 13)
+        headerDetail = NSTextField(labelWithString: "CPU 재는 중")
+        headerDetail.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        headerDetail.textColor = .secondaryLabelColor
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 44))
+        headerTitle.frame = NSRect(x: 14, y: 22, width: 220, height: 17)
+        headerDetail.frame = NSRect(x: 14, y: 5, width: 220, height: 15)
+        view.addSubview(headerTitle)
+        view.addSubview(headerDetail)
+        let item = NSMenuItem()
+        item.view = view
+        return item
+    }
+
+    @objc private func statusButtonPressed() {
+        guard let event = NSApp.currentEvent, let btn = statusItem.button else { return }
+        if event.type == .rightMouseDown {
+            showStatusMenu()
+            return
+        }
+        // 누른 채 아래로 끌면 펫으로 꺼내고, 그대로 떼면 메뉴를 연다
+        let start = NSEvent.mouseLocation
+        iconTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.008, repeats: true) { [weak self] timer in
+            guard let self = self else {
+                timer.invalidate()
+                return
+            }
+            let cur = NSEvent.mouseLocation
+            if start.y - cur.y > self.popOutDistance {
+                timer.invalidate()
+                self.iconTimer = nil
+                btn.highlight(false)
+                self.popOut(at: cur)
+            } else if (NSEvent.pressedMouseButtons & 1) == 0 {
+                timer.invalidate()
+                self.iconTimer = nil
+                self.showStatusMenu()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        iconTimer = timer
+    }
+
+    private func showStatusMenu() {
+        guard let btn = statusItem.button, let win = btn.window else { return }
+        btn.highlight(true)
+        mainMenu.popUp(positioning: nil, at: NSPoint(x: win.frame.minX, y: win.frame.minY - 4), in: nil)
+        btn.highlight(false)
+    }
+
+    // 끌어 내린 커서 아래에 펫을 띄우고 그대로 드래그를 이어 받는다
+    private func popOut(at mouse: NSPoint) {
+        savedDesktopOrigin = nil
+        panel.setFrameOrigin(NSPoint(x: mouse.x - compactSize.width / 2, y: mouse.y - compactSize.height + 40))
+        setMode(.desktop)
+        startNativeDrag(fromPet: true)
+    }
+
+    // 메뉴 막대 모드에서 펫(과 패널)이 내려올 자리: 아이콘 바로 아래
+    private func menubarAnchorOrigin() -> NSPoint {
+        let vf = currentVisibleFrame()
+        let midX = statusItem.button?.window?.frame.midX ?? (vf.maxX - compactSize.width / 2)
+        return NSPoint(x: midX - compactSize.width / 2, y: vf.maxY - compactSize.height)
+    }
+
+    // 모드 전환은 여기 한 곳에서만 한다: 펫 창, 상태 아이콘, 저장
+    private func setMode(_ next: PetMode) {
+        if next != mode && bubbleOpen {
+            webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
+            setBubbleState(false)
+        }
+        if next == .desktop, let origin = savedDesktopOrigin {
+            panel.setFrameOrigin(origin)
+            savedDesktopOrigin = nil
+        }
+        mode = next
+        defaults.set(next.rawValue, forKey: "ro.mode")
+        statusItem.isVisible = (next == .menubar)
+        DispatchQueue.main.async { [weak self] in self?.updateIconAnimation() }  // 아이콘 창 배치 뒤에
+        modeItem.title = (next == .menubar) ? "데스크톱에 꺼내기" : "메뉴 막대로 보내기"
+        if next == .menubar {
+            panel.orderOut(nil)
+        } else {
+            panel.orderFrontRegardless()
+            updateBackdropTheme(force: true)
+        }
+    }
+
+    // 메뉴 막대 모드에서는 말풍선이 열려 있을 때만 창을 보인다
+    private func revealPet() {
+        if mode == .desktop || bubbleOpen {
+            panel.orderFrontRegardless()
+        } else {
+            panel.orderOut(nil)
+        }
+    }
+
+    @objc private func toggleMode() {
+        setMode(mode == .desktop ? .menubar : .desktop)
     }
 
     @objc private func openScreenCaptureSettings() {
@@ -475,7 +1079,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.collectionBehavior = [.canJoinAllSpaces]  // 전체 화면 앱 위에는 띄우지 않는다
         panel.isMovableByWindowBackground = false
 
         let config = WKWebViewConfiguration()
@@ -488,7 +1092,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
-        panel.orderFrontRegardless()
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -498,7 +1101,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     private func setupWanderTimer() {
         wanderTimer = Timer.scheduledTimer(withTimeInterval: 3.2, repeats: true) { [weak self] _ in
-            guard let self = self, self.wanderEnabled, !self.bubbleOpen, !self.isDragging else { return }
+            guard let self = self, self.mode == .desktop, self.wanderEnabled, !self.bubbleOpen, !self.isDragging else { return }
             let vf = self.currentVisibleFrame()
             var frame = self.panel.frame
             let step: CGFloat = 14.0 * self.wanderDirection
@@ -518,15 +1121,283 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
+    // 1초마다 전체 CPU 사용률을 읽어 걸음 단계를 정한다. 화면이 꺼지거나 잠기면 쉬고, 돌아오면 처음부터
+    private func setupCPUSampler() {
+        let nc = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.stopCPUSampler() }
+        }
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.startCPUSampler() }
+        }
+        startCPUSampler()
+    }
+
+    private func startCPUSampler() {
+        stopCPUSampler()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in self?.sampleCPU() }
+        timer.tolerance = 0.3  // 다른 타이머와 묶여 깨어나는 횟수를 줄인다
+        RunLoop.main.add(timer, forMode: .common)
+        cpuTimer = timer
+    }
+
+    private func stopCPUSampler() {
+        cpuTimer?.invalidate()
+        cpuTimer = nil
+        lastTicks = nil
+        smoother.reset()
+        overheatGate.reset()
+    }
+
+    private func sampleCPU() {
+        guard let cur = CPUTicks.read() else { return }
+        defer { lastTicks = cur }
+        guard let prev = lastTicks, let pct = cpuPercent(from: prev, to: cur) else { return }
+        let next = smoother.push(pct)
+        if next != gait {
+            gait = next
+            updateIconAnimation()
+        }
+        let shown = Int((smoother.smoothed ?? pct).rounded())
+        headerDetail.stringValue = "CPU \(shown)% · \(gait.label)"
+        if overheatGate.push(pct) {
+            startOverheatScan(busy: overheatGate.window.mean)
+        }
+    }
+
+    // MARK: 과열 알림. 앱별 사용량은 그때만 2초 재고, 이름은 이 Mac 밖으로도 로그로도 나가지 않는다
+
+    private func todayString() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
+    }
+
+    private func startOverheatScan(busy: Double) {
+        let today = todayString()
+        let memoDay = defaults.string(forKey: "ro.overheat.day")
+        if memoDay == today && defaults.bool(forKey: "ro.overheat.muted") { return }  // 오늘은 그만
+        guard !overheatScanning else { return }
+        overheatScanning = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let culprit = Self.scanTopApp()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.overheatScanning = false
+                self.presentOverheat(culprit: culprit, busy: busy)
+            }
+        }
+    }
+
+    // 프로세스별 CPU 시간(초)과 앱 이름. rusage를 못 읽는 프로세스(시스템·root)는 빠진다
+    private static func processCPU() -> [pid_t: (app: String, seconds: Double)] {
+        var tb = mach_timebase_info()
+        mach_timebase_info(&tb)
+        let n = proc_listallpids(nil, 0)
+        guard n > 0 else { return [:] }
+        var pids = [pid_t](repeating: 0, count: Int(n) * 2)
+        let got = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        var out: [pid_t: (String, Double)] = [:]
+        var pathBuf = [CChar](repeating: 0, count: 4096)
+        for pid in pids.prefix(Int(max(0, got))) where pid > 0 {
+            var info = rusage_info_v4()
+            let rc = withUnsafeMutablePointer(to: &info) {
+                $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+            }
+            guard rc == 0 else { continue }
+            let len = proc_pidpath(pid, &pathBuf, UInt32(pathBuf.count))
+            let path = len > 0 ? String(cString: pathBuf) : ""
+            let secs = machToSeconds(info.ri_user_time + info.ri_system_time, numer: tb.numer, denom: tb.denom)
+            out[pid] = (appName(forExecutablePath: path), secs)
+        }
+        return out
+    }
+
+    // 2초 동안 앱별로 CPU의 몇 %를 썼는지 재고, 읽지 못한 몫과 비교해 이름을 댈지 정한다
+    private static func scanTopApp() -> (name: String, share: Double)? {
+        guard let t0 = CPUTicks.read() else { return nil }
+        let a = processCPU()
+        Thread.sleep(forTimeInterval: 2.0)
+        guard let t1 = CPUTicks.read(), let busy = cpuPercent(from: t0, to: t1) else { return nil }
+        let b = processCPU()
+        let capacity = Double(t1.total &- t0.total) / Double(sysconf(Int32(_SC_CLK_TCK)))  // 코어 수 × 경과 초
+        guard capacity > 0 else { return nil }
+        var usage: [String: Double] = [:]
+        for (pid, now) in b {
+            guard let before = a[pid], now.seconds >= before.seconds else { continue }
+            usage[now.app, default: 0] += (now.seconds - before.seconds) / capacity * 100
+        }
+        let readable = usage.values.reduce(0, +)
+        return overheatCulprit(usage, unreadable: max(0, busy - readable))
+    }
+
+    private func presentOverheat(culprit: (name: String, share: Double)?, busy: Double) {
+        let today = todayString()
+        let memoDay = defaults.string(forKey: "ro.overheat.day")
+        var alerted = (memoDay == today) ? (defaults.stringArray(forKey: "ro.overheat.apps") ?? []) : []
+        guard shouldAlertOverheat(app: culprit?.name, today: today, memoDay: memoDay,
+                                  muted: defaults.bool(forKey: "ro.overheat.muted"), alerted: alerted) else { return }
+        if memoDay != today { defaults.set(false, forKey: "ro.overheat.muted") }
+        alerted.append(culprit?.name ?? "")
+        defaults.set(today, forKey: "ro.overheat.day")
+        defaults.set(alerted, forKey: "ro.overheat.apps")
+
+        // CPU %는 메뉴의 숫자와 같은 'Mac 전체 대비'다 (활동 모니터의 코어당 %와 다르다)
+        let detail = culprit.map { "가장 많이 쓰는 앱: \($0.name) (CPU \(Int($0.share.rounded()))%) · 1분째 바빠요" }
+            ?? "1분째 CPU \(Int(busy.rounded()))%로 바빠요 · 어떤 앱인지는 확인할 수 없어요"
+        showOverheatCard(detail: detail)
+    }
+
+    private func showOverheatCard(detail: String) {
+        alertPanel?.orderOut(nil)
+        let title = NSTextField(labelWithString: "Mac이 힘들어해요")
+        title.font = NSFont.boldSystemFont(ofSize: 13)
+        let body = NSTextField(wrappingLabelWithString: detail)
+        body.font = NSFont.systemFont(ofSize: 12)
+        body.textColor = .secondaryLabelColor
+        body.preferredMaxLayoutWidth = 260
+        let open = NSButton(title: "활동 모니터 열기", target: self, action: #selector(openActivityMonitor))
+        open.bezelStyle = .rounded
+        open.keyEquivalent = "\r"
+        let mute = NSButton(title: "오늘은 그만", target: self, action: #selector(muteOverheatToday))
+        mute.bezelStyle = .inline
+        let buttons = NSStackView(views: [open, mute])
+        buttons.spacing = 10
+        let stack = NSStackView(views: [title, body, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        let size = stack.fittingSize
+
+        let box = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
+        box.material = .popover
+        box.state = .active
+        box.wantsLayer = true
+        box.layer?.cornerRadius = 12
+        stack.frame = box.bounds
+        box.addSubview(stack)
+
+        // 메뉴 막대 모드는 아이콘 아래, 데스크톱 모드는 펫 옆
+        let vf = currentVisibleFrame()
+        var origin: NSPoint
+        if mode == .menubar, let icon = statusItem.button?.window?.frame {
+            origin = NSPoint(x: icon.midX - size.width / 2, y: vf.maxY - size.height - 8)
+        } else {
+            let pet = panel.frame
+            origin = NSPoint(x: pet.minX - size.width - 8, y: pet.maxY - size.height)
+            if origin.x < vf.minX + 8 { origin.x = pet.maxX + 8 }
+        }
+        origin.x = min(max(origin.x, vf.minX + 8), vf.maxX - size.width - 8)
+        origin.y = min(max(origin.y, vf.minY + 8), vf.maxY - size.height - 8)
+        let card = NSPanel(contentRect: NSRect(origin: origin, size: size),
+                           styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        card.isOpaque = false
+        card.backgroundColor = .clear
+        card.hasShadow = true
+        card.level = .statusBar
+        card.becomesKeyOnlyIfNeeded = true
+        card.contentView = box
+        card.orderFrontRegardless()
+        alertPanel = card
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self, weak card] in
+            card?.orderOut(nil)
+            if self?.alertPanel === card { self?.alertPanel = nil }
+        }
+    }
+
+    @objc private func openActivityMonitor() {
+        alertPanel?.orderOut(nil)
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.ActivityMonitor") {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+
+    @objc private func muteOverheatToday() {
+        alertPanel?.orderOut(nil)
+        defaults.set(todayString(), forKey: "ro.overheat.day")
+        defaults.set(true, forKey: "ro.overheat.muted")
+    }
+
+    // MARK: 메뉴 막대 아이콘 걸음 (07). 데스크톱 펫은 CPU에 맞춰 걷지 않는다
+
+    // 아이콘이 보이고(메뉴 막대 모드, 노치에 안 가림) '동작 줄이기'가 꺼져 있을 때만 뛴다
+    private func updateIconAnimation() {
+        let visible = statusItem.button?.window?.occlusionState.contains(.visible) ?? false
+        let animate = mode == .menubar && visible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animate else {
+            iconJumpTimer?.invalidate()
+            iconJumpTimer = nil
+            jumpStep = 0
+            statusItem.button?.image = makeIcon(iconPose(nil, gait: .calm))
+            return
+        }
+        if iconJumpTimer == nil {
+            jumpStep = 0
+            iconGait = targetIconGait()
+            showJumpStep()
+        }
+    }
+
+    private func targetIconGait() -> Gait {
+        gait.capped(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    }
+
+    // 지금 단계의 프레임을 보여 주고 다음 시점까지 기다린다. 사이클 길이는 0.8초 상한(menubarPeriod)
+    private func showJumpStep() {
+        let step = jumpSchedule[jumpStep]
+        statusItem.button?.image = jumpImage(step.frame, gait: iconGait)
+        let nextAt = jumpStep + 1 < jumpSchedule.count ? jumpSchedule[jumpStep + 1].at : 1.0
+        let delay = (nextAt - step.at) * iconGait.menubarPeriod
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.jumpStep = (self.jumpStep + 1) % jumpSchedule.count
+            // 착지해 다시 웅크릴 때만 빠르기를 바꾼다 (공중에서 끊기지 않게)
+            if self.jumpStep == 0 {
+                self.iconGait = self.targetIconGait()
+            }
+            self.showJumpStep()
+        }
+        timer.tolerance = delay * 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        iconJumpTimer = timer
+    }
+
+    private func jumpImage(_ frame: JumpFrame, gait g: Gait) -> NSImage {
+        let key = g.rawValue * 3 + frame.rawValue
+        if let img = iconImages[key] { return img }
+        let img = makeIcon(iconPose(frame, gait: g))
+        iconImages[key] = img
+        return img
+    }
+
+    private func observeIconConditions() {
+        let refresh: (Notification) -> Void = { [weak self] _ in self?.updateIconAnimation() }
+        NotificationCenter.default.addObserver(forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+                                               object: nil, queue: .main, using: refresh)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main, using: refresh)
+        // 노치 뒤로 밀리거나 전체 화면으로 메뉴 막대가 숨으면 그리기를 멈춘다
+        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                               object: nil, queue: .main) { [weak self] note in
+            guard let self = self, (note.object as? NSWindow) === self.statusItem.button?.window else { return }
+            self.updateIconAnimation()
+        }
+    }
+
     // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지
     private func setupBackdropTimer() {
         backdropTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            guard let self = self, !self.isDragging else { return }
+            guard let self = self, self.panel.isVisible, !self.isDragging else { return }
             self.updateBackdropTheme(force: false)
         }
     }
 
     @objc private func toggleBubble() {
+        if mode == .menubar && !bubbleOpen {
+            savedDesktopOrigin = savedDesktopOrigin ?? panel.frame.origin
+            panel.setFrameOrigin(menubarAnchorOrigin())
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost();", completionHandler: nil)
@@ -534,19 +1405,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     @objc private func previewMood(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.setMoodPreview && window.setMoodPreview('\(code)', 10000);", completionHandler: nil)
     }
 
     @objc private func triggerActionFromMenu(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.triggerAction && window.triggerAction('\(code)', 4500);", completionHandler: nil)
     }
 
     @objc private func selectMaterial(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
-        panel.orderFrontRegardless()
+        revealPet()
         webView.evaluateJavaScript("window.setMaterialFromHost && window.setMaterialFromHost('\(code)');", completionHandler: nil)
     }
 
@@ -557,6 +1428,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     @objc private func resetPosition() {
+        if mode == .menubar {
+            setMode(.desktop)
+        }
         if bubbleOpen {
             webView.evaluateJavaScript("window.toggleBubbleFromHost && window.toggleBubbleFromHost(false);", completionHandler: nil)
             setBubbleState(false)
@@ -583,6 +1457,12 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let target = NSPoint(x: panel.frame.origin.x + dx, y: panel.frame.origin.y - dy)
             panel.setFrameOrigin(clampOrigin(target, size: panel.frame.size))
             updateBackdropTheme(force: false)
+        } else if type == "menu" {
+            // 데스크톱 모드에선 상태 아이콘이 숨으므로 펫 우클릭이 같은 메뉴로 가는 길이다
+            mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        } else if type == "status" {
+            let today = (dict["today"] as? NSNumber)?.intValue ?? 0
+            headerTitle.stringValue = "오늘 \(today)건 기록"
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)
@@ -605,6 +1485,9 @@ while i < args.count {
     } else if args[i] == "--wander" {
         wanderArg = true
         i += 1
+    } else if args[i] == "--selftest" {
+        // 앱을 띄우기 전에 끝낸다 (killOtherInstances가 떠 있는 펫을 죽이지 않게)
+        exit(runCPUSelfTest() == 0 ? 0 : 1)
     } else {
         i += 1
     }
