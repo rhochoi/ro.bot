@@ -70,6 +70,58 @@ enum Gait: Int, CaseIterable {
     var rate: Double { 3.2 / period }
     var menubarPeriod: Double { max(period, 0.8) }
     var label: String { ["느긋", "보통 걸음", "바쁨", "과열"][rawValue] }
+    // 아이콘 점프 높이(pt)와 웅크림·늘어남 정도. 바쁨은 더 높이·더 크게 찌그러지고, 과열은 낮고 잦게
+    var jumpHeight: Double { [1.0, 1.6, 2.2, 1.0][rawValue] }
+    var squash: Double { [0.08, 0.12, 0.18, 0.10][rawValue] }
+
+    // 저전력 모드에서는 '보통 걸음'까지만
+    func capped(lowPower: Bool) -> Gait {
+        lowPower ? Gait(rawValue: min(rawValue, Gait.walk.rawValue))! : self
+    }
+}
+
+// MARK: 메뉴 막대 아이콘 점프 (07 시안: 제자리에서 콩). 프레임 3장을 f1·f2·f3·f2·f1 순서로 바꾼다
+
+enum JumpFrame: Int {
+    case crouch = 0, rise, apex  // f1 웅크림, f2 솟음, f3 정점
+}
+
+// 한 사이클 안에서 프레임을 바꾸는 시점(비율). 이륙 15%·정점 45%·착지 75%, 남은 25%는 바닥에서 숨 고르기.
+// 메뉴 막대는 보간이 없으니 시안의 타임라인(0 / 480 / 720 / 960 / 1200ms @1.6초) 그대로 바꾼다
+let jumpSchedule: [(at: Double, frame: JumpFrame)] = [
+    (0.00, .crouch), (0.30, .rise), (0.45, .apex), (0.60, .rise), (0.75, .crouch),
+]
+
+// 아이콘 캔버스 18×18pt. 몸은 16pt 디자인 그대로 두고 위쪽 여유로 뛴다
+let iconCanvas: CGFloat = 18
+
+struct IconPose {
+    var head: CGRect
+    var body: CGRect
+    var base: CGRect
+    var narrowEyes: Bool
+}
+
+// frame이 nil이면 서 있는 기본 자세. 층은 바닥부터 쌓고, 솟을 때는 머리가 먼저 가고 받침이 늦게 따라온다
+func iconPose(_ frame: JumpFrame?, gait: Gait) -> IconPose {
+    let s = CGFloat(gait.squash), h = CGFloat(gait.jumpHeight)
+    var k: CGFloat = 1, wk: CGFloat = 1
+    var lift: (head: CGFloat, body: CGFloat, base: CGFloat) = (0, 0, 0)
+    switch frame {
+    case .crouch?: k = 1 - s; wk = 1 + s / 2
+    case .rise?: k = 1 + s / 3; wk = 1 - s / 4; lift = (0.6 * h, 0.5 * h, 0.4 * h)
+    case .apex?: lift = (h, h, h)
+    case nil: break
+    }
+    let x: CGFloat = 2, ground: CGFloat = iconCanvas - 1.3, gap = 0.8 * k
+    let baseH = 3.8 * k, bodyH = 3.8 * k, headH = 5.0 * k
+    let baseY = ground - baseH, bodyY = baseY - gap - bodyH, headY = bodyY - gap - headH
+    return IconPose(
+        head: CGRect(x: x, y: headY - lift.head, width: 11.5 * wk, height: headH),
+        body: CGRect(x: x, y: bodyY - lift.body, width: 9.1 * wk, height: bodyH),
+        base: CGRect(x: x, y: baseY - lift.base, width: 14.0 * wk, height: baseH),
+        narrowEyes: gait == .hot
+    )
 }
 
 // 최근 3개 중앙값(순간 튐 제거) → 지수 평균 α=0.3 → 모든 경계에 ±5% 히스테리시스.
@@ -154,6 +206,27 @@ func runCPUSelfTest() -> Int {
 
     check(Gait.allCases.map(\.period) == [3.2, 1.6, 0.8, 0.4], "사이클 3.2 / 1.6 / 0.8 / 0.4초")
     check(Gait.hot.menubarPeriod == 0.8 && Gait.calm.menubarPeriod == 3.2, "메뉴 막대는 0.8초 상한")
+    check(Gait.hot.capped(lowPower: true) == .walk && Gait.busy.capped(lowPower: false) == .busy
+          && Gait.calm.capped(lowPower: true) == .calm, "저전력은 '보통 걸음'까지")
+    check(jumpSchedule.map(\.frame) == [.crouch, .rise, .apex, .rise, .crouch]
+          && jumpSchedule.first?.at == 0 && jumpSchedule.last?.at == 0.75, "f1 → f2 → f3 → f2 → f1, 착지 75%")
+    check(zip(jumpSchedule, jumpSchedule.dropFirst()).allSatisfy { $0.at < $1.at }, "프레임 시점이 앞으로만 간다")
+    let canvas = CGRect(x: 0, y: 0, width: iconCanvas, height: iconCanvas)
+    let inside = Gait.allCases.allSatisfy { g in
+        ([nil] + [JumpFrame.crouch, .rise, .apex]).allSatisfy { f in
+            let p = iconPose(f, gait: g)
+            return [p.head, p.body, p.base].allSatisfy { canvas.contains($0) }
+        }
+    }
+    check(inside, "모든 단계·프레임이 18pt 캔버스 안에 있다")
+    let apexTop = { (g: Gait) in iconPose(.apex, gait: g).head.minY }
+    check(apexTop(.busy) < apexTop(.walk) && apexTop(.walk) < apexTop(.calm), "바쁠수록 더 높이 뛴다")
+    check(apexTop(.hot) > apexTop(.busy), "과열은 낮게 뛴다")
+    let crouch = iconPose(.crouch, gait: .walk), stand = iconPose(nil, gait: .walk)
+    check(crouch.base.width > stand.base.width && crouch.head.minY > stand.head.minY, "웅크리면 낮고 넓어진다")
+    let rise = iconPose(.rise, gait: .walk)
+    check(stand.base.minY - rise.base.minY < stand.head.minY - rise.head.minY, "솟을 때 받침이 머리보다 늦게 따라온다")
+    check(iconPose(.apex, gait: .hot).narrowEyes && !iconPose(.apex, gait: .busy).narrowEyes, "과열만 눈을 가늘게")
     print(failures == 0 ? "selftest passed" : "selftest failed: \(failures)")
     return failures
 }
@@ -207,6 +280,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var lastTicks: CPUTicks?
     private var smoother = CPUSmoother()
     private(set) var gait: Gait = .calm
+    private var iconJumpTimer: Timer?
+    private var jumpStep = 0
+    private var iconGait: Gait = .calm  // 지금 아이콘이 뛰고 있는 단계. 착지(f1)할 때만 gait를 따라간다
+    private var iconImages: [Int: NSImage] = [:]
 
     init(url: String, wander: Bool) {
         self.urlString = url
@@ -228,6 +305,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         setupWanderTimer()
         setupBackdropTimer()
         setupCPUSampler()
+        observeIconConditions()
     }
 
     // 중복 실행 방지: 현재 프로세스 외에 다른 ro-pet-host가 떠 있으면 즉시 종료시킨다
@@ -533,9 +611,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     // 착지 바운스 1회: 살짝 올라간 아이콘을 잠깐 보여 준 뒤 제자리로
     private func bounceIcon() {
         guard let btn = statusItem.button else { return }
-        btn.image = make16pxIcon(lift: 1.5)
+        btn.image = makeIcon(iconPose(.apex, gait: .walk))
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            self?.statusItem.button?.image = self?.make16pxIcon()
+            self?.statusItem.button?.image = self?.makeIcon(iconPose(nil, gait: .calm))
         }
     }
 
@@ -578,29 +656,26 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
-    private func make16pxIcon(lift: CGFloat = 0) -> NSImage {
-        let size = NSSize(width: 16, height: 16)
-        let img = NSImage(size: size, flipped: true) { _ in
-            let shift = NSAffineTransform()
-            shift.translateX(by: 0, yBy: -lift)  // flipped 좌표라 음수가 위쪽
-            shift.concat()
+    private func makeIcon(_ pose: IconPose) -> NSImage {
+        let img = NSImage(size: NSSize(width: iconCanvas, height: iconCanvas), flipped: true) { _ in
             let ink = NSColor(calibratedRed: 0x1A/255.0, green: 0x19/255.0, blue: 0x17/255.0, alpha: 1.0)
-
-            let head = NSBezierPath(roundedRect: NSRect(x: 1, y: 0.8, width: 11.5, height: 5.0), xRadius: 2.5, yRadius: 2.5)
             ink.setFill()
-            head.fill()
-
-            // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다
-            NSRect(x: 6.5, y: 2.0, width: 1.3, height: 2.5).fill(using: .clear)
-            NSRect(x: 9.0, y: 2.2, width: 1.2, height: 2.1).fill(using: .clear)
-
-            let body = NSBezierPath(roundedRect: NSRect(x: 1, y: 6.6, width: 9.1, height: 3.8), xRadius: 1.9, yRadius: 1.9)
-            ink.setFill()
-            body.fill()
-
-            let base = NSBezierPath(roundedRect: NSRect(x: 1, y: 11.2, width: 14.0, height: 3.8), xRadius: 1.9, yRadius: 1.9)
-            ink.setFill()
-            base.fill()
+            for r in [pose.head, pose.body, pose.base] {
+                let radius = min(r.height / 2, 2.5)
+                NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
+            }
+            // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다. 과열이면 가늘게 뜬다
+            let hd = pose.head
+            let eyes = pose.narrowEyes
+                ? [NSRect(x: hd.minX + 5.3, y: hd.minY + hd.height * 0.42, width: 1.7, height: 1.0),
+                   NSRect(x: hd.minX + 7.9, y: hd.minY + hd.height * 0.42, width: 1.5, height: 1.0)]
+                : [NSRect(x: hd.minX + 5.5, y: hd.minY + hd.height * 0.24, width: 1.3, height: hd.height * 0.5),
+                   NSRect(x: hd.minX + 8.0, y: hd.minY + hd.height * 0.28, width: 1.2, height: hd.height * 0.42)]
+            NSGraphicsContext.current?.compositingOperation = .clear
+            for e in eyes {
+                NSBezierPath(roundedRect: e, xRadius: 0.5, yRadius: 0.5).fill()
+            }
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
             return true
         }
         img.isTemplate = true  // 다크 메뉴바에서는 시스템이 흰색으로 바꿔 그린다
@@ -615,7 +690,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             btn.target = self
             btn.action = #selector(statusButtonPressed)
             btn.sendAction(on: [.leftMouseDown, .rightMouseDown])
-            btn.image = make16pxIcon()
+            btn.image = makeIcon(iconPose(nil, gait: .calm))
             btn.toolTip = "ro — 층 셋, 눈 둘. 기록하고, 풀어낸다."
         }
         let menu = NSMenu()
@@ -798,6 +873,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         mode = next
         defaults.set(next.rawValue, forKey: "ro.mode")
         statusItem.isVisible = (next == .menubar)
+        DispatchQueue.main.async { [weak self] in self?.updateIconAnimation() }  // 아이콘 창 배치 뒤에
         modeItem.title = (next == .menubar) ? "데스크톱에 꺼내기" : "메뉴 막대로 보내기"
         if next == .menubar {
             panel.orderOut(nil)
@@ -857,7 +933,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        pushGait()
         updateBackdropTheme(force: true)
         webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
     }
@@ -918,16 +993,76 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let next = smoother.push(pct)
         if next != gait {
             gait = next
-            pushGait()
+            updateIconAnimation()
         }
         let shown = Int((smoother.smoothed ?? pct).rounded())
         headerDetail.stringValue = "CPU \(shown)% · \(gait.label)"
     }
 
-    // 웹 펫은 사이클이 끝날 때 바꾼다 (window.setGait)
-    private func pushGait() {
-        let name = ["calm", "walk", "busy", "hot"][gait.rawValue]
-        webView?.evaluateJavaScript("window.setGait && window.setGait('\(name)');", completionHandler: nil)
+    // MARK: 메뉴 막대 아이콘 걸음 (07). 데스크톱 펫은 CPU에 맞춰 걷지 않는다
+
+    // 아이콘이 보이고(메뉴 막대 모드, 노치에 안 가림) '동작 줄이기'가 꺼져 있을 때만 뛴다
+    private func updateIconAnimation() {
+        let visible = statusItem.button?.window?.occlusionState.contains(.visible) ?? false
+        let animate = mode == .menubar && visible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard animate else {
+            iconJumpTimer?.invalidate()
+            iconJumpTimer = nil
+            jumpStep = 0
+            statusItem.button?.image = makeIcon(iconPose(nil, gait: .calm))
+            return
+        }
+        if iconJumpTimer == nil {
+            jumpStep = 0
+            iconGait = targetIconGait()
+            showJumpStep()
+        }
+    }
+
+    private func targetIconGait() -> Gait {
+        gait.capped(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)
+    }
+
+    // 지금 단계의 프레임을 보여 주고 다음 시점까지 기다린다. 사이클 길이는 0.8초 상한(menubarPeriod)
+    private func showJumpStep() {
+        let step = jumpSchedule[jumpStep]
+        statusItem.button?.image = jumpImage(step.frame, gait: iconGait)
+        let nextAt = jumpStep + 1 < jumpSchedule.count ? jumpSchedule[jumpStep + 1].at : 1.0
+        let delay = (nextAt - step.at) * iconGait.menubarPeriod
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.jumpStep = (self.jumpStep + 1) % jumpSchedule.count
+            // 착지해 다시 웅크릴 때만 빠르기를 바꾼다 (공중에서 끊기지 않게)
+            if self.jumpStep == 0 {
+                self.iconGait = self.targetIconGait()
+            }
+            self.showJumpStep()
+        }
+        timer.tolerance = delay * 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        iconJumpTimer = timer
+    }
+
+    private func jumpImage(_ frame: JumpFrame, gait g: Gait) -> NSImage {
+        let key = g.rawValue * 3 + frame.rawValue
+        if let img = iconImages[key] { return img }
+        let img = makeIcon(iconPose(frame, gait: g))
+        iconImages[key] = img
+        return img
+    }
+
+    private func observeIconConditions() {
+        let refresh: (Notification) -> Void = { [weak self] _ in self?.updateIconAnimation() }
+        NotificationCenter.default.addObserver(forName: Notification.Name.NSProcessInfoPowerStateDidChange,
+                                               object: nil, queue: .main, using: refresh)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main, using: refresh)
+        // 노치 뒤로 밀리거나 전체 화면으로 메뉴 막대가 숨으면 그리기를 멈춘다
+        NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                               object: nil, queue: .main) { [weak self] note in
+            guard let self = self, (note.object as? NSWindow) === self.statusItem.button?.window else { return }
+            self.updateIconAnimation()
+        }
     }
 
     // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지

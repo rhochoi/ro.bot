@@ -429,7 +429,7 @@ class PetTest(unittest.TestCase):
     def test_menubar_icon_is_template_and_permission_hint(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn("img.isTemplate = true", src)  # 다크 메뉴바에서도 보인다
-        self.assertIn("fill(using: .clear)", src)  # 눈은 템플릿 알파로 뚫는다
+        self.assertIn("NSGraphicsContext.current?.compositingOperation = .clear", src)  # 눈은 템플릿 알파로 뚫는다
         self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
         self.assertIn("Privacy_ScreenCapture", src)
 
@@ -483,16 +483,20 @@ class PetTest(unittest.TestCase):
         self.assertIn("ensureIconVisible(announceSuccess: false)", src)  # 시작할 때도 노치 확인
         self.assertIn("} else if NSMenu.menuBarVisible() {", src)  # 전체 화면은 가려진 것으로 보지 않는다
 
-    def test_cpu_gait_in_web_pet(self):
-        html = pet.PET_HTML
-        self.assertIn("const GAIT_PERIODS = { calm: 3.2, walk: 1.6, busy: 0.8, hot: 0.4 };", html)
-        self.assertIn('layerBase.addEventListener("animationiteration"', html)  # 사이클 끝에서만 바꾼다
-        self.assertIn('body[data-gait="calm"] { --gait-period: 3.2s; --gait-amp: 0.5; }', html)  # 한가해도 천천히 걷는다
-        self.assertIn("if (dockCaption !== null) return;", html)  # 끄는 중 캡션을 덮어쓰지 않는다
-        self.assertIn('.mood-idle:not([class*="action-"])', html)  # 동작·표정이 우선
-        self.assertIn("var(--gait-amp, 1)", html)  # 기존 걷기 동작은 진폭 1 그대로
+    def test_cpu_gait_jumps_menubar_icon_only(self):
+        # 데스크톱 펫은 CPU에 맞춰 움직이지 않는다 (2026-10-24 결정). 점프는 메뉴 막대 아이콘에만
+        self.assertNotIn("setGait", pet.PET_HTML)
+        self.assertNotIn("data-gait", pet.PET_HTML)
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
-        self.assertIn("window.setGait && window.setGait(", src)
+        self.assertNotIn("window.setGait", src)
+        self.assertIn("let delay = (nextAt - step.at) * iconGait.menubarPeriod", src)  # 0.8초 상한
+        self.assertIn("(0.00, .crouch), (0.30, .rise), (0.45, .apex), (0.60, .rise), (0.75, .crouch),", src)
+        self.assertIn("if self.jumpStep == 0 {", src)  # 착지할 때만 빠르기를 바꾼다
+        self.assertIn("!NSWorkspace.shared.accessibilityDisplayShouldReduceMotion", src)  # 동작 줄이기면 멈춤
+        self.assertIn("gait.capped(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled)", src)
+        self.assertIn("narrowEyes: gait == .hot", src)  # 과열이면 가는 눈
+        self.assertIn("let iconCanvas: CGFloat = 18", src)  # 위쪽 여유로 뛴다
+        self.assertIn("NSWindow.didChangeOcclusionStateNotification", src)  # 가려지면 그리기를 멈춘다
 
     @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
     def test_cpu_gait_selftest(self):
