@@ -67,7 +67,7 @@ KEYWORDS = {
            "연말정산", "급여명세", "송금", "invoice", "receipt", "billing"),
     "계약·서류": ("계약서", "약정", "신청서", "증명서", "동의서", "확인서", "위임장", "등본", "지원서", "이력서",
               "자기소개서", "서약서", "contract", "agreement", "certificate", "resume"),
-    "학습·자료": ("논문", "강의", "보고서", "연구", "초록", "발표자료", "학회", "abstract", "references",
+    "학습·자료": ("논문", "강의", "연구", "초록", "발표자료", "학회", "abstract", "references",
               "lecture", "thesis", "journal", "proceedings"),
 }
 ACTIONS = ("move", "quarantine", "keep")
@@ -86,6 +86,9 @@ COPY_MARK = re.compile(r"(\s*\(\d+\)|\s*사본|\s+copy)+\s*$", re.I)  # "(1) (1)
 SENSITIVE = re.compile(r"recovery|backup[-_ ]?codes?|mnemonic|복구\s*코드|니모닉|시드\s*구문"
                        r"|(?<![a-z])(otp|2fa|seed)(?![a-z])", re.I)
 NAME_DATE = re.compile(r"(?<!\d)(20\d\d)[-._년 ]?\s?(\d{1,2})[-._월 ]?\s?(\d{1,2})일?(?!\d)")
+NAME_MONTH = re.compile(r"(?<!\d)(20\d\d)[-._년 ]\s?(0?[1-9]|1[0-2])월?(?![\d.])")  # invoice_2026_09
+VERSION_TAIL = re.compile(r"\s(?:v\d+(?:\.\d+)*|final|최종|\d+\.\d+(?:\.\d+)*)\b.*$", re.I)
+CAMERA = re.compile(r"^(?:img|dsc|dscn|pxl|mvimg|gopr|dji)[\s-]?\d{3,5}$", re.I)  # 카메라 번호는 그 자체가 이름
 TEXT_DATE = re.compile(r"(?<!\d)(20\d\d)\s?(?:[-./]|년)\s?(\d{1,2})\s?(?:[-./]|월)\s?(\d{1,2})(?!\d)")
 
 
@@ -235,6 +238,9 @@ def pick_date(path, st, category, text="", today=None):
         for m in TEXT_DATE.finditer(text):
             if v := _valid_date(*m.groups(), today):
                 return v, "본문"
+    for m in NAME_MONTH.finditer(path.stem):
+        if v := _valid_date(*m.groups(), 1, today):
+            return v, "이름(월)"
     born = getattr(st, "st_birthtime", st.st_mtime)
     return datetime.date.fromtimestamp(born), "받은 날"
 
@@ -249,12 +255,16 @@ def clean_title(raw):
     if re.search(r"%[0-9A-Fa-f]{2}", t):
         t = _nfc(unquote(t))
     t = NAME_DATE.sub(" ", t)
+    t = NAME_MONTH.sub(" ", t)
     t = COPY_MARK.sub("", t)
     t = LONG_DIGITS.sub(" ", BAD_CHARS.sub(" ", t))
     t = re.sub(r"\(\s*\)|\[\s*\]", " ", t)  # 날짜·숫자를 빼고 남은 빈 괄호
     t = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", t)  # 점은 버전 번호(v2.0) 사이에서만 남긴다
     t = re.sub(r"[_\s]+", " ", t).strip(" -_.")
     t = log.redact(t)
+    if len(t) > TITLE_MAX and (tail := VERSION_TAIL.search(t)):  # 자를 때도 v3·final 같은 버전 표시는 남긴다
+        tail = tail.group(0).strip()[:16]
+        t = t[:TITLE_MAX - len(tail) - 1].rstrip() + " " + tail
     return t[:TITLE_MAX].strip()
 
 
@@ -274,6 +284,8 @@ def pick_title(path, text="", meta_title=""):
         if 2 <= len(t) <= TITLE_MAX and _meaningful(t):
             return t
     t = clean_title(path.stem)  # '#2'처럼 짧아도 원래 이름이 '제목없음'보다 낫다(해시·untitled류는 제외)
+    if CAMERA.match(t):  # IMG_2041은 사진을 찾는 번호다
+        return t
     return t if t and not JUNK_TITLE.match(t) and not re.fullmatch(r"[0-9a-f -]{8,}", t, re.I) else "제목없음"
 
 
@@ -325,7 +337,8 @@ def scan(root=ROOT, dest_root=DEST_ROOT, extractor=extract, now=None, today=None
         cat, conf, reasons = classify(named, text, meta)
         day, why = pick_date(named, st, cat, text, today)
         title = pick_title(named, text, meta)
-        dest = _unique(dest_root / cat / f"{day.isoformat()}_{title}{p.suffix.lower()}", taken)
+        prefix = day.strftime("%Y-%m") if why == "이름(월)" else day.isoformat()
+        dest = _unique(dest_root / cat / f"{prefix}_{title}{p.suffix.lower()}", taken)
         taken.add(dest)
         items.append({
             "id": hashlib.sha1(f"organize:{p}".encode()).hexdigest()[:8], "path": str(p),
@@ -578,7 +591,7 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
         done.append({**it, "dest": str(dst)})
     if done:
         cats = Counter(i["category"] for i in done if i.get("action", "move") == "move")
-        log.append("organize", f"정리 {len(done)}건 (batch {batch})",
+        log.append("organize", f"정리 {len(done)}건",
                    {"batch": batch, "count": len(done), "categories": dict(cats),
                     "quarantined": sum(i.get("action") == "quarantine" for i in done)}, log_dir=log_dir)
     return batch, done, skipped
@@ -722,7 +735,7 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
                  "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home, e["source"])  # 원래 기록 쪽에 복원을 남긴다
         done.append(e)
     if done:
-        log.append("organize", f"되돌림 {len(done)}건 (batch {batch})", {"batch": batch, "count": len(done)},
+        log.append("organize", f"되돌림 {len(done)}건", {"batch": batch, "count": len(done)},
                    log_dir=log_dir)
     return batch, done, skipped
 
@@ -836,7 +849,7 @@ def main(argv=None):
         if args.cmd == "scan":
             plan = scan(args.root, args.dest, stale=args.stale, stale_days=args.stale_days)
             save_plan(plan)
-            log.append("organize_scan", f"계획 {len(plan['items'])}건", {
+            log.append("organize_scan", f"정리안 {len(plan['items'])}건", {
                 "count": len(plan["items"]), "review": sum(i["review"] for i in plan["items"]),
                 "categories": dict(Counter(i["category"] for i in plan["items"]))})
             print(show(plan))
@@ -861,7 +874,7 @@ def main(argv=None):
                 print(f"건너뜀 [{cid}]: {why}")
         elif args.cmd == "undo":
             batch, done, skipped = undo(args.batch)
-            print(f"되돌림 {len(done)}건 (batch {batch})")
+            print(f"되돌림 {len(done)}건")
             for cid, why in skipped:
                 print(f"건너뜀 [{cid}]: {why}")
         elif args.cmd == "trash":

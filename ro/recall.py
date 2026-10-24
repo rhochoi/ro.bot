@@ -13,7 +13,15 @@ STOP = {"뭐", "뭐했지", "뭐했어", "했지", "했어", "했니", "에서",
         "찾아줘", "있어", "있었어", "기록", "관련", "해줘", "the", "what", "did", "i"}
 MAX_ITEMS = 5
 MAX_EVIDENCE = 12
-FOLLOWUPS = ["오늘 이어서 할 일은?", "이번 주 기록 보기"]
+FOLLOWUPS = ["어제 뭐 했지?", "이번 주 뭐 했지?"]  # 누르면 그 문장 그대로 다시 회상한다
+
+
+def topic(word):
+    """받침이 있으면 '은', 없으면 '는' (오늘은 · 어제는 · 이번 주는)."""
+    last = word.rstrip()[-1:] or "는"
+    if "가" <= last <= "힣":
+        return word + ("은" if (ord(last) - 0xAC00) % 28 else "는")
+    return word + "는"
 
 
 def is_recall(question):
@@ -94,7 +102,6 @@ def answer(question, events, projects, home=records.HOME, now=None):
         if len(evidence) >= MAX_EVIDENCE:
             break
     items = [{"n": ev["n"], "text": ev["summary"]} for ev in evidence[:MAX_ITEMS]]
-    label = scope[0] if scope else "기록에서"
-    headline = f"{label}는 {len(evidence)}가지를 했어요." if scope else f"{len(evidence)}건을 찾았어요."
+    headline = f"{topic(scope[0])} {len(evidence)}가지를 했어요." if scope else f"{len(evidence)}건을 찾았어요."
     return {"ok": True, "found": True, "headline": headline, "items": items, "evidence": evidence,
             "followups": FOLLOWUPS[:2], "note": "기록에 없는 건 지어내지 않아요"}

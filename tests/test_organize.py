@@ -69,7 +69,7 @@ class OrganizeTest(unittest.TestCase):
         self.assertEqual(t(Path("untitled.pdf")), "제목없음")
         self.assertEqual(t(Path("#2.png")), "#2")
         self.assertEqual(t(Path("image my profile.png")), "image my profile")
-        self.assertEqual(t(Path("IMG_1234.png")), "제목없음")
+        self.assertEqual(t(Path("IMG_1234.png")), "IMG 1234")  # 카메라 번호는 사진을 찾는 이름이다
         self.assertEqual(t(Path("x.pdf"), meta_title="Microsoft Word - 123.docx"), "x")
         nfd = __import__("unicodedata").normalize("NFD", "회의 준비.png")
         self.assertEqual(t(Path(nfd)), "회의 준비")

@@ -129,7 +129,7 @@ def main(argv=None):
     pt = sub.add_parser("pet", help="코덱스 펫 스타일 데스크톱 오버레이 + 메뉴바 비서")
     pt.add_argument("--port", type=int, default=0, help="로컬 서버 포트 (기본: 자동 할당)")
     pt.add_argument("--browser", action="store_true", help="데스크톱 오버레이 대신 브라우저로 열기")
-    pt.add_argument("--no-wander", action="store_true", help="자동 산책 이동 끄기")
+    pt.add_argument("--no-wander", action="store_true", help="돌아다니기 끄기")
     pt.add_argument("--status", action="store_true", help="현재 펫 표정·층 상태를 JSON으로 출력 후 종료")
     pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)

@@ -51,6 +51,7 @@ class PetUiTest(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
         cls.server.shutdown()
+        cls.server.server_close()
         cls.tmp.cleanup()
         cls.fs.cleanup()
 
@@ -68,7 +69,8 @@ class PetUiTest(unittest.TestCase):
     def test_axe_clean_on_every_tab_and_theme(self):
         # reduced_motion으로 전환 중간색 오탐을 없애 결정적으로 측정한다
         for theme in ("ink", "chalk"):
-            for tab, extra in (("home", None), ("home", "#filterStatsBtn"), ("timeline", None), ("settings", None)):
+            for tab, extra in (("home", None), ("home", "#filterStatsBtn"), ("timeline", None), ("organize", None),
+                               ("settings", None), ("settings", ".preview-block > summary")):
                 with self.subTest(theme=theme, tab=tab, extra=extra):
                     page = self.open_page(reduced_motion="reduce")
                     page.evaluate(f"document.body.classList.toggle('theme-chalk', {str(theme == 'chalk').lower()})")
@@ -176,12 +178,16 @@ class PetUiTest(unittest.TestCase):
         page.click("#recOrgCard >> text=되돌리기")
         page.wait_for_function("document.querySelector('#recOrgCard').innerText.includes('되돌렸어요')")
 
-    def test_ambient_base_length_and_focus_mode(self):
+    def test_layers_keep_construction_size_and_focus_mode(self):
         page = self.open_page(reduced_motion="reduce")
-        page.wait_for_function("getComputedStyle(document.querySelector('#petWrap')).getPropertyValue('--base-px').trim() !== ''")
-        px = float(page.evaluate("getComputedStyle(document.querySelector('#petWrap')).getPropertyValue('--base-px')").strip("px"))
-        self.assertGreaterEqual(px, 60 + 3 * 5)
-        self.assertLessEqual(px, 140)
+        page.wait_for_function("document.querySelector('#petCaption').innerText.includes('건')")
+        size = "[layerHead, layerBody, layerBase].map(e => [Math.round(e.offsetWidth / 3.8 * 4) / 4, Math.round(e.offsetHeight / 3.8 * 4) / 4])"
+        self.assertEqual(page.evaluate(size), [[19, 8], [15, 6], [23, 6]])   # 기록이 쌓여도 같다
+        for mood in ("recording", "focus", "resolved", "discovery", "anxious"):
+            page.evaluate(f"setMoodPreview('{mood}', 8000)")
+            self.assertEqual(page.evaluate(size), [[19, 8], [15, 6], [23, 6]], mood)
+        page.evaluate("setMoodPreview('idle', 1)")
+        page.wait_for_function("/(아침|오후|저녁) · \\d+건/.test(document.querySelector('#petCaption').innerText)")
         self.assertRegex(page.inner_text("#petCaption"), r"(아침|오후|저녁) · \d+건")
         page.click('[data-tab="settings"]')
         page.click("#focusBtn")
@@ -209,7 +215,7 @@ class PetUiTest(unittest.TestCase):
         home = str(Path(self.fs.name).resolve())
         with mock.patch.dict(os.environ, {"HOME": home}):
             page = self.open_page(reduced_motion="reduce")
-            page.click('[data-tab="settings"]')
+            page.click('[data-tab="organize"]')
             self.assertIn("정리안이 없습니다", page.inner_text("#orgSummary"))
             page.click("#orgScanBtn")
             page.wait_for_function("document.querySelector('#orgMsg').innerText.includes('새로 만들었습니다')")
@@ -217,9 +223,12 @@ class PetUiTest(unittest.TestCase):
             self.assertEqual(self.axe_violations(page), [])
             page.wait_for_selector("#orgCats button")
             page.locator("#orgCats button").first.click()           # 카테고리 버튼 = 쓰기 승인 요청
-            page.click('[data-tab="home"]')
+            # 확인 카드는 탭과 상관없이 입력창 위에 뜨고, 옮길 파일 이름(원래 → 새 이름)을 보여 준다
             page.wait_for_function("document.querySelector('#writeCard').style.display === 'flex'")
+            self.assertTrue(page.is_visible("#writeCard"))
             self.assertIn("파일 정리", page.inner_text("#writeText"))
+            self.assertIn("pic.png", page.inner_text("#writeFiles"))
+            self.assertEqual(self.axe_violations(page), [])
             page.click("#writeRejectBtn")                            # 승인하지 않으면 아무것도 옮기지 않는다
             self.assertTrue((self.org_root / "pic.png").exists())
 

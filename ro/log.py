@@ -88,6 +88,8 @@ def summarize(day, log_dir=LOG_DIR):
         lines.append("엔진: " + ", ".join(f"{k} {n}" for k, n in engines.most_common()))
     lines.append("")
     lines += [f"- {e['ts'][11:19]} [{e['kind']}] {e['summary']}" for e in events[-10:]]
+    if len(events) > 10:
+        lines.append(f"(앞의 {len(events) - 10}개는 생략 — 전체: ro log tail -n {len(events)})")
     return "\n".join(lines)
 
 

@@ -30,6 +30,7 @@ class MotionBase(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
         cls.server.shutdown()
+        cls.server.server_close()
         cls.tmp.cleanup()
 
     def page(self, reduced=False):
@@ -188,17 +189,16 @@ class GrabTest(MotionBase):
         self.assertLess(ty[1], 17)                   # 아직 내려가는 중
         self.assertAlmostEqual(ty[-1], 17, delta=0.6)
 
-    def test_moving_head_chain_lags_body_035_base_02(self):
+    def test_moving_head_chain_lag_is_capped_at_12px(self):
         pg = self.page()
         tend = pg.evaluate(DRAG_JS, [1000, 1500, 600, 0])
         pg.evaluate("RoMotion.advance(%d)" % tend)
         L = self.layers(pg, tend)
-        # 프레임당 lerp(k)의 정상 지연 거리 = v·τ, τ = 16.67ms / -ln(1-k)  → 몸 ≈ -23px, 바닥 ≈ -45px
-        tau = lambda k: 0.016667 / -math.log(1 - k)
+        # lerp 지연(몸 ≈ 23px, 바닥 ≈ 45px)을 12px로 묶는다: 세게 끌어도 펫 창(176×168) 밖으로 나가 잘리지 않는다
         self.assertAlmostEqual(L[0]["tx"], 0, delta=0.01)             # 머리는 1.0: 지연 없음
-        self.assertAlmostEqual(L[1]["tx"], -600 * tau(0.35), delta=1.5)
-        self.assertAlmostEqual(L[2]["tx"], -600 * tau(0.20), delta=2.5)
-        self.assertLess(L[2]["tx"], L[1]["tx"])                       # 바닥이 더 늦다
+        self.assertAlmostEqual(L[1]["tx"], -12, delta=1.5)
+        self.assertAlmostEqual(L[2]["tx"], -12, delta=1.5)
+        self.assertLessEqual(L[2]["tx"], L[1]["tx"] + 0.01)           # 바닥이 몸보다 앞서지 않는다
 
     def test_tilt_is_lag_times_025_deg_capped_at_8(self):
         pg = self.page()
@@ -253,7 +253,7 @@ class GrabTest(MotionBase):
         for t in range(tend, tend + 500, 8):                        # 갑자기 멈춘다
             pg.evaluate("(t) => RoMotion.move(RoMotion.state.head.x, 0, t)", t)
             txs.append(pg.evaluate("(t) => RoMotion.pose(t).l[2].tx", t))
-        self.assertLess(txs[0], -20)                                # 처음엔 뒤처져 있고
+        self.assertLessEqual(txs[0], -10)                           # 처음엔 뒤처져 있고(최대 12px)
         self.assertGreater(max(txs), 1.0)                           # 관성으로 앞으로 넘어갔다가
         self.assertLess(max(txs), 10)                               # 과하지 않게
         self.assertAlmostEqual(txs[-1], 0, delta=1.5)               # 제자리로 돌아온다
@@ -381,7 +381,7 @@ class ShakeTest(MotionBase):
         pg2.evaluate(SHAKE_JS, [1000, 130, 1, 1000])         # 1Hz: 1초 안에 전환 2번뿐
         self.assertFalse(pg2.evaluate("RoMotion.state.shakeActive"))
 
-    def test_squint_while_shaking_and_rotation_capped_at_10deg(self):
+    def test_squint_while_shaking_and_rotation_capped_at_4deg(self):
         pg = self.page()
         pg.evaluate(SHAKE_JS, [1000, 130, 2, 1200])
         rows = pg.evaluate("window.__rot")
@@ -389,8 +389,8 @@ class ShakeTest(MotionBase):
         self.assertTrue(active and all(r[4] in ("squint", "big") for r in active))
         self.assertIn("squint", [r[4] for r in active])
         peak = max(abs(v) for r in rows for v in r[1:4])
-        self.assertLessEqual(peak, 10.0 + 1e-6)
-        self.assertGreater(peak, 6.0)                         # 실제로 크게 출렁인다
+        self.assertLessEqual(peak, 4.0 + 1e-6)                # 잘리지 않게 작게 묶는다
+        self.assertGreater(peak, 2.0)                         # 그래도 출렁이는 게 보인다
 
     def test_layers_swing_with_120deg_phase_offsets(self):
         pg = self.page()
@@ -424,25 +424,13 @@ class ShakeTest(MotionBase):
           return min; }""", [1000, 130, 2])
         self.assertGreater(worst, -0.5)
 
-    def test_dizzy_after_1_5s_swirl_continues_1_2s_after_stop(self):
+    def test_long_shake_does_not_turn_dizzy(self):
+        # 모션은 하나씩만: 흔들기가 어지러움(swirl)으로 이어지지 않는다
         pg = self.page()
-        tend = pg.evaluate(SHAKE_JS, [1000, 130, 2, 1000])
+        pg.evaluate(SHAKE_JS, [1000, 130, 2, 2400])
         rows = pg.evaluate("window.__rot")
-        self.assertNotIn("swirl", [r[4] for r in rows])        # 1.5초 전에는 눈이 돌지 않는다
-        pg2 = self.page()
-        tend = pg2.evaluate(SHAKE_JS, [1000, 130, 2, 2400])
-        rows = pg2.evaluate("window.__rot")
-        self.assertIn("swirl", [r[4] for r in rows if r[0] > 1300 + 1500 + 50])
-        eyes = lambda t: pg2.evaluate("(t) => RoMotion.pose(t).eyes.shape", t)
-        for t in range(int(tend), int(tend) + 700, 100):       # 손을 멈추고도(머리 정지) 어지럽다
-            pg2.evaluate("(t) => RoMotion.move(RoMotion.state.head.x, 0, t)", t)
-        last = pg2.evaluate("RoMotion.state.shakeLast")
-        end = last + 450                                       # 흔들기 종료 판정 시각
-        pg2.evaluate("(t) => RoMotion.advance(t)", end + 1)
-        until = pg2.evaluate("RoMotion.state.dizzyUntil")
-        self.assertAlmostEqual(until - last, 1200, delta=1)
-        self.assertEqual(eyes(until - 50), "swirl")
-        self.assertEqual(eyes(until + 50), "big")
+        self.assertIn("squint", [r[4] for r in rows])
+        self.assertNotIn("swirl", [r[4] for r in rows])
 
     def test_swirl_spins_360_per_0_6s(self):
         pg = self.page()
@@ -541,11 +529,15 @@ class LiveInputTest(MotionBase):
             pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=8000)
             self.assertFalse(pg.evaluate("document.querySelector('.act-btn.active') !== null"))
 
-    def test_shake_preview_reaches_dizzy_swirl(self):
+    def test_shake_preview_squints_and_never_swirls(self):
         pg = self.live()
+        pg.evaluate("""() => { window.__eyes = []; new MutationObserver(() => window.__eyes.push(
+            document.getElementById('petWrap').dataset.eyes)).observe(document.getElementById('petWrap'),
+            {attributes: true, attributeFilter: ['data-eyes']}); }""")
         pg.evaluate("window.triggerAction('shake', 0)")
-        pg.wait_for_function("document.getElementById('petWrap').dataset.eyes === 'swirl'", timeout=6000)
+        pg.wait_for_function("document.getElementById('petWrap').dataset.eyes === 'squint'", timeout=4000)
         pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=9000)
+        self.assertNotIn("swirl", pg.evaluate("window.__eyes"))
 
     def test_hover_squish_does_not_fight_the_engine(self):
         pg = self.live()
@@ -556,24 +548,13 @@ class LiveInputTest(MotionBase):
         self.assertNotIn("action-pet", pg.get_attribute("#petWrap", "class") or "")
         pg.mouse.up()
 
-    def test_speed_streak_trails_behind_the_head_only_when_fast(self):
+    def test_no_speed_streak_even_when_fast(self):
+        # 속도선은 펫 창 밖으로 그려져 잘리므로 쓰지 않는다
         pg = self.page()
-        tend = pg.evaluate(DRAG_JS, [1000, 600, 900, 0])             # 오른쪽으로 빠르게
+        tend = pg.evaluate(DRAG_JS, [1000, 600, 900, 0])
         pg.evaluate("(t) => RoMotion.apply(RoMotion.pose(t))", tend)
-        s = pg.evaluate("(() => { const r = streak.getBoundingClientRect(), h = layerHead.getBoundingClientRect(); return {o: +streak.style.opacity, right: r.right, hl: h.left, left: r.left, hr: h.right}; })()")
-        self.assertGreater(s["o"], 0.4)
-        self.assertLessEqual(s["right"], s["hl"])                       # 가는 방향의 반대(왼쪽)에 생긴다
-        pg2 = self.page()
-        tend = pg2.evaluate(DRAG_JS, [1000, 600, -900, 0])
-        pg2.evaluate("(t) => RoMotion.apply(RoMotion.pose(t))", tend)
-        s2 = pg2.evaluate("(() => { const r = streak.getBoundingClientRect(), h = layerHead.getBoundingClientRect(); return {left: r.left, hr: h.right}; })()")
-        self.assertGreaterEqual(s2["left"], s2["hr"])
-        pg3 = self.page()
-        tend = pg3.evaluate(DRAG_JS, [1000, 600, 100, 0])               # 느리면 없다
-        self.assertEqual(pg3.evaluate("(t) => RoMotion.pose(t).streak.o", tend), 0)
-        pg4 = self.page(reduced=True)
-        tend = pg4.evaluate(DRAG_JS, [1000, 600, 900, 0])
-        self.assertEqual(pg4.evaluate("(t) => RoMotion.pose(t).streak.o", tend), 0)
+        self.assertEqual(pg.evaluate("(t) => RoMotion.pose(t).streak.o", tend), 0)
+        self.assertEqual(pg.evaluate("+streak.style.opacity || 0"), 0)
 
     def test_caption_fades_out_while_moving_and_gaze_follow_pauses(self):
         pg = self.page()

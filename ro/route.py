@@ -149,10 +149,10 @@ def _pump(stream, buf, on_line):
             on_line(line)
 
 
-def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_line=None, timeout=None):
+def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_line=None, timeout=None, cancel=None):
     """엔진 실행. on_line(줄)을 주면 stdout을 오는 대로 넘긴다(진행 표시용).
     반환: dict(ok, code, duration, output, reason). reason: ""|not_installed|auth_required|timeout|cancelled|failed.
-    Ctrl+C(KeyboardInterrupt)는 엔진 프로세스를 정리하고 reason=cancelled로 돌려준다."""
+    Ctrl+C(KeyboardInterrupt) 또는 cancel(threading.Event)이 켜지면 엔진 프로세스를 정리하고 reason=cancelled로 돌려준다."""
     if not shutil.which(engine):
         return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치", "reason": "not_installed"}
     timeout = timeout or TIMEOUT
@@ -166,12 +166,21 @@ def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_
     for t in threads:
         t.start()
     reason = ""
+    deadline = start + timeout
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        reason = "timeout"
+        while True:
+            try:
+                proc.wait(timeout=0.2 if cancel else timeout)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel and cancel.is_set():
+                    reason = "cancelled"
+                elif not cancel or time.time() >= deadline:
+                    reason = "timeout"
+                if reason:
+                    proc.kill()
+                    proc.wait()
+                    break
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()

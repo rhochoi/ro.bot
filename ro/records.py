@@ -20,7 +20,25 @@ UNDO_WINDOW = 24 * 3600
 EXCERPT_LINES = 3
 LINE_CAP = 120
 TEXT_CAP = 20000
-SKIP_KINDS = {"feedback", "revoke", "route"}
+# ro가 스스로 남긴 이벤트(펫 시작·정리안 스캔·질문 등). "오늘 N건 기록"·회상·묶기에서는 사용자 기록이 아니다.
+SYSTEM_KINDS = {"feedback", "revoke", "route", "pet", "organize_scan", "organize_edit", "write_gate", "map", "audit",
+                "eval", "bench", "adapter_probe", "distill", "collect", "learn_approve", "learn_reject"}
+SKIP_KINDS = SYSTEM_KINDS
+KIND_LABELS = {
+    "note": "기록", "activity": "활동", "ambient": "활동", "route": "질문", "feedback": "평가", "pet": "펫",
+    "organize": "정리", "organize_scan": "정리안", "organize_edit": "정리 수정", "organize_purge": "보관함 비움",
+    "tidy": "정리", "write_gate": "승인", "map": "지도", "audit": "점검", "eval": "평가 실행", "bench": "벤치",
+    "adapter_probe": "점검", "distill": "요약 전송", "collect": "수집", "learn_approve": "규칙 승인",
+    "learn_reject": "규칙 거절",
+}
+
+
+def kind_label(kind):
+    return KIND_LABELS.get(kind, "기록")
+
+
+def is_user_record(event):
+    return event.get("kind") not in SYSTEM_KINDS
 
 
 def eid(event):
