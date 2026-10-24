@@ -50,6 +50,11 @@ MOOD_CAPTIONS = {
     "discovery": "눈이 커지고 머리가 들린다.",
     "resolved": "바닥이 길게 뻗는다.",
 }
+KIND_LABELS = {
+    "pet": "펫 실행", "route": "질문", "note": "메모", "capture": "기록",
+    "organize": "파일 정리", "organize_scan": "정리안", "distill": "증류",
+    "audit": "점검", "feedback": "피드백",
+}
 MATERIALS = ("clay", "glass", "jelly")
 MATERIAL_LABELS = {
     "clay": "점토",
@@ -593,22 +598,44 @@ class PetRuntime:
             "organize": self.organize_summary(),
             "audit_findings": [log.redact(f) for f in findings[:3]],
             "recent_logs": recent_logs,
+            "today_stats": {
+                "kinds": [[kind, count] for kind, count in Counter(
+                    KIND_LABELS.get(e.get("kind", ""), e.get("kind", "")) for e in today_events).most_common(8)],
+                "engines": [[engine, count] for engine, count in Counter(
+                    e["engine"] for e in today_events if e.get("engine")).most_common(8)],
+            },
             "last_answer": safe_answer,
             "colors": {"black": BLACK, "cream": CREAM},
         }
 
-    def ask_question(self, question, engine=None, project=None, cwd=None):
-        """읽기 전용으로 질문을 실행하고 결과를 저장한다."""
+    def _question_plan(self, question, engine=None, project=None, cwd=None):
+        """미리보기와 실행에 같은 검증·계획을 쓴다."""
         question = (question or "").strip()
         if not question:
-            return {"ok": False, "output": "질문을 입력해 주세요."}
+            return None, {"ok": False, "output": "질문을 입력해 주세요."}
         mapdata = ask.load_map(self.map_path)
         if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
-            return {"ok": False, "reason": "needs_setup",
-                    "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
+            return None, {"ok": False, "reason": "needs_setup",
+                          "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
         rules = learn.load_rules(self.home)
         pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
                       engine=engine or config.load(self.home).get("engine") or None, rules=rules, project=project)
+        return question, pl
+
+    def preview_question(self, question, engine=None, project=None, cwd=None):
+        """외부 실행·기록 없이 전송할 문맥의 범위를 보여 준다."""
+        question, pl = self._question_plan(question, engine, project, cwd)
+        if question is None:
+            return pl
+        return {"ok": True, "preview": True, "engine": pl["engine"], "model": pl.get("model", ""),
+                "category": pl["category"], "reason": pl["reason"], "projects": pl["projects"],
+                "context_chars": len(pl["context"])}
+
+    def ask_question(self, question, engine=None, project=None, cwd=None):
+        """읽기 전용으로 질문을 실행하고 결과를 저장한다."""
+        question, pl = self._question_plan(question, engine, project, cwd)
+        if question is None:
+            return pl
         with self._lock:
             if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
                 return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
@@ -769,6 +796,7 @@ PET_HTML = r"""<!DOCTYPE html>
     transform-origin: bottom right;
     position: relative;
     max-height: 440px;
+    min-height: 0;
     box-sizing: border-box;
   }
   .bubble.hidden {
@@ -818,6 +846,7 @@ PET_HTML = r"""<!DOCTYPE html>
 
   /* 상단 헤더 & 네비게이션 */
   .bubble-top {
+    flex-shrink: 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -1241,6 +1270,7 @@ PET_HTML = r"""<!DOCTYPE html>
 
   /* 하단 입력 폼 (주황 '+' 버튼) */
   .ask-form {
+    flex-shrink: 0;
     margin-top: 2px;
   }
   .input-bar {
@@ -1538,6 +1568,7 @@ PET_HTML = r"""<!DOCTYPE html>
      ========================================================= */
   .pet-wrap {
     --u: 3.8px;
+    flex-shrink: 0;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -1986,6 +2017,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   @keyframes dropPulse { 0%, 100% { opacity: 0.55; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1.03); } }
   .toast {
+    flex-shrink: 0;
     background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
     padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; position: relative; overflow: hidden;
   }
@@ -2123,6 +2155,16 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- 쓰기 승인 게이트 카드: 모든 탭에서 보인다 -->
+    <div id="writeCard" class="gate-box" style="display:none;flex-shrink:0;">
+      <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
+      <div id="writeText" class="gate-body"></div>
+      <div class="gate-actions">
+        <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
+        <button id="writeRejectBtn" class="action-btn ghost">취소</button>
+      </div>
+    </div>
+
     <!-- 1. 기본 (Home) 탭 -->
     <div id="paneHome" class="tab-pane active">
       <!-- 브리핑 & 필터 -->
@@ -2130,8 +2172,8 @@ PET_HTML = r"""<!DOCTYPE html>
         <div id="greetingTitle" class="greeting-title">오늘 새로 시작했어요.</div>
         <div id="greetingSub" class="greeting-sub">기록이 시작되면 여기에 요약이 표시됩니다</div>
         <div class="sub-filters">
-          <button id="filterSummaryBtn" class="sub-pill active">기록 요약</button>
-          <button id="filterStatsBtn" class="sub-pill">통계</button>
+          <button id="filterSummaryBtn" class="sub-pill active" aria-pressed="true">기록 요약</button>
+          <button id="filterStatsBtn" class="sub-pill" aria-pressed="false">통계</button>
         </div>
       </div>
 
@@ -2150,16 +2192,6 @@ PET_HTML = r"""<!DOCTYPE html>
         <div class="metric-item">
           <div id="metricTime" class="metric-value">--:--</div>
           <div class="metric-label">활동 시각</div>
-        </div>
-      </div>
-
-      <!-- 쓰기 승인 게이트 카드 -->
-      <div id="writeCard" class="gate-box" style="display:none;">
-        <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
-        <div id="writeText" class="gate-body"></div>
-        <div class="gate-actions">
-          <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
-          <button id="writeRejectBtn" class="action-btn ghost">취소</button>
         </div>
       </div>
 
@@ -2194,6 +2226,14 @@ PET_HTML = r"""<!DOCTYPE html>
           </span>
           <span id="fbDone" class="fb-done" style="display:none;"></span>
         </div>
+        <div id="askPreviewCard" class="gate-box" style="display:none;">
+          <div class="gate-head">외부 엔진으로 보냅니다</div>
+          <div id="askPreviewText" class="gate-body"></div>
+          <div class="gate-actions">
+            <button id="askConfirmBtn" class="action-btn primary">보내기</button>
+            <button id="askCancelBtn" class="action-btn ghost">취소</button>
+          </div>
+        </div>
       </div>
 
       <!-- C · 근거 붙은 답 -->
@@ -2207,6 +2247,7 @@ PET_HTML = r"""<!DOCTYPE html>
         <span id="logCountBadge" class="section-badge">0건</span>
       </div>
       <div id="activityList" class="activity-stream"></div>
+      <div id="statsView" class="rec-org-card" style="display:none;"></div>
     </div>
 
     <!-- 2. 타임라인 (Timeline) 탭 -->
@@ -2221,7 +2262,7 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 3. 설정 (Settings) 탭 -->
     <div id="paneSettings" class="tab-pane">
       <div class="settings-stream">
-        <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 홈의 승인 카드에서 실행 -->
+        <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 위 승인 카드에서 실행 -->
         <div class="setting-block" id="fileOrgBlock">
           <div class="block-title">파일 정리 (승인 전에는 옮기지 않음)</div>
           <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
@@ -2332,7 +2373,7 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
       <div class="input-bar">
-        <input id="askInput" class="ask-input" type="text" placeholder="무엇이든 물어보거나 기록하세요..." autocomplete="off" />
+        <input id="askInput" class="ask-input" type="text" placeholder="물어보거나 /기록으로 남기세요" autocomplete="off" />
         <button id="askSubmit" class="ask-submit" type="submit" title="질문 또는 기록">
           <svg id="plusIcon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
             <line x1="8" y1="2.5" x2="8" y2="13.5"></line>
@@ -2415,12 +2456,17 @@ const greetingTitle = document.getElementById("greetingTitle");
 const greetingSub = document.getElementById("greetingSub");
 const filterSummaryBtn = document.getElementById("filterSummaryBtn");
 const filterStatsBtn = document.getElementById("filterStatsBtn");
+const statsView = document.getElementById("statsView");
+const activityHeading = paneHome.querySelector(".section-row");
 
 const metricEvents = document.getElementById("metricEvents");
 const metricProjects = document.getElementById("metricProjects");
 const metricTime = document.getElementById("metricTime");
 
 const answerCard = document.getElementById("answerCard");
+const askPreviewCard = document.getElementById("askPreviewCard");
+const askPreviewText = document.getElementById("askPreviewText");
+let previewQuestion = null;
 const userMsgRow = document.getElementById("userMsgRow");
 const userQuestionPill = document.getElementById("userQuestionPill");
 const roMainBubble = document.getElementById("roMainBubble");
@@ -2439,6 +2485,7 @@ let askNotice = null;   // 질문 진행 중·실패 직후에는 폴링이 직�
 let askNoticeUntil = 0;
 let lastActKey = "";
 let lastTlKey = "";
+let lastStatsKey = "";
 let orgKey = "";
 let pendingKind = null;
 
@@ -2496,16 +2543,17 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   });
 });
 
-filterSummaryBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  filterSummaryBtn.classList.add("active");
-  filterStatsBtn.classList.remove("active");
-});
-
-filterStatsBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  switchTab("timeline");
-});
+function showStats(on) {
+  filterSummaryBtn.classList.toggle("active", !on);
+  filterStatsBtn.classList.toggle("active", on);
+  filterSummaryBtn.setAttribute("aria-pressed", String(!on));
+  filterStatsBtn.setAttribute("aria-pressed", String(on));
+  activityHeading.style.display = on ? "none" : "flex";
+  activityList.style.display = on ? "none" : "flex";
+  statsView.style.display = on ? "flex" : "none";
+}
+filterSummaryBtn.addEventListener("click", (e) => { e.stopPropagation(); showStats(false); });
+filterStatsBtn.addEventListener("click", (e) => { e.stopPropagation(); showStats(true); });
 
 /* 재질 & 테마 로직 */
 function computeAutoMaterial(mood, lum) {
@@ -2663,6 +2711,9 @@ closeBtn.addEventListener("click", (e) => {
 clearBtn.addEventListener("click", async (e) => {
   e.stopPropagation();
   previewLockUntil = 0;
+  previewQuestion = null;
+  askPreviewCard.style.display = "none";
+  askNoticeUntil = 0;
   await apiPost("/api/clear", {});
   await refreshState();
 });
@@ -2998,7 +3049,7 @@ function applyState(st) {
     }
   }
 
-  const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
+  const showClear = !!(st.last_answer || st.mood === "anxious" || locked || previewQuestion);
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
   // 마지막 타임스탬프 계산
@@ -3020,6 +3071,7 @@ function applyState(st) {
   metricEvents.textContent = todayCount;
   metricProjects.textContent = (st.counts && st.counts.projects) || 0;
   metricTime.textContent = lastTs || "--:--";
+  renderStats(st.today_stats);
 
   // 3. 답변 카드 & 게이트 카드
   if (Date.now() < askNoticeUntil) {
@@ -3147,6 +3199,25 @@ async function refreshState() {
   } catch (err) {}
 }
 
+function renderStats(stats) {
+  stats = stats || { kinds: [], engines: [] };
+  const key = JSON.stringify(stats);
+  if (key === lastStatsKey) return;
+  lastStatsKey = key;
+  statsView.replaceChildren();
+  if (!stats.kinds.length && !stats.engines.length) {
+    statsView.append(h("div", { class: "rc-foot", text: "오늘 기록이 아직 없어요." }));
+    return;
+  }
+  [["종류", stats.kinds], ["엔진", stats.engines]].forEach(([title, rows]) => {
+    const max = Math.max(1, ...rows.map(r => r[1]));
+    statsView.append(h("div", { class: "rec-org-line", text: title }),
+      ...rows.map(([label, count]) => h("div", { class: "rec-org-row" },
+        h("div", { class: "rec-org-line" }, h("span", { text: label }), h("span", { text: `${count}건` })),
+        h("div", { class: "rec-org-bar", style: `width:${Math.round(count / max * 100)}%` }))));
+  });
+}
+
 askForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = askInput.value.trim();
@@ -3154,23 +3225,38 @@ askForm.addEventListener("submit", async (e) => {
     askInput.focus();
     return;
   }
+  const p = parsePalette(q);
+  const command = p.slash ? COMMANDS.find(c => c.label.slice(1) === p.name) : null;
+  if (command && command.arg && !p.arg) { askInput.focus(); return; }
+  previewQuestion = null;
+  askPreviewCard.style.display = "none";
+  askNoticeUntil = 0;
   askInput.value = "";
   plusIcon.style.display = "block";
   sendIcon.style.display = "none";
+  if (command) { await runCommand(command, p.arg); return; }
+  if (!p.slash && RECALL_INTENT.test(q)) { await runRecall(q); return; }
+  await submitQuestion(q, false);
+});
+
+async function submitQuestion(q, confirm) {
+  switchTab("home");
   askInput.disabled = true;
   askSubmit.disabled = true;
   previewLockUntil = 0;
-  askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
+  askNotice = { q, msg: confirm ? "기록을 살피며 풀어내는 중..." : "보낼 내용을 확인하는 중..." };
   askNoticeUntil = Infinity;
   answerCard.style.display = "flex";
   userMsgRow.style.display = "flex";
   userQuestionPill.textContent = q;
   roMainBubble.textContent = askNotice.msg;
-  subStatusText.textContent = "풀어내는 중...";
+  subStatusText.textContent = confirm ? "풀어내는 중..." : "전송 전 확인";
+  feedbackBtns.style.display = "none";
+  fbDone.style.display = "none";
   petWrap.className = "pet-wrap mood-focus";
   let res = null;
   try {
-    res = await apiPost("/api/ask", { question: q });
+    res = await apiPost("/api/ask", confirm ? { question: q, confirm: true } : { question: q });
   } catch (err) {
     res = null;
   } finally {
@@ -3178,13 +3264,38 @@ askForm.addEventListener("submit", async (e) => {
     askSubmit.disabled = false;
   }
   askNoticeUntil = 0;
-  if (!res || !res.ok) {
+  if (res && res.ok && res.preview) {
+    previewQuestion = q;
+    askNotice.msg = "전송 전에 확인해 주세요.";
+    askNoticeUntil = Infinity;
+    askPreviewText.textContent = `엔진 ${res.engine} · 모델 ${res.model} · 프로젝트 ${(res.projects || []).join(", ") || "-"} · 문맥 ${res.context_chars}자`;
+    askPreviewCard.style.display = "flex";
+  } else if (!res || !res.ok) {
     // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
     if (!askInput.value) askInput.value = q;
+    askInput.dispatchEvent(new Event("input"));
     askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
     askNoticeUntil = Date.now() + 8000;
   }
   await refreshState();
+  if (previewQuestion) askPreviewCard.scrollIntoView({ block: "nearest" });
+}
+
+document.getElementById("askConfirmBtn").addEventListener("click", async () => {
+  const q = previewQuestion;
+  if (!q) return;
+  previewQuestion = null;
+  askPreviewCard.style.display = "none";
+  await submitQuestion(q, true);
+});
+document.getElementById("askCancelBtn").addEventListener("click", () => {
+  askInput.value = previewQuestion || "";
+  previewQuestion = null;
+  askNoticeUntil = 0;
+  askPreviewCard.style.display = "none";
+  answerCard.style.display = "none";
+  askInput.dispatchEvent(new Event("input"));
+  askInput.focus();
 });
 
 document.getElementById("ruleApproveBtn").addEventListener("click", async () => {
@@ -3201,12 +3312,14 @@ document.getElementById("writeApproveBtn").addEventListener("click", async () =>
   const kind = pendingKind;
   const r = await apiPost("/api/write_gate", { approve: true });
   if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
+  showToast([h("div", { class: "toast-head", text: r.output || (r.ok ? "실행했어요" : "실행하지 못했어요") })], 3000);
   await refreshState();
 });
 document.getElementById("writeRejectBtn").addEventListener("click", async () => {
   const kind = pendingKind;
   const r = await apiPost("/api/write_gate", { approve: false });
   if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
+  showToast([h("div", { class: "toast-head", text: r.output || (r.ok ? "취소했어요" : "취소하지 못했어요") })], 3000);
   await refreshState();
 });
 /* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
@@ -3221,7 +3334,7 @@ function orgChip(parent, text, title, body, cls) {
   b.title = title;
   b.addEventListener("click", async () => {
     const r = await apiPost("/api/organize/apply", body);
-    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
+    orgMsg.textContent = r.ok ? "위 승인 카드에서 실행합니다." : (r.output || "");
     await refreshState();
   });
   parent.appendChild(b);
@@ -3273,7 +3386,7 @@ orgScanBtn.addEventListener("click", async () => {
 });
 orgUndoBtn.addEventListener("click", async () => {
   const r = await apiPost("/api/organize/undo", {});
-  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
+  orgMsg.textContent = r.ok ? "위 승인 카드에서 실행합니다." : (r.output || "");
   await refreshState();
 });
 async function sendFeedback(accepted) {
@@ -3973,6 +4086,13 @@ function closePalette() {
   if (lastFocus && lastFocus.focus) lastFocus.focus();
 }
 window.openPaletteFromHost = function() { setBubbleOpen(true); openPalette(); };
+async function runCommand(c, arg) {
+  if (c.id === "record") await capture("text", "직접 기록", arg, arg.length);
+  else if (c.id === "organize") await showRecordOrganize();
+  else if (c.id === "today") await runRecall("오늘 뭐 했지?");
+  else if (c.id === "find") await runRecall(`${arg} 기록 찾아줘`);
+  else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+}
 async function runPalette() {
   const r = palRows[palIndex];
   if (!r) return;
@@ -3980,11 +4100,7 @@ async function runPalette() {
     const c = r.cmd;
     if (c.arg && !r.arg) { palInput.value = c.label + " "; renderPalette(); return; }
     closePalette();
-    if (c.id === "record") await capture("text", "직접 기록", r.arg, r.arg.length);
-    else if (c.id === "organize") await showRecordOrganize();
-    else if (c.id === "today") await runRecall("오늘 뭐 했지?");
-    else if (c.id === "find") await runRecall(`${r.arg} 기록 찾아줘`);
-    else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+    await runCommand(c, r.arg);
     return;
   }
   closePalette();
@@ -4101,8 +4217,8 @@ def make_handler(runtime):
 
             parsed = urlparse(self.path)
             if parsed.path == "/api/ask":
-                res = runtime.ask_question(data.get("question", ""), engine=data.get("engine"),
-                                           project=data.get("project"))
+                fn = runtime.ask_question if data.get("confirm") is True else runtime.preview_question
+                res = fn(data.get("question", ""), engine=data.get("engine"), project=data.get("project"))
                 self._send_json(200, res)
             elif parsed.path == "/api/feedback":
                 self._send_json(200, runtime.record_feedback(bool(data.get("accepted"))))

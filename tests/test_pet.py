@@ -259,8 +259,9 @@ class PetTest(unittest.TestCase):
 
     def test_bubble_fits_overlay_window(self):
         # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
+        # 쓰기 승인 카드는 탭 밖(위)에 있어 어느 탭에서도 보인다
         html = pet.PET_HTML
-        order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="writeCard"', 'id="activityList"',
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="writeCard"', 'id="paneHome"', 'id="activityList"',
                                           'id="paneSettings"', 'id="fileOrgBlock"', 'id="askForm"')]
         self.assertEqual(order, sorted(order))
         # 리디자인 패널은 탭 영역(가운데)이 스크롤되고 툴바·입력창은 고정된다
