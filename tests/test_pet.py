@@ -471,6 +471,15 @@ class PetTest(unittest.TestCase):
         self.assertIn("ensureIconVisible(announceSuccess: false)", src)  # 시작할 때도 노치 확인
         self.assertIn("} else if NSMenu.menuBarVisible() {", src)  # 전체 화면은 가려진 것으로 보지 않는다
 
+    def test_cpu_gait_in_web_pet(self):
+        html = pet.PET_HTML
+        self.assertIn("const GAIT_PERIODS = { calm: 3.2, walk: 1.6, busy: 0.8, hot: 0.4 };", html)
+        self.assertIn('layerBase.addEventListener("animationiteration"', html)  # 사이클 끝에서만 바꾼다
+        self.assertIn('.mood-idle:not([class*="action-"])', html)  # 동작·표정이 우선
+        self.assertIn("var(--gait-amp, 1)", html)  # 기존 걷기 동작은 진폭 1 그대로
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("window.setGait && window.setGait(", src)
+
     @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
     def test_cpu_gait_selftest(self):
         # 앱을 띄우지 않고 계산만 확인한다: idle 인덱스, UInt32 wrap, 순간 튐, 50% 흔들림, 계단 반응, 과열 해제

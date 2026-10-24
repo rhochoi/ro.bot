@@ -857,6 +857,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pushGait()
         updateBackdropTheme(force: true)
     }
 
@@ -913,9 +914,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         guard let cur = CPUTicks.read() else { return }
         defer { lastTicks = cur }
         guard let prev = lastTicks, let pct = cpuPercent(from: prev, to: cur) else { return }
-        gait = smoother.push(pct)
+        let next = smoother.push(pct)
+        if next != gait {
+            gait = next
+            pushGait()
+        }
         let shown = Int((smoother.smoothed ?? pct).rounded())
         headerDetail.stringValue = "CPU \(shown)% · \(gait.label)"
+    }
+
+    // 웹 펫은 사이클이 끝날 때 바꾼다 (window.setGait)
+    private func pushGait() {
+        let name = ["calm", "walk", "busy", "hot"][gait.rawValue]
+        webView?.evaluateJavaScript("window.setGait && window.setGait('\(name)');", completionHandler: nil)
     }
 
     // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지

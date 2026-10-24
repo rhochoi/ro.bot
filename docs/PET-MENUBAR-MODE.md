@@ -73,7 +73,7 @@ CPUSampler (Swift, 1초, Timer.tolerance 0.3)
   host_statistics(HOST_CPU_LOAD_INFO): (USER+SYSTEM+NICE) / 전체 틱, UInt32 &- 뺄셈
   → 최근 3개 중앙값 → 지수 평균 α=0.3 → 4단계 판정(경계 20/50/80, 모든 경계 ±5% 히스테리시스)
   → TempoController: 현재 사이클이 끝날 때만 단계 반영
-       ├ 펫: JS setTempo(rate) → 기본 숨쉬기·걷기 애니메이션의 updatePlaybackRate(rate)
+       ├ 펫: JS setGait(name) → body[data-gait]를 사이클 끝(animationiteration)에 바꿈
        └ 메뉴 막대: 템플릿 프레임 4장 교체, 최대 0.8초 사이클, 가려지면 갱신 중단
   상한: 저전력 모드 → '보통'(1.6초)까지 · 동작 줄이기 → 걷지 않고 메뉴에 CPU %만
 ```
@@ -96,7 +96,7 @@ CPUSampler (Swift, 1초, Timer.tolerance 0.3)
 ### 템포 적용 규칙 (웹)
 
 - 펫은 WKWebView 안의 CSS 키프레임이라 호스트 `CALayer.speed`로는 바꿀 수 없다고 본다(WebKit이 별도 프로세스에서 합성). `animation-duration` 변경은 위상이 튄다.
-- `document.getAnimations()` 중 기본 숨쉬기·걷기만 골라 `animationiteration` 시점에 `updatePlaybackRate()`. 기준 사이클은 3.2초로 맞춘다(현재 숨쉬기 3.0초).
+- 구현(6단계): `body[data-gait]` 값으로 CSS가 기본 표정의 애니메이션을 고른다(느긋 = 3.2초 숨쉬기, 그 위 = 제자리걸음 1.6/0.8/0.4초, 바쁨부터 `--gait-amp` 1.5배, 과열은 가는 눈). 값은 바닥 층 `animationiteration`에서만 바꾸고, 이벤트를 놓쳐도 현재 사이클 길이 안에 바꾼다. 숨쉬기와 걷기는 사이클 경계에서 둘 다 제자리 자세라 이름이 바뀌어도 튀지 않는다. `updatePlaybackRate`보다 단순해서 이쪽을 택했다.
 - 우선순위: 잡기 > 액션(생각·깜짝 등) > 표정 > CPU 템포. 위가 재생 중이면 템포는 다음 기본 사이클로 미룬다.
 
 ### 과열 알림
@@ -149,7 +149,7 @@ CPUSampler (Swift, 1초, Timer.tolerance 0.3)
 3. 메뉴 막대 클릭 메뉴(헤더 포함)·끌어 내리기
 4. 웹 ⋯ 메뉴·노치/전체 화면 처리·06 테스트
 5. CPUSampler·다듬기 파이프라인·`--selftest`
-6. 웹 `setTempo`(playbackRate)·동작 우선순위
+6. 웹 `setGait`(사이클 끝 전환)·동작 우선순위
 7. 메뉴 막대 프레임 교체·0.8초 상한·저전력/동작 줄이기
 8. OverheatWatcher·알림 카드
 9. 자기 부하 실측·아이콘 픽셀 확인(실제 Mac)

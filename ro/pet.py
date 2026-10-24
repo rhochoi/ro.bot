@@ -1315,22 +1315,40 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   @keyframes walkBase {
     0%, 100% { transform: translateX(0); }
-    25%      { transform: translateX(calc(2.2 * var(--u))) scaleX(1.04); }
+    25%      { transform: translateX(calc(2.2 * var(--u) * var(--gait-amp, 1))) scaleX(1.04); }
     50%      { transform: translateX(0) scaleX(1); }
-    75%      { transform: translateX(calc(-2.2 * var(--u))) scaleX(1.04); }
+    75%      { transform: translateX(calc(-2.2 * var(--u) * var(--gait-amp, 1))) scaleX(1.04); }
   }
   @keyframes walkBody {
     0%, 100% { transform: translateX(0); }
-    34%      { transform: translateX(calc(1.6 * var(--u))); }
+    34%      { transform: translateX(calc(1.6 * var(--u) * var(--gait-amp, 1))); }
     50%      { transform: translateX(0); }
-    84%      { transform: translateX(calc(-1.6 * var(--u))); }
+    84%      { transform: translateX(calc(-1.6 * var(--u) * var(--gait-amp, 1))); }
   }
   @keyframes walkHead {
     0%, 100% { transform: translateX(0); }
-    42%      { transform: translateX(calc(1.1 * var(--u))); }
+    42%      { transform: translateX(calc(1.1 * var(--u) * var(--gait-amp, 1))); }
     50%      { transform: translateX(0); }
-    92%      { transform: translateX(calc(-1.1 * var(--u))); }
+    92%      { transform: translateX(calc(-1.1 * var(--u) * var(--gait-amp, 1))); }
   }
+
+  /* CPU 걸음 (07): 기본 표정이고 다른 동작이 없을 때만 적용한다 (잡기 > 동작 > 표정 > CPU 걸음).
+     느긋은 3.2초 숨쉬기, 그 위로는 제자리걸음 1.6 / 0.8 / 0.4초. 바쁨부터 층이 더 크게 흔들리고, 과열은 눈을 가늘게 뜬다 */
+  body[data-gait="walk"] { --gait-period: 1.6s; --gait-amp: 1; }
+  body[data-gait="busy"] { --gait-period: 0.8s; --gait-amp: 1.5; }
+  body[data-gait="hot"]  { --gait-period: 0.4s; --gait-amp: 1.5; }
+  body[data-gait="calm"] .mood-idle:not([class*="action-"]) .pill { animation-duration: 3.2s; }
+  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-base {
+    animation: walkBase var(--gait-period) infinite ease-in-out;
+  }
+  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-body {
+    animation: walkBody var(--gait-period) infinite ease-in-out;
+  }
+  body[data-gait]:not([data-gait="calm"]) .mood-idle:not([class*="action-"]) .pill-head {
+    animation: walkHead var(--gait-period) infinite ease-in-out;
+  }
+  body[data-gait="hot"] .mood-idle:not([class*="action-"]) .eye-l { height: calc(1.1 * var(--u)); border-radius: 999px; }
+  body[data-gait="hot"] .mood-idle:not([class*="action-"]) .eye-r { height: calc(1.0 * var(--u)); border-radius: 999px; }
 
   /* A-4. 생각 / 계산 (thinking): 머리 갸우뚱 & 엇박자 펄스 & 시선 위 */
   .action-thinking .pill-head {
@@ -2092,6 +2110,38 @@ window.onHostDragStart = function(fromPet) {
 window.onHostDragShake = function() {
   window.triggerAction("shake", 1200);
 };
+
+/* CPU 걸음 (07): 호스트가 단계를 넘기면 지금 사이클이 끝나는 순간에 바꿔 걸음이 끊기지 않게 한다 */
+const GAIT_PERIODS = { calm: 3.2, walk: 1.6, busy: 0.8, hot: 0.4 };
+let pendingGait = null;
+let gaitTimer = null;
+function applyGait(gait) {
+  clearTimeout(gaitTimer);
+  pendingGait = null;
+  document.body.dataset.gait = gait;
+}
+function gaitShowing() {
+  return petWrap.classList.contains("mood-idle") && ![...petWrap.classList].some((c) => c.startsWith("action-"));
+}
+window.setGait = function(gait) {
+  const cur = document.body.dataset.gait;
+  if (!(gait in GAIT_PERIODS) || gait === cur) {
+    pendingGait = null;
+    return;
+  }
+  // 처음이거나 다른 동작·표정이 보이는 중이면 걸음이 안 보이니 바로 바꾼다
+  if (!cur || !gaitShowing()) {
+    applyGait(gait);
+    return;
+  }
+  pendingGait = gait;
+  // 사이클 경계 이벤트를 놓쳐도 지금 사이클 길이 안에는 바뀐다
+  clearTimeout(gaitTimer);
+  gaitTimer = setTimeout(() => pendingGait && applyGait(pendingGait), GAIT_PERIODS[cur] * 1000 + 200);
+};
+layerBase.addEventListener("animationiteration", () => {
+  if (pendingGait) applyGait(pendingGait);
+});
 
 /* 메뉴 막대로 보내기: 위쪽 80px 구역 안에서의 진행률(0~1)을 호스트가 넘긴다 */
 let dockCaption = null;
