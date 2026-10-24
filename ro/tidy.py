@@ -193,7 +193,7 @@ def apply(ids, home=HOME, log_dir=log.LOG_DIR):
                  "mode": mode, "root": str(root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
         done.append(it)
     if done:
-        log.append("tidy", f"격리 {len(done)}건 (batch {batch})", {"batch": batch, "count": len(done)}, log_dir=log_dir)
+        log.append("tidy", f"격리 {len(done)}건", {"batch": batch, "count": len(done)}, log_dir=log_dir)
     return batch, done, skipped
 
 
@@ -229,7 +229,7 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
                  "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
         done.append(e)
     if done:
-        log.append("tidy", f"복원 {len(done)}건 (batch {batch})", {"batch": batch, "count": len(done)}, log_dir=log_dir)
+        log.append("tidy", f"복원 {len(done)}건", {"batch": batch, "count": len(done)}, log_dir=log_dir)
     return batch, done, skipped
 
 
@@ -265,7 +265,7 @@ def main(argv=None):
                 print(f"건너뜀 [{cid}]: {why}")
         elif args.cmd == "undo":
             batch, done, skipped = undo(args.batch)
-            print(f"복원 {len(done)}건 (batch {batch})")
+            print(f"복원 {len(done)}건")
             for cid, why in skipped:
                 print(f"건너뜀 [{cid}]: {why}")
         else:

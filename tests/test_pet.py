@@ -24,16 +24,15 @@ class PetTest(unittest.TestCase):
             st = rt.snapshot(now=t0)
             self.assertEqual(st["mood"], "idle")
             self.assertEqual(st["mood_label"], "기본")
-            base0 = st["layers"]["base"]
 
-            # 2. 기록 중 (recording) — 새 로그가 쌓이면 바닥 층이 자란다
+            # 2. 기록 중 (recording) — 새 로그가 쌓여도 층 크기는 그대로다
             log.append("note", "첫 기록", log_dir=d)
             st_rec = rt.snapshot(now=t0 + 1.0)
             self.assertEqual(st_rec["mood"], "recording")
-            self.assertEqual(st_rec["layers"]["base"], 1.0)
+            self.assertEqual(st_rec["layers"], {"head_u": 19, "body_u": 15, "base_u": 23})
             st_after = rt.snapshot(now=t0 + 20.0)
             self.assertEqual(st_after["mood"], "idle")
-            self.assertGreater(st_after["layers"]["base"], base0)
+            self.assertEqual(st_after["layers"], st["layers"])
 
             # 3. 발견 (discovery) — 반복 성공 로그로 학습 후보가 생기면
             for _ in range(3):
@@ -60,13 +59,11 @@ class PetTest(unittest.TestCase):
             rt.busy_task = "구조 분석"
             st_foc = rt.snapshot()
             self.assertEqual(st_foc["mood"], "focus")
-            self.assertEqual(st_foc["layers"]["base"], 1.0)
+            self.assertEqual(st_foc["layers"]["base_u"], 23)
 
     def test_construction_proportions_and_offsets(self):
         # CONSTRUCTION: 몸(16x) < 머리(20x) < 바닥(24x) 비례 유지
-        w = pet.layer_widths(today_events_count=0, project_count=0, mood="idle")
-        self.assertLess(w["body"], w["head"])
-        self.assertLess(w["head"], w["base"])
+        self.assertEqual(pet.layer_widths(), {"head_u": 19, "body_u": 15, "base_u": 23})
 
         # 불안(anxious): 층이 좌우로 어긋난다
         anx = pet.layer_offsets("anxious")
@@ -81,12 +78,6 @@ class PetTest(unittest.TestCase):
         screen = (0, 50, 1440, 900)
         self.assertEqual(pet.clamp_pet_origin(500, -9999, 136, 112, screen, margin=6), (500, 56))
         self.assertEqual(pet.clamp_pet_origin(500, 9999, 136, 112, screen, margin=6), (500, 782))
-
-        # 배경 밝기(luminance)에 따른 분필(chalk) / 먹(ink) 자동 전환 + 히스테리시스
-        self.assertEqual(pet.choose_theme_for_luminance(0.18, current_chalk=False), "chalk")
-        self.assertEqual(pet.choose_theme_for_luminance(0.85, current_chalk=True), "ink")
-        self.assertEqual(pet.choose_theme_for_luminance(0.48, current_chalk=True), "chalk")
-        self.assertEqual(pet.choose_theme_for_luminance(0.48, current_chalk=False), "ink")
 
     def test_16px_icon_grid(self):
         grid = pet.icon_16px_grid()
@@ -185,7 +176,7 @@ class PetTest(unittest.TestCase):
             res = rt.queue_organize_apply(kind="extracted")
             self.assertTrue(res["ok"])
             self.assertEqual(res["pending"]["qkind"], "extracted")
-            self.assertIn("삭제 아님", res["pending"]["task"])
+            self.assertIn("지우지 않고", res["pending"]["task"])
             self.assertFalse(rt.resolve_write_approval(False)["approved"])
             self.assertTrue(z.exists())  # 거절하면 그대로
 
@@ -260,8 +251,8 @@ class PetTest(unittest.TestCase):
     def test_bubble_fits_overlay_window(self):
         # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         html = pet.PET_HTML
-        order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="writeCard"', 'id="activityList"',
-                                          'id="paneSettings"', 'id="fileOrgBlock"', 'id="askForm"')]
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="activityList"', 'id="paneOrganize"',
+                                          'id="fileOrgBlock"', 'id="paneSettings"', 'id="writeCard"', 'id="askForm"')]
         self.assertEqual(order, sorted(order))
         # 리디자인 패널은 탭 영역(가운데)이 스크롤되고 툴바·입력창은 고정된다
         self.assertRegex(html, r"\.tab-pane\.active \{[^}]*overflow-y: auto;")
@@ -322,17 +313,18 @@ class PetTest(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
-    def test_choose_material_by_context(self):
-        self.assertEqual(pet.MATERIALS, ("clay", "glass", "jelly"))
-        # 감정별 자동 재질 매핑 (점토 / 리퀴드 글라스 / 젤리 3종)
-        self.assertEqual(pet.choose_material(mood="discovery", luminance=0.5, hour=14), "jelly")
-        self.assertEqual(pet.choose_material(mood="resolved", luminance=0.5, hour=14), "jelly")
-        self.assertEqual(pet.choose_material(mood="recording", luminance=0.5, hour=14), "glass")
-        self.assertEqual(pet.choose_material(mood="focus", luminance=0.5, hour=14), "glass")
-        self.assertEqual(pet.choose_material(mood="anxious", luminance=0.5, hour=14), "clay")
-        # 기본(idle) 상태에서는 밝은 배경일 때 리퀴드 글라스, 그 외에는 점토
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.5, hour=14), "clay")
-        self.assertEqual(pet.choose_material(mood="idle", luminance=0.80, hour=14), "glass")
+    def test_material_is_only_what_user_picked(self):
+        self.assertEqual(pet.MATERIALS, ("clay", "glass"))
+        self.assertNotIn('data-mat="auto"', pet.PET_HTML)          # 표정·배경으로 바뀌는 자동 재질은 없다
+        self.assertNotIn("computeAutoMaterial", pet.PET_HTML)
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            self.assertEqual(rt.snapshot()["material"], "clay")
+            rt.set_prefs({"material": "glass"})
+            rt.busy = True                                           # 집중 표정이어도 재질은 그대로
+            self.assertEqual(rt.snapshot()["material"], "glass")
+            html = pet.render_html("t", rt.prefs())
+            self.assertIn('const INITIAL_PREFS = {"material": "glass"};', html)
 
     def test_motion_guide_actions_and_api(self):
         # 모션 가이드 12종 + 대기 숨쉬기 상호작용 목록 및 라벨 검증
@@ -418,15 +410,20 @@ class PetTest(unittest.TestCase):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn("img.isTemplate = true", src)  # 다크 메뉴바에서도 보인다
         self.assertIn("NSGraphicsContext.current?.compositingOperation = .clear", src)  # 눈은 템플릿 알파로 뚫는다
-        self.assertIn("if !CGPreflightScreenCaptureAccess() {", src)
-        self.assertIn("Privacy_ScreenCapture", src)
+        # 배경 밝기로 색을 바꾸지 않으므로 화면을 캡처하지 않는다(끌 때 끊김의 원인이었다)
+        self.assertNotIn("CGWindowListCreateImage", src)
+        self.assertNotIn("Privacy_ScreenCapture", src)
 
     def test_menubar_mode_state_and_pet_menu(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn('UserDefaults(suiteName: "ro.pet")', src)  # 다음 실행도 같은 모드
         self.assertIn('defaults.set(next.rawValue, forKey: "ro.mode")', src)
         self.assertIn("statusItem.isVisible = (next == .menubar)", src)  # 한 번에 한 곳에만
-        self.assertIn('statusItem.autosaveName = "ro.pet"', src)
+        self.assertIn('private let statusAutosaveName = "ro.pet"', src)
+        self.assertIn("statusItem.autosaveName = statusAutosaveName", src)
+        # 메뉴 막대로 보낼 때마다 아이콘 줄의 첫 칸(시계 쪽 끝)으로
+        self.assertIn('"NSStatusItem Preferred Position \\(statusAutosaveName)"', src)
+        self.assertEqual(src.count("pinStatusItemFirst()"), 4)  # 정의 + 시작 + 끌어서 보내기 + 모드 전환
         self.assertNotIn(".fullScreenAuxiliary", src)  # 전체 화면 앱 위에는 띄우지 않는다
         self.assertIn("self.mode == .desktop, self.wanderEnabled", src)  # 숨은 펫은 산책하지 않는다
         self.assertIn("mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)", src)
@@ -530,7 +527,7 @@ class PetTest(unittest.TestCase):
 
     def test_ask_form_keeps_question_on_failure(self):
         html = pet.PET_HTML
-        submit = html[html.index('askForm.addEventListener("submit"'):]
+        submit = html[html.index('async function sendAsk()'):]
         self.assertIn("askInput.disabled = true;", submit)
         self.assertIn("if (!res || !res.ok) {", submit)  # 엔진 실패(ok: false)도 질문을 되돌린다
         self.assertIn("if (!askInput.value) askInput.value = q;", submit)

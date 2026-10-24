@@ -176,7 +176,7 @@ class CliTest(unittest.TestCase):
         self.assertTrue(list((self.home / ".ro" / "log").glob("*.jsonl")))
         self.call("log", "delete", "--yes")
         self.assertFalse(list((self.home / ".ro" / "log").glob("*.jsonl")))
-        _, out, _ = self.call("collect", "status")
+        _, out, _ = self.call("collect", "status", "--json")
         self.assertFalse(json.loads(out)["shell"])
 
     def test_setup_flow_and_config(self):
@@ -216,7 +216,7 @@ class CliTest(unittest.TestCase):
     def test_legacy_collect_json_still_read(self):
         (self.home / ".ro").mkdir()
         (self.home / ".ro" / "collect.json").write_text(json.dumps({"shell": True}))
-        _, out, _ = self.call("collect", "status")
+        _, out, _ = self.call("collect", "status", "--json")
         self.assertTrue(json.loads(out)["shell"])
 
 

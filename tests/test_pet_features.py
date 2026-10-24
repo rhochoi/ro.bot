@@ -9,11 +9,9 @@ from ro import log, mapper, pet
 
 
 class AmbientTest(unittest.TestCase):
-    def test_base_length_grows_with_records_and_caps(self):
-        self.assertEqual(pet.ambient_state(0, 9)["base_px"], 60)
-        self.assertEqual(pet.ambient_state(12, 14)["base_px"], 96)
-        self.assertEqual(pet.ambient_state(26, 20)["base_px"], 138)
-        self.assertEqual(pet.ambient_state(500, 20)["base_px"], 140)
+    def test_body_size_never_follows_record_count(self):
+        self.assertNotIn("base_px", pet.ambient_state(500, 20))
+        self.assertNotIn("--base-px", pet.PET_HTML)
 
     def test_time_band_focus_and_attention(self):
         self.assertEqual(pet.ambient_state(0, 9)["label"], "아침 · 0건")
@@ -38,6 +36,7 @@ class ApiFlowTest(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         self.tmp.cleanup()
 
     def post(self, path, body=None, token=None):

@@ -30,6 +30,7 @@ class MotionBase(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
         cls.server.shutdown()
+        cls.server.server_close()
         cls.tmp.cleanup()
 
     def page(self, reduced=False):

@@ -4,8 +4,6 @@ import CoreGraphics
 import Darwin
 import WebKit
 
-private typealias CGWinImgFn = @convention(c) (CGRect, UInt32, UInt32, UInt32) -> Unmanaged<CGImage>?
-
 final class FloatingPetPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -353,14 +351,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var placeLeft: Bool = false
     private var wanderDirection: CGFloat = -1.0
     private var wanderTimer: Timer?
-    private var backdropTimer: Timer?
     private var dragTimer: Timer?
     private var fallTimer: Timer?
     private var isDragging: Bool = false
-    private var backdropIsDark: Bool? = nil
-    private var lastBackdropLum: Double = 0.5
-    private var lastBackdropSampleTime: TimeInterval = 0
-    private var cgWinImgFn: CGWinImgFn? = nil
     private var hotKeyRef: EventHotKeyRef? = nil
 
     // 말풍선이 닫혀 있을 때는 캐릭터(23u×22u)+캡션+그림자+점프/흔들기 여유 공간(176x168)을 확보해 잘림 방지
@@ -393,21 +386,20 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         self.urlString = url
         self.wanderEnabled = wander
         super.init()
-        if let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "CGWindowListCreateImage") {
-            self.cgWinImgFn = unsafeBitCast(sym, to: CGWinImgFn.self)
-        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         killOtherInstances()
         NSApp.setActivationPolicy(.accessory)
         mode = PetMode(rawValue: defaults.string(forKey: "ro.mode") ?? "") ?? .desktop
+        if wanderEnabled, defaults.object(forKey: "ro.wander") != nil {
+            wanderEnabled = defaults.bool(forKey: "ro.wander")
+        }
         setupStatusItem()
         setupFloatingPanel()
         setMode(mode)
         ensureIconVisible(announceSuccess: false)  // 지난번 메뉴 막대 모드로 시작했는데 아이콘이 가려진 경우
         setupWanderTimer()
-        setupBackdropTimer()
         setupCPUSampler()
         observeIconConditions()
         setupGlobalHotKey()
@@ -480,79 +472,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         return NSPoint(x: x, y: y)
     }
 
-    // 펫 바로 뒤쪽(kCGWindowListOptionOnScreenBelowWindow = 2) 배경의 평균 밝기를 측정해 분필/먹 자동 전환
-    private func sampleBackdropLuminance() -> Double? {
-        guard let fn = cgWinImgFn, panel != nil, panel.windowNumber > 0 else { return nil }
-        guard CGPreflightScreenCaptureAccess() else { return nil }
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 900.0
-        let petPos = currentPetOrigin()
-        // AppKit(하단 원점) -> Quartz(상단 원점) 좌표 변환: 캐릭터 몸체 중심부(88x64) 영역 샘플링
-        let sampleX = petPos.x + 28.0
-        let sampleY = primaryHeight - (petPos.y + 104.0)
-        let rect = CGRect(x: sampleX, y: sampleY, width: 88.0, height: 64.0)
-
-        // listOption 2 = kCGWindowListOptionOnScreenBelowWindow (펫 자신의 픽셀은 제외하고 바로 뒤 창/배경만 캡처)
-        // imageOption 16 = kCGWindowImageNominalResolution
-        guard let cgImg = fn(rect, 2, UInt32(panel.windowNumber), 16)?.takeRetainedValue() else {
-            return nil
-        }
-        let rep = NSBitmapImageRep(cgImage: cgImg)
-        let w = rep.pixelsWide
-        let h = rep.pixelsHigh
-        guard w > 0, h > 0 else { return nil }
-
-        var total: Double = 0.0
-        var count: Double = 0.0
-        let stepX = max(1, w / 8)
-        let stepY = max(1, h / 8)
-        for y in stride(from: 0, to: h, by: stepY) {
-            for x in stride(from: 0, to: w, by: stepX) {
-                if let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) {
-                    let lum = 0.2126 * Double(c.redComponent)
-                            + 0.7152 * Double(c.greenComponent)
-                            + 0.0722 * Double(c.blueComponent)
-                    total += lum
-                    count += 1.0
-                }
-            }
-        }
-        return count > 0 ? (total / count) : nil
-    }
-
-    private func updateBackdropTheme(force: Bool = false) {
-        let now = Date().timeIntervalSince1970
-        if !force && (now - lastBackdropSampleTime) < 0.11 {
-            return
-        }
-        lastBackdropSampleTime = now
-        guard let lum = sampleBackdropLuminance() else { return }
-
-        // 히스테리시스: 어두운 배경(<0.43)이면 분필(true), 밝은 배경(>0.53)이면 먹(false)
-        let nextDark: Bool
-        if let cur = backdropIsDark {
-            if lum < 0.43 {
-                nextDark = true
-            } else if lum > 0.53 {
-                nextDark = false
-            } else {
-                nextDark = cur
-            }
-        } else {
-            nextDark = (lum < 0.48)
-        }
-
-        if force || nextDark != backdropIsDark || abs(lum - lastBackdropLum) > 0.08 {
-            backdropIsDark = nextDark
-            lastBackdropLum = lum
-            let lumStr = String(format: "%.3f", lum)
-            webView?.evaluateJavaScript(
-                "window.setAutoBackdropDark && window.setAutoBackdropDark(\(nextDark), \(lumStr));",
-                completionHandler: nil
-            )
-        }
-    }
-
-    // 말풍선 열림/닫힘 시 펫의 화면 위치를 유지한 채 패널 크기를 조절
     private func setBubbleState(_ open: Bool) {
         if bubbleOpen == open { return }
         let petPos = clampOrigin(currentPetOrigin(), size: compactSize)
@@ -585,7 +504,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             webView.frame = NSRect(origin: .zero, size: compactSize)
             revealPet()
         }
-        updateBackdropTheme(force: true)
     }
 
     // 네이티브 120fps 마우스 드래그 추적 (이동 중에도 배경 밝기를 실시간 감지해 분필/먹 자동 전환)
@@ -627,7 +545,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 let target = NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy)
                 let clamped = self.clampOrigin(target, size: self.panel.frame.size)
                 self.panel.setFrameOrigin(clamped)
-                self.updateBackdropTheme(force: false)
                 // 모션 엔진에 머리(창)의 위치를 스트리밍한다(약 60Hz). 속도·체인·기울기·흔들기 감지는 JS가 계산한다.
                 if fromPet && tick % 2 == 0 {
                     self.webView.evaluateJavaScript(
@@ -642,6 +559,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 let nowIn = d < self.dockZone
                 if nowIn != inZone {
                     inZone = nowIn
+                    if nowIn { self.pinStatusItemFirst() }
                     self.statusItem.isVisible = nowIn  // 막대에 자리를 열고 닫는다
                 }
                 let progress = nowIn ? min(1, 1 - d / self.dockZone) : 0
@@ -661,7 +579,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                     self.dockToMenubar(returnOrigin: startOrigin)
                     return
                 }
-                self.updateBackdropTheme(force: true)
+                if moved && self.mode == .desktop { self.savePosition(delay: 0.5) }  // 낙하가 끝난 자리
                 if fromPet {
                     // 놓으면 중력(2400px/s²)으로 떨어진다. 낙하 거리는 최대 280ms 분량으로 제한한다.
                     let fall = moved ? self.startFall() : 0
@@ -699,7 +617,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let t = CGFloat(Date().timeIntervalSince(begin))
             if t >= duration {
                 self.panel.setFrameOrigin(NSPoint(x: startX, y: startY - fall))
-                self.updateBackdropTheme(force: true)
                 timer.invalidate()
                 self.fallTimer = nil
                 return
@@ -841,9 +758,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         return img
     }
 
+    private let statusAutosaveName = "ro.pet"
+
+    /// 메뉴 막대로 보낸 ro 아이콘이 막대 아이콘 줄의 첫 칸(시계 쪽 끝)에 놓이게 한다.
+    /// AppKit은 자리를 'NSStatusItem Preferred Position <이름>'(오른쪽 끝에서의 거리)으로 기억하므로,
+    /// 아이콘을 보이기 직전마다 가장 작은 값으로 되돌린다.
+    private func pinStatusItemFirst() {
+        UserDefaults.standard.set(1, forKey: "NSStatusItem Preferred Position \(statusAutosaveName)")
+    }
+
     private func setupStatusItem() {
+        pinStatusItemFirst()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.autosaveName = "ro.pet"  // ⌘-드래그로 바꾼 막대 안 위치를 기억한다
+        statusItem.autosaveName = statusAutosaveName
         if let btn = statusItem.button {
             // 메뉴를 직접 띄워야 '끌어 내리기'와 '눌러서 메뉴'를 구분할 수 있다
             btn.target = self
@@ -862,57 +789,38 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         paletteItem.target = self
         menu.addItem(paletteItem)
 
-        let moodMenu = NSMenu()
+        // 표정·모션은 설정이 아니라 구경용이라 '미리보기' 하위 메뉴 하나로 묶는다
+        let previewMenu = NSMenu()
         let moods: [(String, String)] = [
-            ("기본 — 평소의 ro", "idle"),
-            ("기록 중 — 아래를 보며 바닥이 길어짐", "recording"),
-            ("집중 — 하나만 본다", "focus"),
-            ("불안 — 눈이 작아지고 층이 어긋남", "anxious"),
-            ("발견 — 눈이 커지고 머리가 들림", "discovery"),
-            ("풀어냄 — 바닥이 길게 뻗는다", "resolved")
+            ("기본", "idle"), ("기록 중", "recording"), ("집중", "focus"),
+            ("확인 필요", "anxious"), ("발견", "discovery"), ("해결", "resolved")
         ]
+        previewMenu.addItem(menuSection("표정"))
         for (title, code) in moods {
             let item = NSMenuItem(title: title, action: #selector(previewMood(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = code
-            moodMenu.addItem(item)
+            previewMenu.addItem(item)
         }
-        let moodRoot = NSMenuItem(title: "표정 미리보기 (6종)", action: nil, keyEquivalent: "")
-        moodRoot.submenu = moodMenu
-        menu.addItem(moodRoot)
-
-        let actMenu = NSMenu()
         let actions: [(String, String)] = [
-            ("대기 · 숨쉬기 (Breathing)", "breathe"),
-            ("두리번 (Look around)", "look_around"),
-            ("걷기 · 이동 (Walk)", "walk"),
-            ("생각 · 계산 (Thinking)", "thinking"),
-            ("깜짝 · 깨어나기 (Alert)", "alert"),
-            ("졸음 · 수면 (Drowsy)", "drowsy"),
-            ("시선 추적 (Gaze)", "gaze"),
-            ("쓰다듬기 (Pet)", "pet"),
-            ("잡기 · 끌기 (Drag)", "drag"),
-            ("흔들기 (Shake)", "shake"),
-            ("놓기 · 착지 바운스 (Drop)", "drop"),
-            ("성공 · 해결 (Success)", "success"),
-            ("실패 · 불안 (Failure)", "failure")
+            ("숨쉬기", "breathe"), ("두리번", "look_around"), ("걷기", "walk"), ("생각", "thinking"),
+            ("깜짝", "alert"), ("졸음", "drowsy"), ("시선", "gaze"), ("누름", "press"), ("쓰다듬기", "pet"),
+            ("끌기", "drag"), ("흔들기", "shake"), ("착지", "drop"), ("성공", "success"), ("실패", "failure")
         ]
+        previewMenu.addItem(NSMenuItem.separator())
+        previewMenu.addItem(menuSection("모션"))
         for (title, code) in actions {
             let item = NSMenuItem(title: title, action: #selector(triggerActionFromMenu(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = code
-            actMenu.addItem(item)
+            previewMenu.addItem(item)
         }
-        let actRoot = NSMenuItem(title: "상호작용 바로 실행 (모션 12종)", action: nil, keyEquivalent: "")
-        actRoot.submenu = actMenu
-        menu.addItem(actRoot)
+        let previewRoot = NSMenuItem(title: "표정·모션 미리보기", action: nil, keyEquivalent: "")
+        previewRoot.submenu = previewMenu
 
         let matMenu = NSMenu()
         let materials: [(String, String)] = [
-            ("자동 — 감정·배경에 따라 전환", "auto"),
-            ("점토 · Clay", "clay"),
-            ("리퀴드 글라스 · Liquid Glass", "glass"),
-            ("젤리 · Jelly", "jelly")
+            ("점토", "clay"), ("유리", "glass")
         ]
         for (title, code) in materials {
             let item = NSMenuItem(title: title, action: #selector(selectMaterial(_:)), keyEquivalent: "")
@@ -920,14 +828,16 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             item.representedObject = code
             matMenu.addItem(item)
         }
-        let matRoot = NSMenuItem(title: "재질 테마 (점토 / 리퀴드 글라스 / 젤리)", action: nil, keyEquivalent: "")
+        let matRoot = NSMenuItem(title: "재질", action: nil, keyEquivalent: "")
         matRoot.submenu = matMenu
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(matRoot)
 
-        wanderItem = NSMenuItem(title: wanderEnabled ? "산책 모드: 켜짐" : "산책 모드: 꺼짐",
-                                action: #selector(toggleWander), keyEquivalent: "w")
+        wanderItem = NSMenuItem(title: "돌아다니기", action: #selector(toggleWander), keyEquivalent: "w")
         wanderItem.target = self
+        wanderItem.state = wanderEnabled ? .on : .off
         menu.addItem(wanderItem)
+        menu.addItem(previewRoot)
 
         modeItem = NSMenuItem(title: "", action: #selector(toggleMode), keyEquivalent: "")
         modeItem.target = self
@@ -936,14 +846,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let resetItem = NSMenuItem(title: "우측 하단으로 부르기", action: #selector(resetPosition), keyEquivalent: "0")
         resetItem.target = self
         menu.addItem(resetItem)
-
-        // 화면 기록 권한이 없으면 배경 밝기 자동 전환이 조용히 꺼지므로 메뉴에서 알린다
-        if !CGPreflightScreenCaptureAccess() {
-            let permItem = NSMenuItem(title: "배경 밝기 자동 전환 꺼짐 — 화면 기록 권한 설정 열기…",
-                                      action: #selector(openScreenCaptureSettings), keyEquivalent: "")
-            permItem.target = self
-            menu.addItem(permItem)
-        }
 
         menu.addItem(NSMenuItem.separator())
         let quitItem = NSMenuItem(title: "ro 펫 종료", action: #selector(quitApp), keyEquivalent: "q")
@@ -1034,6 +936,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
         mode = next
         defaults.set(next.rawValue, forKey: "ro.mode")
+        if next == .menubar { pinStatusItemFirst() }
         statusItem.isVisible = (next == .menubar)
         DispatchQueue.main.async { [weak self] in self?.updateIconAnimation() }  // 아이콘 창 배치 뒤에
         modeItem.title = (next == .menubar) ? "데스크톱에 꺼내기" : "메뉴 막대로 보내기"
@@ -1041,7 +944,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             panel.orderOut(nil)
         } else {
             panel.orderFrontRegardless()
-            updateBackdropTheme(force: true)
         }
     }
 
@@ -1058,15 +960,17 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         setMode(mode == .desktop ? .menubar : .desktop)
     }
 
-    @objc private func openScreenCaptureSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     private func setupFloatingPanel() {
         let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let origin = NSPoint(x: vf.maxX - compactSize.width - 20, y: vf.minY + 18)
+        var origin = NSPoint(x: vf.maxX - compactSize.width - 20, y: vf.minY + 18)
+        // 지난번에 놓아 둔 자리(그 화면이 아직 있을 때만)
+        if defaults.object(forKey: "ro.pos.x") != nil {
+            let saved = NSPoint(x: defaults.double(forKey: "ro.pos.x"), y: defaults.double(forKey: "ro.pos.y"))
+            let r = NSRect(origin: saved, size: compactSize)
+            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(r.insetBy(dx: 40, dy: 40)) }) {
+                origin = saved
+            }
+        }
         let rect = NSRect(origin: origin, size: compactSize)
 
         panel = FloatingPetPanel(
@@ -1095,7 +999,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        updateBackdropTheme(force: true)
         webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
     }
 
@@ -1117,7 +1020,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             }
             frame.origin = self.clampOrigin(NSPoint(x: nextX, y: frame.origin.y), size: frame.size)
             self.panel.setFrame(frame, display: true, animate: true)
-            self.updateBackdropTheme(force: false)
         }
     }
 
@@ -1385,14 +1287,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
-    // 배경 창이 바뀌거나 다크/라이트 화면이 전환될 때도 0.6초마다 배경 밝기를 감지
-    private func setupBackdropTimer() {
-        backdropTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
-            guard let self = self, self.panel.isVisible, !self.isDragging else { return }
-            self.updateBackdropTheme(force: false)
-        }
-    }
-
     @objc private func toggleBubble() {
         if mode == .menubar && !bubbleOpen {
             savedDesktopOrigin = savedDesktopOrigin ?? panel.frame.origin
@@ -1423,7 +1317,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     @objc private func toggleWander() {
         wanderEnabled.toggle()
-        wanderItem.title = wanderEnabled ? "산책 모드: 켜짐" : "산책 모드: 꺼짐"
+        wanderItem.state = wanderEnabled ? .on : .off
+        defaults.set(wanderEnabled, forKey: "ro.wander")
         webView?.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
     }
 
@@ -1438,7 +1333,24 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let vf = currentVisibleFrame()
         let origin = clampOrigin(NSPoint(x: vf.maxX - compactSize.width - 20, y: vf.minY + 18), size: compactSize)
         panel.setFrame(NSRect(origin: origin, size: compactSize), display: true, animate: true)
-        updateBackdropTheme(force: true)
+        savePosition(delay: 0.4)
+    }
+
+    private func menuSection(_ title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) { return NSMenuItem.sectionHeader(title: title) }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    /// 데스크톱 펫 자리(말풍선을 접은 기준)를 저장해 다음 실행 때 같은 곳에 띄운다.
+    private func savePosition(delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.mode == .desktop else { return }
+            let o = self.clampOrigin(self.currentPetOrigin(), size: self.compactSize)
+            self.defaults.set(Double(o.x), forKey: "ro.pos.x")
+            self.defaults.set(Double(o.y), forKey: "ro.pos.y")
+        }
     }
 
     @objc private func quitApp() {
@@ -1456,7 +1368,6 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let dy = CGFloat((dict["dy"] as? NSNumber)?.doubleValue ?? 0)
             let target = NSPoint(x: panel.frame.origin.x + dx, y: panel.frame.origin.y - dy)
             panel.setFrameOrigin(clampOrigin(target, size: panel.frame.size))
-            updateBackdropTheme(force: false)
         } else if type == "menu" {
             // 데스크톱 모드에선 상태 아이콘이 숨으므로 펫 우클릭이 같은 메뉴로 가는 길이다
             mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
@@ -1469,7 +1380,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "toggleWander" {
             let enabled = (dict["enabled"] as? Bool) ?? !wanderEnabled
             wanderEnabled = enabled
-            wanderItem?.title = wanderEnabled ? "산책 모드: 켜짐" : "산책 모드: 꺼짐"
+            wanderItem?.state = wanderEnabled ? .on : .off
+            defaults.set(wanderEnabled, forKey: "ro.wander")
         }
     }
 }

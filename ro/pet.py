@@ -4,7 +4,7 @@ CONSTRUCTION (정밀 그리드 규격 — 1u 기준):
 - 층 셋 높이: 머리 8u, 몸 6u, 바닥 6u, 층 사이 간격 1u, 양끝은 완전히 둥글다(캡슐형).
 - 층 셋 너비(기본): 머리 19u, 몸 15u, 바닥 23u (왼쪽 정렬: 왼쪽 끝이 맞고 오른쪽 끝만 19u/15u/23u로 들쭉날쭉).
 - 눈은 머리에만: 머리 왼쪽 끝에서 9u 지점에 왼쪽 눈(2u × 4u), 2u 간격을 두고 13u 지점에 오른쪽 눈(1.75u × 3.3u).
-- 몸짓은 층으로: 팔다리 대신 층이 밀리고(offset) 늘어나서(width) 6가지 감정을 만든다.
+- 층 크기(19u·15u·23u, 8u·6u·6u, 간격 1u)는 어떤 상태에서도 바뀌지 않는다. 감정은 눈과 층의 밀림(offset)으로만 만든다.
   1. 기본(idle): 평소의 ro (왼쪽 정렬, 왼눈이 살짝 큰 두 눈)
   2. 기록 중(recording): 아래를 보며 바닥 층이 길어진다
   3. 집중(focus): 하나만 본다 (일자 눈 '— —')
@@ -38,23 +38,22 @@ MOOD_LABELS = {
     "idle": "기본",
     "recording": "기록 중",
     "focus": "집중",
-    "anxious": "불안",
+    "anxious": "확인 필요",
     "discovery": "발견",
-    "resolved": "풀어냄",
+    "resolved": "해결",
 }
 MOOD_CAPTIONS = {
     "idle": "평소의 ro.",
-    "recording": "아래를 보며 바닥 층이 길어진다.",
+    "recording": "아래를 본다.",
     "focus": "하나만 본다.",
     "anxious": "눈이 작아지고 층이 어긋난다.",
     "discovery": "눈이 커지고 머리가 들린다.",
-    "resolved": "바닥이 길게 뻗는다.",
+    "resolved": "웃는다.",
 }
-MATERIALS = ("clay", "glass", "jelly")
+MATERIALS = ("clay", "glass")
 MATERIAL_LABELS = {
     "clay": "점토",
-    "glass": "리퀴드 글라스",
-    "jelly": "젤리",
+    "glass": "유리",
 }
 ACTIONS = (
     "breathe",
@@ -94,7 +93,7 @@ ACTION_DESCS = {
     "alert": "깜짝 솟구침 & 눈 커짐",
     "drowsy": "머리 침하 & 실눈 & 깊은 호흡",
     "gaze": "마우스 커서 시선 추적",
-    "pet": "폭신하게 눌림 & 눈웃음 (마우스 호버)",
+    "pet": "폭신하게 눌리며 웃는다 (마우스 호버)",
     "drag": "세로 늘어남 & 바닥 처짐 (드래그)",
     "shake": "층 좌우 요동 (빠른 흔들기)",
     "drop": "착지 스쿼시 & 스프링 탄성",
@@ -104,47 +103,39 @@ ACTION_DESCS = {
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
-AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
+PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk"),
+                "focus": (True, False)}
+RECENT_MAX = 10
+FILES_SHOWN = 30
+TIMELINE_MAX = 60
+PREVIEW_TTL_SEC = 600.0  # 보내기 전 확인을 받은 계획이 이보다 오래되면 다시 확인받는다
+CONTEXT_PREVIEW_CHARS = 700
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
 HEAD_U = 19
 BODY_U = 15
 BASE_U = 23
-MAX_U = 26
 
 
-def layer_widths(today_events_count, project_count=0, mood="idle"):
-    """CONSTRUCTION 정밀 그리드(몸 15u < 머리 19u < 바닥 23u, 왼쪽 정렬)를 따르는 층 너비.
-    평소에는 19u : 15u : 23u 고정 비례를 유지해 늘어나 보이지 않게 하고,
-    기록 중/집중/풀어냄 상태일 때만 바닥 층이 26u(1.0)까지 뻗는다.
-    """
-    head = round(HEAD_U / MAX_U, 3)  # 19u (0.731)
-    body = round(BODY_U / MAX_U, 3)  # 15u (0.577)
-    base = round(BASE_U / MAX_U, 3)  # 23u (0.885)
-    if mood in ("recording", "focus", "resolved"):
-        base = 1.0                   # 26u (바닥 층이 자란다)
-        if mood == "resolved":
-            body = round(13 / MAX_U, 3)
-    elif today_events_count > 0:
-        base = min(round(BASE_U / MAX_U, 3), round((BASE_U - 1 + min(today_events_count, 1)) / MAX_U, 3))
-    else:
-        base = round((BASE_U - 1) / MAX_U, 3)
-    return {"head": head, "body": body, "base": base,
-            "head_u": HEAD_U, "body_u": 13 if mood == "resolved" else BODY_U,
-            "base_u": MAX_U if mood in ("recording", "focus", "resolved") else BASE_U}
+def _batch_when(batch):
+    """배치 id(20261024-160545) → '10/24 16:05'. 형식이 다르면 그대로."""
+    try:
+        t = time.strptime(str(batch)[:15], "%Y%m%d-%H%M%S")
+    except ValueError:
+        return str(batch)
+    return time.strftime("%m/%d %H:%M", t)
 
 
-BASE_PX_MIN = 60
-BASE_PX_STEP = 3
-BASE_PX_MAX = 140
+def layer_widths():
+    """CONSTRUCTION 정밀 그리드: 머리 19u · 몸 15u · 바닥 23u (왼쪽 정렬). 어떤 상태에서도 바뀌지 않는다."""
+    return {"head_u": HEAD_U, "body_u": BODY_U, "base_u": BASE_U}
 
 
 def ambient_state(today_count, hour, focus=False, held=0, attention=False):
-    """패널을 열지 않아도 몸이 상태를 말한다: 바닥 층 길이=60+3×오늘 기록 수(최대 140)."""
+    """패널을 열지 않아도 알 수 있는 상태(시간대·오늘 기록 수·집중·확인 필요). 몸 크기는 바꾸지 않는다."""
     band = "아침" if hour < 12 else ("오후" if hour < 18 else "저녁")
-    return {"base_px": min(BASE_PX_MAX, BASE_PX_MIN + BASE_PX_STEP * today_count),
-            "band": band, "label": f"{band} · {today_count}건",
+    return {"band": band, "label": f"{band} · {today_count}건",
             "focus": bool(focus), "held": int(held) if focus else 0, "attention": bool(attention)}
 
 
@@ -173,32 +164,6 @@ def clamp_pet_origin(x, y, width, height, screen_rect, margin=6):
     lo_y = min_y + margin
     hi_y = max(lo_y, max_y - height - margin)
     return (min(max(x, lo_x), hi_x), min(max(y, lo_y), hi_y))
-
-
-def choose_theme_for_luminance(luminance, current_chalk=False):
-    """배경 밝기(0.0=검정 ~ 1.0=흰색)에 따라 먹(ink)과 분필(chalk)을 히스테리시스로 선택한다.
-    어두운 배경(<0.43) 위에서는 분필(chalk), 밝은 배경(>0.53) 위에서는 먹(ink).
-    """
-    if luminance < 0.43:
-        return "chalk"
-    if luminance > 0.53:
-        return "ink"
-    return "chalk" if current_chalk else "ink"
-
-
-def choose_material(mood="idle", luminance=0.5, hour=None):
-    """감정(mood)·배경 밝기(luminance)에 따라 3가지 재질 테마(점토·리퀴드 글라스·젤리)를 자동 선택한다.
-    - 발견(discovery) 또는 풀어냄(resolved): 젤리(jelly)
-    - 기록 중(recording), 집중(focus), 또는 밝은 배경(luminance > 0.65): 리퀴드 글라스(glass)
-    - 기본(idle) 및 불안(anxious): 점토(clay)
-    """
-    if mood in ("discovery", "resolved"):
-        return "jelly"
-    if mood in ("recording", "focus"):
-        return "glass"
-    if mood == "idle" and luminance is not None and luminance > 0.65:
-        return "glass"
-    return "clay"
 
 
 def icon_16px_grid():
@@ -249,9 +214,12 @@ class PetRuntime:
         self.action_until = 0.0
         self.focus_on = False
         self._focus_base = 0
+        self._preview = None
+        self._cancel = threading.Event()
+        self.focus_on = bool(self.prefs().get("focus"))  # 재시작해도 집중 모드를 이어 간다
 
     def trigger_action(self, action, duration=4.0):
-        """12가지 모션 상호작용(숨쉬기, 두리번, 걷기, 생각, 깜짝, 졸음, 시선, 쓰다듬기, 잡기, 흔들기, 착지, 성공, 실패)을 즉시 발동한다."""
+        """모션 상호작용(ACTIONS: 숨쉬기·두리번·걷기·생각·깜짝·졸음·시선·누름·쓰다듬기·끌기·흔들기·착지·성공·실패)을 즉시 발동한다."""
         if action not in ACTIONS:
             return {"ok": False, "error": f"지원하지 않는 상호작용: {action}"}
         now = time.time()
@@ -272,14 +240,27 @@ class PetRuntime:
             self.recording_until = now + RECORDING_WINDOW_SEC
 
     def _projects(self):
-        return (ask.load_map(self.map_path) or {}).get("projects", [])
+        return (ask.load_map(self.map_path, self.home) or {}).get("projects", [])
+
+    def prefs(self):
+        """펫 화면 설정(재질·색상·집중). ~/.ro/config.json의 "pet" 항목."""
+        p = config.load(self.home).get("pet")
+        return p if isinstance(p, dict) else {}
+
+    def set_prefs(self, changes):
+        clean = {k: v for k, v in (changes or {}).items() if v in PREF_CHOICES.get(k, ())}
+        if not clean:
+            return {"ok": False, "error": "저장할 수 없는 설정이에요."}
+        config.update(self.home, pet={**self.prefs(), **clean})
+        return {"ok": True, "prefs": self.prefs()}
 
     def set_focus(self, on):
         today = time.strftime("%Y-%m-%d")
         with self._lock:
             self.focus_on = bool(on)
-            self._focus_base = len([e for e in records.live(log.read_all(self.log_dir))
-                                    if str(e.get("ts", ""))[:10] == today])
+            self._focus_base = len([e for e in records.live(log.read(today, self.log_dir))
+                                    if records.is_user_record(e)])
+        self.set_prefs({"focus": self.focus_on})
         return {"ok": True, "focus": self.focus_on}
 
     def recall_question(self, question):
@@ -380,6 +361,7 @@ class PetRuntime:
                 q_bytes[i["kind"]] += i["size"]
         _, trashed = organize.trash_size(self.home)
         last = moves[-1]["batch"] if moves else None
+        review = [i for i in plan["items"] if i["review"] and i.get("action", "move") == "move"]
         return {
             "created": plan["created"],
             "dest_root": plan["dest_root"].replace(str(Path.home()), "~", 1),
@@ -387,9 +369,30 @@ class PetRuntime:
             "quarantine": [[k, organize.KIND_LABELS.get(k, k), q_n[k], q_bytes[k]] for k in q_n],
             "reclaim": sum(q_bytes.values()),
             "trashed": trashed,
-            "review": sum(i["review"] for i in plan["items"] if i.get("action", "move") == "move"),
-            "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves)} if last else None,
+            "review": len(review),
+            "review_names": [Path(i["path"]).name for i in review[:10]],
+            "recent_skipped": plan.get("recent_skipped", 0),
+            "total": len(plan["items"]),
+            "undo": {"batch": last, "count": sum(e["batch"] == last for e in moves),
+                     "when": _batch_when(last)} if last else None,
         }
+
+    def _plan_files(self, category=None, kind=None):
+        """승인 카드에 보여 줄 파일 이름(원래 이름 → 새 이름). 많으면 앞의 FILES_SHOWN개만."""
+        try:
+            plan = organize.load_plan(self.home)
+        except ValueError:
+            return [], 0
+        moved = {e["id"] for e in organize.pending(self.home, sources=("cleanup", "organize"))}
+        if kind:
+            picked = [i for i in plan["items"] if i.get("action") == "quarantine" and i.get("kind") == kind
+                      and not i["review"] and i["id"] not in moved]
+        else:
+            picked = [i for i in plan["items"] if organize.movable(i) and i["category"] == category
+                      and i["id"] not in moved]
+        files = [{"from": Path(i["path"]).name, "to": None if kind else Path(i["dest"]).name}
+                 for i in picked[:FILES_SHOWN]]
+        return files, max(0, len(picked) - FILES_SHOWN)
 
     def organize_scan(self):
         """읽기 전용 스캔으로 정리안을 새로 만든다. 파일은 옮기지 않는다."""
@@ -398,7 +401,7 @@ class PetRuntime:
         except (OSError, ValueError) as e:
             return {"ok": False, "output": str(e)}
         organize.save_plan(plan, self.home)
-        log.append("organize_scan", f"계획 {len(plan['items'])}건", {
+        log.append("organize_scan", f"정리안 {len(plan['items'])}건", {
             "count": len(plan["items"]), "review": sum(i["review"] for i in plan["items"]), "via": "pet"},
             log_dir=self.log_dir)
         return {"ok": True, "organize": self.organize_summary()}
@@ -417,16 +420,19 @@ class PetRuntime:
             if not group:
                 return {"ok": False, "output": "이 종류의 치울 후보가 없습니다. 정리안을 먼저 만드세요."}
             _, label, n, size = group
+            files, more = self._plan_files(kind=kind)
             return self._queue({"kind": "organize_apply", "category": None, "qkind": kind, "count": n,
-                                "plan_created": summary["created"],
-                                "task": f"치울 후보 격리: {label} {n}건({organize._mb(size)})을 ~/.ro/cleanup/trash로 "
-                                        "옮김 — 삭제 아님, 되돌리기 가능"})
+                                "plan_created": summary["created"], "files": files, "more": more,
+                                "task": f"{label} {n}건({organize._mb(size)})을 보관함(~/.ro/cleanup/trash)으로 "
+                                        "옮깁니다. 지우지 않고, 되돌릴 수 있어요."})
         n = dict(map(tuple, summary["counts"])).get(category, 0) if summary else 0
         if not n:
             return {"ok": False, "output": "이 카테고리에 옮길 항목이 없습니다. 정리안을 먼저 만드세요."}
+        files, more = self._plan_files(category=category)
         return self._queue({"kind": "organize_apply", "category": category, "count": n,
-                            "plan_created": summary["created"],
-                            "task": f"파일 정리: {category} {n}건을 {summary['dest_root']}/{category}로 이동"})
+                            "plan_created": summary["created"], "files": files, "more": more,
+                            "task": f"파일 정리: {category} {n}건을 {summary['dest_root']}/{category}로 옮기고 "
+                                    "이름을 바꿉니다."})
 
     def queue_organize_undo(self):
         summary = self.organize_summary()
@@ -434,7 +440,7 @@ class PetRuntime:
         if not undo:
             return {"ok": False, "output": "되돌릴 정리 기록이 없습니다."}
         return self._queue({"kind": "organize_undo", "batch": undo["batch"], "count": undo["count"],
-                            "task": f"정리 되돌리기: {undo['count']}건을 원래 이름·위치로 (batch {undo['batch']})"})
+                            "task": f"{undo['when']}에 정리한 {undo['count']}건을 원래 이름·위치로 되돌립니다."})
 
     def _run_organize(self, item):
         try:
@@ -496,13 +502,14 @@ class PetRuntime:
         now = now or time.time()
         day = time.strftime("%Y-%m-%d", time.localtime(now))
         today_events, cands, findings = self._disk_state(day)
-        mapdata = ask.load_map(self.map_path)
+        user_today = [e for e in today_events if records.is_user_record(e)]  # 펫 시작·스캔·질문은 기록이 아니다
+        mapdata = ask.load_map(self.map_path, self.home)
         projects = (mapdata or {}).get("projects", [])
 
         with self._lock:
-            if self._last_event_count is not None and len(today_events) > self._last_event_count:
+            if self._last_event_count is not None and len(user_today) > self._last_event_count:
                 self.recording_until = max(self.recording_until, now + RECORDING_WINDOW_SEC)
-            self._last_event_count = len(today_events)
+            self._last_event_count = len(user_today)
             busy = self.busy
             busy_task = self.busy_task
             write_pending = self.write_pending
@@ -526,7 +533,7 @@ class PetRuntime:
             status_line = f"집중 중: {busy_task or '기록을 살피며 풀어내는 중...'}"
         elif write_pending:
             mood = "anxious"
-            status_line = f"쓰기 승인 필요 ({write_pending['engine']}): {write_pending['task']}"
+            status_line = f"실행 전 확인이 필요해요: {write_pending['task']}"
         elif findings or last_route_failed:
             mood = "anxious"
             status_line = findings[0] if findings else "직전 작업이 실패해 확인이 필요해요."
@@ -538,21 +545,20 @@ class PetRuntime:
             status_line = "기록하고, 풀어냈습니다."
         elif now < recording_until:
             mood = "recording"
-            last_sum = today_events[-1]["summary"] if today_events else "새 이벤트"
+            last_sum = user_today[-1]["summary"] if user_today else "새 기록"
             status_line = f"기록 중... ({last_sum})"
         else:
             mood = "idle"
-            status_line = f"오늘 {len(today_events)}건 기록 완료 · 프로젝트 {len(projects)}개"
+            status_line = f"오늘 {len(user_today)}건 기록 · 프로젝트 {len(projects)}개"
 
-        recent_logs = [
-            {
-                "id": records.eid(e),
-                "ts": e.get("ts", "")[11:19],
-                "kind": e.get("kind", ""),
-                "summary": log.redact(str(e.get("summary", ""))),
-            }
-            for e in today_events[-10:]
-        ]
+        def row(e):
+            return {"id": records.eid(e), "ts": e.get("ts", "")[11:19], "kind": e.get("kind", ""),
+                    "kind_label": records.kind_label(e.get("kind", "")),
+                    "summary": log.redact(str(e.get("summary", "")))}
+
+        recent_logs = [row(e) for e in user_today[-RECENT_MAX:]]
+        timeline = [row(e) for e in today_events[-TIMELINE_MAX:]]
+        stats = Counter(records.kind_label(e.get("kind", "")) for e in today_events).most_common()
         safe_answer = None
         if last_answer:
             safe_answer = {
@@ -561,10 +567,12 @@ class PetRuntime:
                 "engine": last_answer["engine"],
                 "reason": last_answer["reason"],
                 "projects": last_answer["projects"],
+                "ok": last_answer.get("ok", True),
                 "feedback_given": last_answer.get("feedback_given", False),
             }
 
-        material = choose_material(mood=mood, hour=time.localtime(now).tm_hour)
+        material = self.prefs().get("material", "clay")
+        material = material if material in MATERIALS else "clay"
         return {
             "mood": mood,
             "mood_label": MOOD_LABELS[mood],
@@ -575,58 +583,118 @@ class PetRuntime:
             "material": material,
             "material_label": MATERIAL_LABELS[material],
             "status_line": log.redact(status_line),
-            "layers": layer_widths(len(today_events), len(projects), mood),
+            "layers": layer_widths(),
             "ambient": ambient_state(
-                len(today_events), time.localtime(now).tm_hour, focus=self.focus_on,
-                held=max(0, len(today_events) - self._focus_base),
+                len(user_today), time.localtime(now).tm_hour, focus=self.focus_on,
+                held=max(0, len(user_today) - self._focus_base),
                 attention=bool(write_pending or findings or last_route_failed or cands)),
             "offsets": layer_offsets(mood),
+            "health": "attention" if (findings or last_route_failed) else "ok",
             "counts": {
                 "today_events": len(today_events),
+                "today_records": len(user_today),
                 "projects": len(projects),
                 "pending_rules": len(cands),
                 "audit_findings": len(findings),
             },
             "project_names": [p["name"] for p in projects][:40],
+            "map_age_days": ask.map_age_days(mapdata),
             "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
             "organize": self.organize_summary(),
             "audit_findings": [log.redact(f) for f in findings[:3]],
             "recent_logs": recent_logs,
+            "timeline": timeline,
+            "prefs": self.prefs(),
+            "stats": stats,
             "last_answer": safe_answer,
             "colors": {"black": BLACK, "cream": CREAM},
         }
 
-    def ask_question(self, question, engine=None, project=None, cwd=None):
-        """읽기 전용으로 질문을 실행하고 결과를 저장한다."""
+    def _plan(self, question, engine=None, project=None, cwd=None):
+        mapdata = ask.load_map(self.map_path, self.home)
+        if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
+            return None, {"ok": False, "reason": "needs_setup",
+                          "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
+        # 펫이 실행된 폴더(os.getcwd())는 사용자가 지금 보는 곳이 아니다: 질문이 가리키는 프로젝트만 붙인다
+        pl = ask.plan(question, mapdata, cwd=cwd, use_context=True,
+                      engine=engine or config.load(self.home).get("engine") or None,
+                      rules=learn.load_rules(self.home), project=project)
+        return pl, None
+
+    def preview_question(self, question, engine=None, project=None):
+        """보내기 전에 무엇이 어디로 가는지 보여 준다(CLI의 전송 전 미리보기와 같다). 아무것도 보내지 않는다."""
         question = (question or "").strip()
         if not question:
             return {"ok": False, "output": "질문을 입력해 주세요."}
-        mapdata = ask.load_map(self.map_path)
-        if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
-            return {"ok": False, "reason": "needs_setup",
-                    "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
-        rules = learn.load_rules(self.home)
-        pl = ask.plan(question, mapdata, cwd=cwd or os.getcwd(), use_context=True,
-                      engine=engine or config.load(self.home).get("engine") or None, rules=rules, project=project)
+        pl, err = self._plan(question, engine, project)
+        if err:
+            return err
+        pid = secrets.token_hex(6)
+        with self._lock:
+            self._preview = {"id": pid, "question": question, "plan": pl, "ts": time.time()}
+        age = ask.map_age_days(ask.load_map(self.map_path, self.home)) if pl["projects"] else None
+        return {"ok": True, "id": pid, "engine": pl["engine"], "reason": pl["reason"], "projects": pl["projects"],
+                "context_chars": len(pl["context"]),
+                "map_stale_days": age if age is not None and age >= ask.MAP_STALE_DAYS else None,
+                "context_preview": log.redact(pl["context"][:CONTEXT_PREVIEW_CHARS])}
+
+    def cancel_ask(self):
+        with self._lock:
+            busy = self.busy
+        if busy:
+            self._cancel.set()
+        return {"ok": busy}
+
+    @staticmethod
+    def _failure_text(engine, res):
+        """엔진 실패 원문(영어 오류 등)을 그대로 답처럼 보여 주지 않는다."""
+        msg = route.explain(engine, res.get("reason") or "failed")
+        raw = (res.get("output") or "").strip()
+        if res.get("reason") in ("failed", "") and raw:
+            msg += f"\n\n원문: {raw[:300]}"
+        return msg
+
+    def ask_question(self, question, engine=None, project=None, cwd=None, preview_id=None):
+        """읽기 전용으로 질문을 실행하고 결과를 저장한다. preview_id를 주면 확인받은 그 계획 그대로 보낸다."""
+        question = (question or "").strip()
+        if not question:
+            return {"ok": False, "output": "질문을 입력해 주세요."}
+        if preview_id is not None:
+            with self._lock:
+                pv = self._preview
+            if (not pv or pv["id"] != preview_id or pv["question"] != question
+                    or time.time() - pv["ts"] > PREVIEW_TTL_SEC):
+                return {"ok": False, "reason": "needs_preview", "output": "보낼 내용을 다시 확인해 주세요."}
+            pl = pv["plan"]
+        else:
+            pl, err = self._plan(question, engine, project, cwd)
+            if err:
+                return err
         with self._lock:
             if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
                 return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
             self.busy = True
             self.busy_task = log.redact(question[:60])
+            self._preview = None
+            self._cancel.clear()
         try:
-            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=pl["cwd"], model=pl.get("model", ""))
+            run_cwd = pl.get("cwd") or str(Path.home())
+            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=run_cwd, model=pl.get("model", ""),
+                            skip_git_check=not pl.get("cwd"), cancel=self._cancel)
             log.append("route", question[:80], {
-                "engine": pl["engine"], "category": pl["category"], "mode": "read",
-                "ok": res["ok"], "code": res["code"], "duration": res["duration"],
-                "projects": pl["projects"], "model": pl.get("model", ""), "context_chars": len(pl["context"]), "via": "pet",
+                "engine": pl["engine"], "category": pl.get("category"), "mode": "read",
+                "ok": res["ok"], "code": res.get("code"), "duration": res.get("duration"),
+                "projects": pl.get("projects", []), "model": pl.get("model", ""),
+                "context_chars": len(pl.get("context", "")), "via": "pet",
             }, engine=pl["engine"], log_dir=self.log_dir)
+            output = (res["output"] or "(출력 없음)") if res["ok"] else self._failure_text(pl["engine"], res)
             ans = {
                 "question": log.redact(question),
-                "output": log.redact(res["output"] or "(출력 없음)"),
+                "output": log.redact(output),
                 "engine": pl["engine"],
-                "reason": pl["reason"],
-                "projects": pl["projects"],
+                "reason": pl.get("reason", ""),
+                "projects": pl.get("projects", []),
                 "plan": pl,
                 "ok": res["ok"],
                 "feedback_given": False,
@@ -638,6 +706,7 @@ class PetRuntime:
                     self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
             return {
                 "ok": res["ok"],
+                "cancelled": res.get("reason") == "cancelled",
                 "engine": ans["engine"],
                 "reason": ans["reason"],
                 "projects": ans["projects"],
@@ -653,6 +722,8 @@ class PetRuntime:
             ans = self.last_answer
             if not ans:
                 return {"ok": False, "output": "평가할 직전 답변이 없습니다."}
+            if not ans.get("ok", True):
+                return {"ok": False, "output": "실패한 답에는 평가를 남기지 않습니다."}
             ans["feedback_given"] = True
             self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
         log.append("feedback", "수용" if accepted else "거절", {
@@ -692,8 +763,8 @@ PET_HTML = r"""<!DOCTYPE html>
     --accent-text: #C73310;
     --accent-hover: #E03E15;
     --accent-soft: rgba(255, 75, 31, 0.12);
-    --bot-fill: var(--ink);
-    --bot-eye: var(--chalk);
+    --bot-fill: var(--chalk);
+    --bot-eye: var(--ink);
     --panel-bg: #FFFFFF;
     --panel-fg: var(--ink);
     --panel-soft: #F4F0E8;
@@ -705,8 +776,8 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   /* 분필(Chalk) 다크 모드 */
   body.theme-chalk {
-    --bot-fill: var(--chalk);
-    --bot-eye: var(--ink);
+    --bot-fill: var(--ink);
+    --bot-eye: var(--chalk);
     --panel-bg: #232220;
     --panel-fg: #F3EFE6;
     --panel-soft: #2E2C29;
@@ -769,8 +840,15 @@ PET_HTML = r"""<!DOCTYPE html>
     transform-origin: bottom right;
     position: relative;
     max-height: 440px;
+    /* 오버레이 창(360×530)에서 펫 높이를 뺀 만큼만 차지한다: 넘치면 탭 내용만 스크롤 */
+    min-height: 0;
+    flex: 0 1 auto;
     box-sizing: border-box;
   }
+  .bubble > .bubble-top, .bubble > .ask-form, .bubble > .toast { flex-shrink: 0; }
+  /* 확인 카드는 공간이 모자라면 카드 안에서 스크롤하고, 탭 내용도 최소 높이는 남긴다 */
+  .bubble > .gate-box { flex: 0 0 auto; max-height: 180px; overflow-y: auto; }
+  .bubble > .tab-pane.active { min-height: 60px; }
   .bubble.hidden {
     display: none;
   }
@@ -836,21 +914,6 @@ PET_HTML = r"""<!DOCTYPE html>
     font-weight: 900;
     letter-spacing: -0.03em;
     color: var(--panel-fg);
-  }
-  .mood-tag {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    padding: 2px 7px;
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: all 0.14s;
-  }
-  .mood-tag:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
   }
   .nav-tabs {
     display: flex;
@@ -1019,17 +1082,26 @@ PET_HTML = r"""<!DOCTYPE html>
     font-size: 10px;
     font-weight: 800;
     color: var(--accent-text);
-    text-transform: uppercase;
     letter-spacing: 0.02em;
   }
   .gate-body {
     font-size: 11px;
     line-height: 1.35;
-    word-break: break-all;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
     color: var(--panel-fg);
   }
+  .gate-files {
+    margin: 0; padding: 0 0 0 2px; list-style: none; max-height: 92px; overflow-y: auto;
+    font-size: 10.5px; line-height: 1.4; color: var(--panel-fg);
+  }
+  .gate-files li { display: flex; gap: 4px; white-space: nowrap; }
+  .gate-files li span { overflow: hidden; text-overflow: ellipsis; }
+  .gate-files li .arrow { color: var(--muted); flex-shrink: 0; }
+  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 10px; color: var(--muted); }
   .gate-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin-top: 2px;
   }
@@ -1196,9 +1268,6 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     gap: 5px;
-    max-height: 115px;
-    overflow-y: auto;
-    padding-right: 2px;
   }
   .activity-card {
     display: flex;
@@ -1324,9 +1393,6 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     gap: 6px;
-    max-height: 245px;
-    overflow-y: auto;
-    padding-right: 2px;
   }
   .timeline-row {
     display: flex;
@@ -1370,9 +1436,6 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: 260px;
-    overflow-y: auto;
-    padding-right: 2px;
   }
   .setting-block {
     display: flex;
@@ -1538,6 +1601,7 @@ PET_HTML = r"""<!DOCTYPE html>
      ========================================================= */
   .pet-wrap {
     --u: 3.8px;
+    flex-shrink: 0;
     position: relative;
     display: flex;
     flex-direction: column;
@@ -1584,91 +1648,40 @@ PET_HTML = r"""<!DOCTYPE html>
     height: calc(6 * var(--u));
   }
 
-  /* 점토(Clay) 모드 */
+  /* 점토(clay): 색상 모드가 적용되는 유일한 재질. 라이트=밝은 점토, 다크=검은 점토 */
   body.material-clay .pill {
-    box-shadow:
-      inset 0 2.5px 4px rgba(255, 255, 255, 0.22),
-      inset 0 -3px 5px rgba(0, 0, 0, 0.38),
-      0 2px 5px rgba(15, 14, 13, 0.22);
-  }
-  body.theme-chalk.material-clay .pill {
+    border: 1px solid rgba(26, 25, 23, 0.14);
     box-shadow:
       inset 0 3px 5px rgba(255, 255, 255, 0.92),
       inset 0 -3px 6px rgba(26, 25, 23, 0.20),
       0 3px 7px rgba(15, 14, 13, 0.32);
   }
-  body.theme-chalk .pill {
-    border: 1px solid rgba(26, 25, 23, 0.14);
+  body.theme-chalk.material-clay .pill {
+    border: none;
+    box-shadow:
+      inset 0 2.5px 4px rgba(255, 255, 255, 0.22),
+      inset 0 -3px 5px rgba(0, 0, 0, 0.38),
+      0 2px 5px rgba(15, 14, 13, 0.22);
   }
 
-  /* 리퀴드 글라스(Liquid Glass) 모드 */
-  body.material-glass .ro-bot {
-    filter: drop-shadow(0 9px 18px rgba(15, 14, 13, 0.16));
-  }
+  /* 유리(glass): 색 없는 투명 유리. 색상 모드와 상관없이 같다(뒤 배경이 그대로 비친다) */
+  body.material-glass .ro-bot { filter: drop-shadow(0 6px 12px rgba(15, 14, 13, 0.12)); }
   body.material-glass .pill {
     z-index: 1;
     overflow: hidden;
-    background: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.72) 0%,
-      rgba(252, 251, 248, 0.54) 52%,
-      rgba(240, 238, 230, 0.62) 100%
-    );
-    border: 1px solid rgba(255, 255, 255, 0.88);
-    backdrop-filter: blur(12px) saturate(145%);
-    -webkit-backdrop-filter: blur(12px) saturate(145%);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.04) 60%, rgba(255, 255, 255, 0.08) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
     box-shadow:
-      inset 0 1.5px 3px rgba(255, 255, 255, 0.92),
-      inset 0 -2px 4px rgba(26, 25, 23, 0.18),
-      inset 2.5px 0 3px rgba(255, 255, 255, 0.55),
-      inset -2.5px 0 3px rgba(255, 255, 255, 0.45),
-      0 4px 10px rgba(15, 14, 13, 0.12);
+      inset 0 1.5px 2px rgba(255, 255, 255, 0.7),
+      inset 0 -1.5px 3px rgba(0, 0, 0, 0.10),
+      0 0 0 0.5px rgba(0, 0, 0, 0.12);
   }
+  body.material-glass { --bot-eye: #1A1917; }  /* 눈 색도 색상 모드를 따르지 않는다 */
   body.material-glass .eyes { z-index: 2; }
-  body.material-glass .eye { background: #1A1917; }
+  body.material-glass .eye { background: #1A1917; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7); }
   body.material-glass .resolved-arch { stroke: #1A1917; }
-  body.theme-chalk.material-glass .pill {
-    background: linear-gradient(
-      180deg,
-      rgba(55, 53, 50, 0.72) 0%,
-      rgba(38, 36, 34, 0.62) 55%,
-      rgba(26, 25, 23, 0.78) 100%
-    );
-    border: 1px solid rgba(255, 255, 255, 0.24);
-    box-shadow:
-      inset 0 1.5px 3px rgba(255, 255, 255, 0.42),
-      inset 0 -2px 4px rgba(0, 0, 0, 0.65),
-      inset 2px 0 3px rgba(255, 255, 255, 0.28),
-      inset -2px 0 3px rgba(255, 255, 255, 0.18),
-      0 6px 14px rgba(0, 0, 0, 0.42);
-  }
-  body.theme-chalk.material-glass .eye { background: #F3EFE6; }
-  body.theme-chalk.material-glass .resolved-arch { stroke: #F3EFE6; }
-
-  /* 젤리(Jelly) 모드 */
-  body.material-jelly .ro-bot {
-    filter: drop-shadow(0 6px 14px rgba(15, 14, 13, 0.20));
-  }
-  body.material-jelly .pill {
-    z-index: 1;
-    overflow: hidden;
-    background: linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.90) 0%,
-      rgba(250, 248, 242, 0.78) 45%,
-      rgba(235, 231, 220, 0.86) 100%
-    );
-    border: 1px solid rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
-    box-shadow:
-      inset 0 3px 5px rgba(255, 255, 255, 0.98),
-      inset 0 -3px 5px rgba(26, 25, 23, 0.16),
-      0 3px 8px rgba(15, 14, 13, 0.14);
-  }
-  body.material-jelly .eyes { z-index: 2; }
-  body.material-jelly .eye { background: #1A1917; }
-  body.material-jelly .resolved-arch { stroke: #1A1917; }
 
   /* 눈 둘 */
   .eyes {
@@ -1695,8 +1708,8 @@ PET_HTML = r"""<!DOCTYPE html>
     height: calc(4 * var(--u));
   }
   .eye-r {
-    width: calc(1.8 * var(--u));
-    height: calc(3.3 * var(--u));
+    width: calc(1.75 * var(--u));
+    height: calc(3.25 * var(--u));
   }
   .eye.blink { height: 2.5px !important; }
 
@@ -1719,19 +1732,11 @@ PET_HTML = r"""<!DOCTYPE html>
   .mood-recording .eyes { top: 66%; }
   .mood-recording .eye-l { width: calc(1.8 * var(--u)); height: calc(1.9 * var(--u)); }
   .mood-recording .eye-r { width: calc(1.6 * var(--u)); height: calc(1.7 * var(--u)); }
-  .mood-recording .pill-base {
-    width: calc(25.5 * var(--u)) !important;
-    animation: baseGrow 0.95s infinite alternate ease-in-out;
-  }
 
   .mood-focus .eyes { left: calc(8.6 * var(--u)); gap: calc(1.4 * var(--u)); }
   .mood-focus .eye-l { width: calc(2.8 * var(--u)); height: calc(1.3 * var(--u)); border-radius: 999px; }
   .mood-focus .eye-r { width: calc(2.5 * var(--u)); height: calc(1.3 * var(--u)); border-radius: 999px; }
   .mood-focus .pill-head { transform: translateX(calc(0.5 * var(--u))); }
-  .mood-focus .pill-base {
-    width: calc(25.5 * var(--u)) !important;
-    animation: baseGrow 0.85s infinite alternate ease-in-out;
-  }
 
   .mood-anxious .eye-l { width: calc(1.5 * var(--u)); height: calc(1.7 * var(--u)); }
   .mood-anxious .eye-r { width: calc(1.2 * var(--u)); height: calc(1.4 * var(--u)); }
@@ -1742,17 +1747,14 @@ PET_HTML = r"""<!DOCTYPE html>
   .mood-discovery .eye-l { width: calc(2.6 * var(--u)); height: calc(3.0 * var(--u)); border-radius: 50%; }
   .mood-discovery .eye-r { width: calc(2.1 * var(--u)); height: calc(2.5 * var(--u)); border-radius: 50%; }
   .mood-discovery .pill-head {
-    margin-bottom: calc(1 * var(--u));
     transform: translateY(calc(-0.7 * var(--u)));
   }
 
   .mood-resolved .eyes { left: calc(8.8 * var(--u)); }
   .mood-resolved .eye { display: none; }
   .mood-resolved .resolved-arch { display: block; }
-  .mood-resolved .pill-body { width: calc(13 * var(--u)) !important; }
-  .mood-resolved .pill-base { width: calc(25.5 * var(--u)) !important; }
 
-  /* 12종 모션 키프레임 & 액션 */
+  /* 모션 키프레임 & 액션 */
   @keyframes breatheHead {
     0%, 100% { transform: translateY(0) scaleX(1); }
     22%      { transform: translateY(-2.2px) scaleX(0.985); }
@@ -1849,10 +1851,9 @@ PET_HTML = r"""<!DOCTYPE html>
   .action-pet .pill-head {
     transform: translateY(calc(1.4 * var(--u))) scaleX(1.04);
   }
-  .action-pet .eye-l, .action-pet .eye-r {
-    height: 2px !important;
-    border-radius: 999px;
-  }
+  /* 쓰다듬으면 웃는다(⌒ ⌒) */
+  .action-pet .eye { display: none; }
+  .action-pet .resolved-arch { display: block; }
   .action-pet .pill-body { transform: translateY(calc(0.6 * var(--u))); }
 
   .action-drag .ro-bot {
@@ -1916,10 +1917,6 @@ PET_HTML = r"""<!DOCTYPE html>
     80%      { transform: translateX(3px); }
   }
 
-  @keyframes baseGrow {
-    0% { width: calc(19 * var(--u)); }
-    100% { width: calc(25.5 * var(--u)); }
-  }
 
   .pet-label {
     margin-top: 5px;
@@ -1957,15 +1954,26 @@ PET_HTML = r"""<!DOCTYPE html>
   .fb-done { font-size: 10.5px; color: var(--muted); }
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-cats:empty, .org-msg:empty { display: none; }
-  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; }
+  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+  .org-summary code, .org-msg code { white-space: nowrap; font: inherit; font-weight: 700; }
+  .block-sub { font-size: 10px; color: var(--muted); line-height: 1.4; }
+  .preview-block > summary { cursor: pointer; list-style: revert; }
+  .preview-block[open] { gap: 6px; }
+  .link-btn {
+    align-self: flex-start; background: none; border: none; padding: 2px 0; font: inherit; font-size: 10.5px;
+    font-weight: 700; color: var(--accent-text); cursor: pointer;
+  }
+  .view-block { display: flex; flex-direction: column; gap: 6px; }
+  .stats-list { display: flex; flex-direction: column; gap: 5px; }
+  .stats-row { display: grid; grid-template-columns: 76px 1fr 26px; align-items: center; gap: 6px; font-size: 10.5px; }
+  .stats-row .bar { height: 6px; border-radius: 3px; background: var(--accent); min-width: 3px; }
+  .stats-row .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 700; }
+  .stats-empty { font-size: 10.5px; color: var(--muted); text-align: center; padding: 10px 0; }
+  .timeline-more { font-size: 10px; color: var(--muted); text-align: center; padding: 2px 0 4px; }
+  .nav-tab { font-size: 11px !important; }
+  body.theme-chalk .nav-tab.active { background: var(--chalk); color: var(--ink); }
   .mini-btn.quar { background: transparent; }
   .bubble { max-width: 100%; }
-  /* E · 앰비언트: 바닥 층 길이가 오늘 기록 수를 말한다 */
-  .ro-bot { width: max(calc(23 * var(--u)), var(--base-px, 0px)); }
-  .mood-idle .pill-base, .mood-discovery .pill-base, .mood-anxious .pill-base {
-    width: var(--base-px, calc(23 * var(--u))) !important;
-  }
-  .pill-base { transition: width 400ms var(--spring), transform 0.28s cubic-bezier(.22, 1, .36, 1), background-color 0.2s ease; }
   .pet-wrap.focus-mode .eye-l, .pet-wrap.focus-mode .eye-r {
     width: calc(2.2 * var(--u)) !important;
     height: 2.5px !important;
@@ -2055,13 +2063,21 @@ PET_HTML = r"""<!DOCTYPE html>
   .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 9.5px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
   /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
-  .tab-pane.active { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+  .tab-pane.active {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-width: thin;
+    scrollbar-gutter: stable; padding: 0 3px 12px 0; margin-right: -4px;
+    /* 아래로 더 있으면 입력창 앞에서 끊기지 않고 흐려지게 */
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent);
+            mask-image: linear-gradient(to bottom, #000 calc(100% - 12px), transparent);
+  }
   .tab-pane.active > * { flex-shrink: 0; }
   .streak { position: absolute; height: 2.5px; width: 12px; border-radius: 2px; background: var(--muted); opacity: 0; pointer-events: none; }
   .pet-wrap[data-motion] .pet-label { opacity: 0; }
   .pet-label { transition: opacity 0.18s ease; }
   /* 모션 엔진 눈 모양: > <  ∩ ∩  - -  ◍ ◍  C ɔ */
   .pet-wrap[data-motion] .pill { animation: none !important; }
+  /* 모션 엔진이 움직이는 동안에는 CSS 동작 애니메이션이 몸 전체를 따로 흔들지 않는다 */
+  .pet-wrap[data-motion] .ro-bot { animation: none !important; transform: none !important; }
   .pet-wrap[data-eyes] .eye { transition: none !important; box-sizing: border-box; }
   .pet-wrap[data-eyes="squint"] .eye, .pet-wrap[data-eyes="happy"] .eye, .pet-wrap[data-eyes="swirl"] .eye {
     background: transparent !important; border: 0 solid var(--bot-eye); border-radius: 0;
@@ -2109,11 +2125,11 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="bubbleTop" class="bubble-top" title="드래그하여 이동">
       <div class="top-left">
         <span class="brand-tag">ro</span>
-        <button id="moodPill" class="mood-tag" title="클릭하여 표정 미리보기">기본</button>
       </div>
       <div class="nav-tabs">
-        <button id="tabBtnHome" class="nav-tab active" data-tab="home">기본</button>
+        <button id="tabBtnHome" class="nav-tab active" data-tab="home">홈</button>
         <button id="tabBtnTimeline" class="nav-tab" data-tab="timeline">타임라인</button>
+        <button id="tabBtnOrganize" class="nav-tab" data-tab="organize">정리</button>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
@@ -2129,9 +2145,9 @@ PET_HTML = r"""<!DOCTYPE html>
       <div class="greeting-section">
         <div id="greetingTitle" class="greeting-title">오늘 새로 시작했어요.</div>
         <div id="greetingSub" class="greeting-sub">기록이 시작되면 여기에 요약이 표시됩니다</div>
-        <div class="sub-filters">
-          <button id="filterSummaryBtn" class="sub-pill active">기록 요약</button>
-          <button id="filterStatsBtn" class="sub-pill">통계</button>
+        <div class="sub-filters" role="group" aria-label="보기">
+          <button id="filterSummaryBtn" class="sub-pill active" aria-pressed="true">최근 기록</button>
+          <button id="filterStatsBtn" class="sub-pill" aria-pressed="false">통계</button>
         </div>
       </div>
 
@@ -2148,18 +2164,8 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
         <div class="metric-sep"></div>
         <div class="metric-item">
-          <div id="metricTime" class="metric-value">--:--</div>
-          <div class="metric-label">활동 시각</div>
-        </div>
-      </div>
-
-      <!-- 쓰기 승인 게이트 카드 -->
-      <div id="writeCard" class="gate-box" style="display:none;">
-        <div class="gate-head">쓰기 작업 직전 승인 (불안)</div>
-        <div id="writeText" class="gate-body"></div>
-        <div class="gate-actions">
-          <button id="writeApproveBtn" class="action-btn primary">승인 후 실행</button>
-          <button id="writeRejectBtn" class="action-btn ghost">취소</button>
+          <div id="metricAttention" class="metric-value">0</div>
+          <div class="metric-label">확인할 일</div>
         </div>
       </div>
 
@@ -2187,10 +2193,11 @@ PET_HTML = r"""<!DOCTYPE html>
           <div id="roMainBubble" class="ro-pill">기록하고, 풀어낸다.</div>
         </div>
         <div class="ro-sub-row">
-          <span id="subStatusText">기록 완료</span>
+          <span id="subStatusText"></span>
+          <button id="askCancelBtn" class="fb-btn" type="button" style="display:none;">취소</button>
           <span id="feedbackBtns" class="feedback-chips" style="display:none;">
-            <button id="fbYes" class="fb-btn" title="첫 답변 수용">수용</button>
-            <button id="fbNo" class="fb-btn" title="아쉬움">거절</button>
+            <button id="fbYes" class="fb-btn" title="이 답이 도움이 됐어요">도움됨</button>
+            <button id="fbNo" class="fb-btn" title="이 답이 아쉬워요">아쉬움</button>
           </span>
           <span id="fbDone" class="fb-done" style="display:none;"></span>
         </div>
@@ -2201,57 +2208,59 @@ PET_HTML = r"""<!DOCTYPE html>
       <!-- D · 미리 보고 되돌리는 정리 -->
       <div id="recOrgCard" class="rec-org-card" style="display:none;" aria-live="polite"></div>
 
-      <!-- 최근 활동 섹션 -->
-      <div class="section-row">
-        <span class="section-label">최근 활동</span>
-        <span id="logCountBadge" class="section-badge">0건</span>
+      <!-- 최근 기록 / 통계 (위 보기 버튼으로 전환) -->
+      <div id="summaryView" class="view-block">
+        <div class="section-row">
+          <span class="section-label">최근 기록</span>
+          <span id="logCountBadge" class="section-badge">0건</span>
+        </div>
+        <div id="activityList" class="activity-stream"></div>
+        <button id="activityMoreBtn" class="link-btn" type="button" style="display:none;">타임라인에서 전체 보기</button>
       </div>
-      <div id="activityList" class="activity-stream"></div>
+      <div id="statsView" class="view-block" style="display:none;">
+        <div class="section-row">
+          <span class="section-label">오늘 종류별</span>
+          <span id="statsTotal" class="section-badge">0건</span>
+        </div>
+        <div id="statsList" class="stats-list"></div>
+      </div>
     </div>
 
     <!-- 2. 타임라인 (Timeline) 탭 -->
     <div id="paneTimeline" class="tab-pane">
       <div class="timeline-head-row">
-        <span class="orange-tag">기록 타임라인</span>
-        <span id="timelineCountText" class="timeline-counter">오늘 0건</span>
+        <span class="orange-tag">오늘 타임라인</span>
+        <span id="timelineCountText" class="timeline-counter">0건</span>
       </div>
       <div id="timelineList" class="timeline-stream"></div>
+      <div id="timelineMore" class="timeline-more" style="display:none;"></div>
     </div>
 
-    <!-- 3. 설정 (Settings) 탭 -->
+    <!-- 3. 정리 탭: 정리안(카테고리별 건수) → 버튼 = 승인 요청 → 아래 승인 카드에서 실행 -->
+    <div id="paneOrganize" class="tab-pane">
+      <div class="setting-block" id="fileOrgBlock">
+        <div class="block-title">다운로드 정리 (승인 전에는 옮기지 않음)</div>
+        <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
+        <div id="orgCats" class="org-cats"></div>
+        <div id="orgQuar" class="org-cats"></div>
+        <div class="options-row">
+          <button id="orgScanBtn" class="opt-btn">정리안 만들기</button>
+          <button id="orgUndoBtn" class="opt-btn" style="display:none;">되돌리기</button>
+        </div>
+        <div id="orgMsg" class="org-msg" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <!-- 4. 설정 탭 -->
     <div id="paneSettings" class="tab-pane">
       <div class="settings-stream">
-        <!-- 파일 정리: 정리안(카테고리별 건수) → 카테고리 버튼 = 쓰기 승인 요청 → 홈의 승인 카드에서 실행 -->
-        <div class="setting-block" id="fileOrgBlock">
-          <div class="block-title">파일 정리 (승인 전에는 옮기지 않음)</div>
-          <div id="orgSummary" class="org-summary">정리안이 없습니다. 먼저 정리안을 만드세요.</div>
-          <div id="orgCats" class="org-cats"></div>
-          <div id="orgQuar" class="org-cats"></div>
-          <div class="options-row">
-            <button id="orgScanBtn" class="opt-btn">정리안 만들기</button>
-            <button id="orgUndoBtn" class="opt-btn" style="display:none;">되돌리기</button>
-          </div>
-          <div id="orgMsg" class="org-msg"></div>
-        </div>
-
         <!-- 집중 모드 -->
         <div class="setting-block">
           <div class="block-title">집중 모드</div>
           <div class="options-row">
-            <button id="focusBtn" class="opt-btn" aria-pressed="false">눈 감고 알림 모아두기</button>
+            <button id="focusBtn" class="opt-btn" aria-pressed="false">집중 모드 켜기</button>
           </div>
-        </div>
-        <!-- 표정 6종 -->
-        <div class="setting-block">
-          <div class="block-title">표정 (6종)</div>
-          <div class="mood-grid">
-            <button class="mood-btn" data-mood="idle">기본</button>
-            <button class="mood-btn" data-mood="recording">기록 중</button>
-            <button class="mood-btn" data-mood="focus">집중</button>
-            <button class="mood-btn" data-mood="anxious">불안</button>
-            <button class="mood-btn" data-mood="discovery">발견</button>
-            <button class="mood-btn" data-mood="resolved">풀어냄</button>
-          </div>
+          <div class="block-sub">켜면 눈을 감고 알림을 모아 둡니다</div>
         </div>
 
         <!-- 재질 3종 -->
@@ -2259,9 +2268,7 @@ PET_HTML = r"""<!DOCTYPE html>
           <div class="block-title">재질</div>
           <div class="options-row">
             <button class="opt-btn mat-opt" data-mat="clay">점토</button>
-            <button class="opt-btn mat-opt" data-mat="glass">글라스</button>
-            <button class="opt-btn mat-opt" data-mat="jelly">젤리</button>
-            <button class="opt-btn mat-opt" data-mat="auto">자동</button>
+            <button class="opt-btn mat-opt" data-mat="glass">유리</button>
           </div>
         </div>
 
@@ -2269,18 +2276,18 @@ PET_HTML = r"""<!DOCTYPE html>
         <div class="setting-block">
           <div class="block-title">색상 모드</div>
           <div class="options-row">
-            <button class="opt-btn theme-opt" data-theme="ink">먹 (라이트)</button>
-            <button class="opt-btn theme-opt" data-theme="chalk">분필 (다크)</button>
-            <button class="opt-btn theme-opt" data-theme="auto">자동 감지</button>
+            <button class="opt-btn theme-opt" data-theme="ink">라이트</button>
+            <button class="opt-btn theme-opt" data-theme="chalk">다크</button>
+            <button class="opt-btn theme-opt" data-theme="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
           </div>
         </div>
 
-        <!-- 자동 방랑 스위치 -->
+        <!-- 돌아다니기 스위치 -->
         <div class="setting-block">
           <div class="toggle-row">
             <div class="toggle-text">
-              <span class="toggle-name">자동 방랑 (Wander)</span>
-              <span class="toggle-sub">화면 하단을 스스로 천천히 배회합니다</span>
+              <span class="toggle-name">돌아다니기</span>
+              <span class="toggle-sub">화면 아래쪽을 천천히 돌아다닙니다</span>
             </div>
             <label class="switch">
               <input id="wanderToggle" type="checkbox" aria-label="돌아다니기">
@@ -2289,9 +2296,18 @@ PET_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- 모션 상호작용 12종 -->
-        <div class="setting-block">
-          <div class="block-title">모션 상호작용 (12종)</div>
+        <!-- 표정·모션 미리보기 (설정이 아니라 구경용이라 접어 둔다) -->
+        <details class="setting-block preview-block">
+          <summary class="block-title">표정·모션 미리보기</summary>
+          <div class="block-sub">눌러 보기만 하고 저장되지 않습니다</div>
+          <div class="mood-grid">
+            <button class="mood-btn" data-mood="idle">기본</button>
+            <button class="mood-btn" data-mood="recording">기록 중</button>
+            <button class="mood-btn" data-mood="focus">집중</button>
+            <button class="mood-btn" data-mood="anxious">확인 필요</button>
+            <button class="mood-btn" data-mood="discovery">발견</button>
+            <button class="mood-btn" data-mood="resolved">해결</button>
+          </div>
           <div class="act-chips-grid">
             <button class="act-btn" data-act="breathe">숨쉬기</button>
             <button class="act-btn" data-act="look_around">두리번</button>
@@ -2302,13 +2318,35 @@ PET_HTML = r"""<!DOCTYPE html>
             <button class="act-btn" data-act="gaze">시선</button>
             <button class="act-btn" data-act="press">누름</button>
             <button class="act-btn" data-act="pet">쓰다듬기</button>
-            <button class="act-btn" data-act="drag">잡기</button>
+            <button class="act-btn" data-act="drag">끌기</button>
             <button class="act-btn" data-act="shake">흔들기</button>
             <button class="act-btn" data-act="drop">착지</button>
             <button class="act-btn" data-act="success">성공</button>
             <button class="act-btn" data-act="failure">실패</button>
           </div>
-        </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- 실행 전 확인 카드: 어느 탭에서 요청해도 입력창 바로 위에 뜬다 -->
+    <div id="writeCard" class="gate-box" style="display:none;" role="region" aria-label="실행 전 확인">
+      <div class="gate-head">실행 전 확인</div>
+      <div id="writeText" class="gate-body"></div>
+      <ul id="writeFiles" class="gate-files" style="display:none;"></ul>
+      <div class="gate-actions">
+        <button id="writeApproveBtn" class="action-btn primary">승인하고 실행</button>
+        <button id="writeRejectBtn" class="action-btn ghost">취소</button>
+      </div>
+    </div>
+
+    <!-- 질문 보내기 전 확인 카드 -->
+    <div id="sendCard" class="gate-box" style="display:none;" role="region" aria-label="보내기 전 확인">
+      <div id="sendHead" class="gate-head">외부 엔진으로 보낼까요?</div>
+      <div id="sendText" class="gate-body"></div>
+      <div class="gate-actions">
+        <button id="sendApproveBtn" class="action-btn primary">보내기</button>
+        <button id="sendRecordBtn" class="action-btn ghost">기록으로만 남기기</button>
+        <button id="sendCancelBtn" class="action-btn ghost">취소</button>
       </div>
     </div>
 
@@ -2332,8 +2370,8 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
       <div class="input-bar">
-        <input id="askInput" class="ask-input" type="text" placeholder="무엇이든 물어보거나 기록하세요..." autocomplete="off" />
-        <button id="askSubmit" class="ask-submit" type="submit" title="질문 또는 기록">
+        <input id="askInput" class="ask-input" type="text" placeholder="물어보거나 기록하세요 (보내기 전에 확인해요)" autocomplete="off" />
+        <button id="askSubmit" class="ask-submit" type="submit" title="보내기 전 확인">
           <svg id="plusIcon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
             <line x1="8" y1="2.5" x2="8" y2="13.5"></line>
             <line x1="2.5" y1="8" x2="13.5" y2="8"></line>
@@ -2371,12 +2409,12 @@ PET_HTML = r"""<!DOCTYPE html>
 <script>
 const TOKEN = "__RO_TOKEN__";
 const MOOD_META = {
-  idle:      { label: "기본",   caption: "평소의 ro.",               headU: 19, bodyU: 15, baseU: 23 },
-  recording: { label: "기록 중", caption: "아래를 보며 바닥 층이 길어진다.", headU: 19, bodyU: 15, baseU: 25.5 },
-  focus:     { label: "집중",   caption: "하나만 본다.",              headU: 19, bodyU: 15, baseU: 25.5 },
-  anxious:   { label: "불안",   caption: "눈이 작아지고 층이 어긋난다.",   headU: 19, bodyU: 15, baseU: 23 },
-  discovery: { label: "발견",   caption: "눈이 커지고 머리가 들린다.",    headU: 19, bodyU: 15, baseU: 23 },
-  resolved:  { label: "풀어냄", caption: "바닥이 길게 뻗는다.",         headU: 19, bodyU: 13, baseU: 25.5 },
+  idle:      { label: "기본",   caption: "평소의 ro." },
+  recording: { label: "기록 중", caption: "아래를 본다." },
+  focus:     { label: "집중",   caption: "하나만 본다." },
+  anxious:   { label: "확인 필요",   caption: "눈이 작아지고 층이 어긋난다." },
+  discovery: { label: "발견",   caption: "눈이 커지고 머리가 들린다." },
+  resolved:  { label: "해결", caption: "웃는다." },
 };
 const MOOD_ORDER = ["idle", "recording", "focus", "anxious", "discovery", "resolved"];
 
@@ -2389,7 +2427,7 @@ const ACTION_META = {
   alert:       { label: "깜짝",        desc: "깜짝 솟구침 & 눈 커짐" },
   drowsy:      { label: "졸음",        desc: "머리 침하 & 실눈 & 느린 호흡" },
   gaze:        { label: "시선",        desc: "마우스 커서 시선 추적" },
-  pet:         { label: "쓰다듬기",    desc: "폭신하게 눌림 & 눈웃음 (마우스 호버)" },
+  pet:         { label: "쓰다듬기",    desc: "폭신하게 눌리며 웃는다 (마우스 호버)" },
   drag:        { label: "끌기",        desc: "세로 늘어남 & 바닥 처짐" },
   shake:       { label: "흔들기",      desc: "층 좌우 요동 (빠른 흔들기)" },
   drop:        { label: "착지",        desc: "착지 스쿼시 & 스프링 탄성" },
@@ -2403,13 +2441,24 @@ const bubble = document.getElementById("bubble");
 const bubbleTop = document.getElementById("bubbleTop");
 const petWrap = document.getElementById("petWrap");
 const petCaption = document.getElementById("petCaption");
-const moodPill = document.getElementById("moodPill");
 const clearBtn = document.getElementById("clearBtn");
 const closeBtn = document.getElementById("closeBtn");
 
 const paneHome = document.getElementById("paneHome");
 const paneTimeline = document.getElementById("paneTimeline");
 const paneSettings = document.getElementById("paneSettings");
+const paneOrganize = document.getElementById("paneOrganize");
+const summaryView = document.getElementById("summaryView");
+const statsView = document.getElementById("statsView");
+const statsList = document.getElementById("statsList");
+const statsTotal = document.getElementById("statsTotal");
+const activityMoreBtn = document.getElementById("activityMoreBtn");
+const timelineMore = document.getElementById("timelineMore");
+const writeFiles = document.getElementById("writeFiles");
+const sendCard = document.getElementById("sendCard");
+const sendHead = document.getElementById("sendHead");
+const sendText = document.getElementById("sendText");
+const askCancelBtn = document.getElementById("askCancelBtn");
 
 const greetingTitle = document.getElementById("greetingTitle");
 const greetingSub = document.getElementById("greetingSub");
@@ -2418,7 +2467,7 @@ const filterStatsBtn = document.getElementById("filterStatsBtn");
 
 const metricEvents = document.getElementById("metricEvents");
 const metricProjects = document.getElementById("metricProjects");
-const metricTime = document.getElementById("metricTime");
+const metricAttention = document.getElementById("metricAttention");
 
 const answerCard = document.getElementById("answerCard");
 const userMsgRow = document.getElementById("userMsgRow");
@@ -2438,6 +2487,8 @@ let fbDoneUntil = 0;
 let askNotice = null;   // 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
 let askNoticeUntil = 0;
 let lastActKey = "";
+let recallShown = false;   // 회상 답(로컬)을 보는 중에는 직전 엔진 답을 겹쳐 띄우지 않는다
+const RECENT_SHOWN = 4;
 let lastTlKey = "";
 let orgKey = "";
 let pendingKind = null;
@@ -2472,12 +2523,10 @@ let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
 let previewLockUntil = 0;
-let materialMode = "auto";
-let activeMaterial = "clay";
-let backdropLuminance = 0.5;
-let themeMode = "auto";
-let backdropIsDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-let isChalk = false;
+const INITIAL_PREFS = __RO_PREFS__;
+let materialMode = ["clay", "glass"].includes(INITIAL_PREFS.material) ? INITIAL_PREFS.material : "clay";
+let themeMode = ["ink", "chalk", "auto"].includes(INITIAL_PREFS.theme) ? INITIAL_PREFS.theme : "auto";
+let systemDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
 
 /* 탭 전환 */
 function switchTab(tabName) {
@@ -2486,6 +2535,7 @@ function switchTab(tabName) {
   });
   paneHome.classList.toggle("active", tabName === "home");
   paneTimeline.classList.toggle("active", tabName === "timeline");
+  paneOrganize.classList.toggle("active", tabName === "organize");
   paneSettings.classList.toggle("active", tabName === "settings");
 }
 
@@ -2496,35 +2546,30 @@ document.querySelectorAll(".nav-tab").forEach(tab => {
   });
 });
 
-filterSummaryBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  filterSummaryBtn.classList.add("active");
-  filterStatsBtn.classList.remove("active");
-});
-
-filterStatsBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  switchTab("timeline");
-});
-
-/* 재질 & 테마 로직 */
-function computeAutoMaterial(mood, lum) {
-  if (mood === "discovery" || mood === "resolved") return "jelly";
-  if (mood === "recording" || mood === "focus") return "glass";
-  if (mood === "idle" && typeof lum === "number" && lum > 0.65) return "glass";
-  return "clay";
+function setHomeView(stats) {
+  filterSummaryBtn.classList.toggle("active", !stats);
+  filterStatsBtn.classList.toggle("active", stats);
+  filterSummaryBtn.setAttribute("aria-pressed", String(!stats));
+  filterStatsBtn.setAttribute("aria-pressed", String(stats));
+  summaryView.style.display = stats ? "none" : "flex";
+  statsView.style.display = stats ? "flex" : "none";
 }
+filterSummaryBtn.addEventListener("click", (e) => { e.stopPropagation(); setHomeView(false); });
+filterStatsBtn.addEventListener("click", (e) => { e.stopPropagation(); setHomeView(true); });
+activityMoreBtn.addEventListener("click", (e) => { e.stopPropagation(); switchTab("timeline"); });
 
+/* 재질 & 테마: 고른 것만 쓴다. 표정·모션·배경 밝기로 바꾸지 않는다.
+   색상 "시스템"은 macOS 화면 모드(라이트/다크)만 따른다. */
+const MATERIAL_CHOICES = ["clay", "glass"];
+const THEME_CHOICES = ["ink", "chalk", "auto"];
 let dockCaption = null;  // 메뉴 막대로 끄는 중 원래 캡션 (onHostDockProgress)
 function updateMaterialUI() {
-  activeMaterial = (materialMode === "auto")
-    ? computeAutoMaterial(currentMood, backdropLuminance)
-    : materialMode;
-  for (const m of ["clay", "glass", "jelly"]) {
-    document.body.classList.toggle(`material-${m}`, activeMaterial === m);
+  for (const m of MATERIAL_CHOICES) {
+    document.body.classList.toggle(`material-${m}`, materialMode === m);
   }
   document.querySelectorAll(".mat-opt").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
+    btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
@@ -2532,39 +2577,29 @@ function updateMaterialUI() {
 }
 
 function updateThemeUI() {
-  if (themeMode === "auto") {
-    isChalk = !!backdropIsDark;
-  } else if (themeMode === "chalk") {
-    isChalk = true;
-  } else {
-    isChalk = false;
-  }
+  const isChalk = themeMode === "chalk" || (themeMode === "auto" && systemDark);
   document.body.classList.toggle("theme-chalk", isChalk);
   document.querySelectorAll(".theme-opt").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.theme === themeMode);
+    btn.setAttribute("aria-pressed", String(btn.dataset.theme === themeMode));
   });
 }
 
-window.setAutoBackdropDark = function(isDark, lum) {
-  backdropIsDark = !!isDark;
-  if (typeof lum === "number") {
-    backdropLuminance = lum;
-  } else {
-    backdropLuminance = isDark ? 0.2 : 0.8;
-  }
-  if (themeMode === "auto") updateThemeUI();
-  if (materialMode === "auto") updateMaterialUI();
-};
+/* 재질·색상은 ~/.ro/config.json에 저장하고, 페이지를 만들 때 미리 넣어 깜빡이지 않게 한다 */
+function savePrefs(changes) { apiPost("/api/prefs", changes).catch(() => {}); }
 
 window.setThemeModeFromHost = function(mode) {
+  if (!THEME_CHOICES.includes(mode)) return;
   themeMode = mode;
   updateThemeUI();
+  savePrefs({ theme: mode });
 };
 
 window.setMaterialFromHost = function(mode) {
-  if (["auto", "clay", "glass", "jelly"].includes(mode)) {
+  if (MATERIAL_CHOICES.includes(mode)) {
     materialMode = mode;
     updateMaterialUI();
+    savePrefs({ material: mode });
   }
 };
 
@@ -2576,9 +2611,8 @@ window.setWanderState = function(enabled) {
 
 if (window.matchMedia) {
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
-    backdropIsDark = e.matches;
-    if (themeMode === "auto") updateThemeUI();
-    if (materialMode === "auto") updateMaterialUI();
+    systemDark = e.matches;
+    updateThemeUI();
   });
 }
 updateThemeUI();
@@ -2607,18 +2641,17 @@ window.setBubblePlacement = function(isTop, isLeft) {
 };
 
 /* 6가지 표정 프리뷰 */
+function setMoodClass(mood) {
+  for (const m of MOOD_ORDER) petWrap.classList.toggle(`mood-${m}`, m === mood);
+}
+
 window.setMoodPreview = function(mood, durationMs) {
   const meta = MOOD_META[mood];
   if (!meta) return;
   previewLockUntil = Date.now() + (durationMs || 8000);
   currentMood = mood;
   eyesWrap.style.transform = "";
-  petWrap.className = `pet-wrap mood-${mood}`;
-  moodPill.textContent = meta.label;
-  subStatusText.textContent = meta.caption;
-  layerHead.style.width = `calc(${meta.headU} * var(--u))`;
-  layerBody.style.width = `calc(${meta.bodyU} * var(--u))`;
-  layerBase.style.width = `calc(${meta.baseU} * var(--u))`;
+  setMoodClass(mood);
   document.querySelectorAll(".mood-btn").forEach(b => {
     b.classList.toggle("active", b.dataset.mood === mood);
   });
@@ -2629,11 +2662,6 @@ function cycleMoodPreview() {
   const idx = (MOOD_ORDER.indexOf(currentMood) + 1) % MOOD_ORDER.length;
   window.setMoodPreview(MOOD_ORDER[idx], 8000);
 }
-
-moodPill.addEventListener("click", (e) => {
-  e.stopPropagation();
-  cycleMoodPreview();
-});
 
 petWrap.addEventListener("contextmenu", (e) => {
   e.preventDefault();
@@ -2663,6 +2691,10 @@ closeBtn.addEventListener("click", (e) => {
 clearBtn.addEventListener("click", async (e) => {
   e.stopPropagation();
   previewLockUntil = 0;
+  recallShown = false;
+  recallCard.style.display = "none";
+  recOrgCard.style.display = "none";
+  hideSendCard();
   await apiPost("/api/clear", {});
   await refreshState();
 });
@@ -2680,6 +2712,7 @@ document.querySelectorAll(".mat-opt").forEach(btn => {
     e.stopPropagation();
     materialMode = btn.dataset.mat;
     updateMaterialUI();
+    savePrefs({ material: materialMode });
   });
 });
 
@@ -2688,6 +2721,7 @@ document.querySelectorAll(".theme-opt").forEach(btn => {
     e.stopPropagation();
     themeMode = btn.dataset.theme;
     updateThemeUI();
+    savePrefs({ theme: themeMode });
   });
 });
 
@@ -2735,13 +2769,12 @@ window.triggerAction = function(name, durationMs) {
     currentAction = null;
     const meta = MOOD_META[currentMood] || MOOD_META.idle;
     petCaption.textContent = meta.label;
-    subStatusText.textContent = meta.caption;
     return { ok: true, cleared: true };
   }
 
   if (MOTION_DEMOS.includes(name)) {                  // 누름·잡기·흔들기·놓기는 모션 엔진이 재생한다
     const meta = ACTION_META[name];
-    if (meta) { petCaption.textContent = meta.label; subStatusText.textContent = meta.desc; }
+    if (meta) petCaption.textContent = meta.label;
     if (!RoMotion.busy()) RoMotion.demo(name);
     return { ok: true, action: name, duration: 0 };
   }
@@ -2749,10 +2782,7 @@ window.triggerAction = function(name, durationMs) {
   petWrap.classList.add(cls);
 
   const meta = ACTION_META[name];
-  if (meta) {
-    petCaption.textContent = meta.label;
-    subStatusText.textContent = meta.desc;
-  }
+  if (meta) petCaption.textContent = meta.label;
 
   const dur = (durationMs !== undefined) ? durationMs : 4500;
   if (dur > 0) {
@@ -2959,7 +2989,7 @@ askInput.addEventListener("input", () => {
 let lastHostStatus = "";
 function applyState(st) {
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
-  const hostStatus = { type: "status", today: (st.counts && st.counts.today_events) || 0 };
+  const hostStatus = { type: "status", today: (st.counts && st.counts.today_records) || 0 };
   if (JSON.stringify(hostStatus) !== lastHostStatus) {
     lastHostStatus = JSON.stringify(hostStatus);
     notifyHost(hostStatus);
@@ -2970,22 +3000,16 @@ function applyState(st) {
     if (currentMood === "recording" || currentMood === "resolved" || currentMood === "focus") {
       eyesWrap.style.transform = "";
     }
-    petWrap.className = `pet-wrap mood-${st.mood}`;
-    if (currentAction) {
-      petWrap.classList.add(`action-${currentAction.replace(/_/g, "-")}`);
-    }
-    moodPill.textContent = st.mood_label;
-    const m = MOOD_META[st.mood] || MOOD_META.idle;
-    layerHead.style.width = `calc(${m.headU} * var(--u))`;
-    layerBody.style.width = `calc(${m.bodyU} * var(--u))`;
-    layerBase.style.width = `calc(${m.baseU} * var(--u))`;
+    setMoodClass(st.mood);  // 다른 클래스(끌기·집중·메뉴 막대로 보내기 등)는 건드리지 않는다
 
     document.querySelectorAll(".mood-btn").forEach(b => {
       b.classList.toggle("active", b.dataset.mood === st.mood);
     });
     updateMaterialUI();
 
-    if (st.action && st.action !== currentAction) {
+    if (RoMotion.busy()) {
+      // 잡고 흔드는 중에는 상태 폴링이 다른 동작을 끼워 넣지 않는다(모션이 끊기지 않게)
+    } else if (st.action && st.action !== currentAction) {
       window.triggerAction(st.action, 4500);
     } else if (!currentAction) {
       if (st.mood === "focus") {
@@ -3001,40 +3025,47 @@ function applyState(st) {
   const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
-  // 마지막 타임스탬프 계산
-  const lastTs = (st.recent_logs && st.recent_logs.length > 0)
-    ? (st.recent_logs[st.recent_logs.length - 1].ts || "").slice(0, 5)
-    : "";
+  const counts = st.counts || {};
+  const logs = st.recent_logs || [];          // 사용자 기록만 (펫 시작·스캔·질문 제외)
+  const tl = st.timeline || [];               // 오늘 일어난 모든 일
+  const recordCount = counts.today_records || 0;
+  const eventCount = counts.today_events || 0;
+  const lastTs = logs.length ? (logs[logs.length - 1].ts || "").slice(0, 5) : "";
+  const attention = (counts.pending_rules || 0) + (counts.audit_findings || 0) + (st.write_pending ? 1 : 0);
 
-  // 1. 브리핑 타이틀 & 서브텍스트
-  const todayCount = (st.counts && st.counts.today_events) || 0;
-  if (todayCount > 0) {
-    greetingTitle.textContent = `오늘 ${todayCount}건 기록했어요.`;
-    greetingSub.textContent = lastTs ? `마지막 기록 ${lastTs} · 정상 동작 중` : "정상 동작 중";
+  // 1. 브리핑
+  const health = st.health === "attention" ? "확인할 일이 있어요" : "정상 동작 중";
+  if (recordCount > 0) {
+    greetingTitle.textContent = `오늘 ${recordCount}건 기록했어요.`;
+    greetingSub.textContent = lastTs ? `마지막 기록 ${lastTs} · ${health}` : health;
   } else {
     greetingTitle.textContent = "오늘 새로 시작했어요.";
-    greetingSub.textContent = "기록이 시작되면 여기에 요약이 표시됩니다";
+    greetingSub.textContent = st.health === "attention" ? health : "기록이 시작되면 여기에 요약이 표시됩니다";
   }
 
-  // 2. 3열 통계 메트릭
-  metricEvents.textContent = todayCount;
-  metricProjects.textContent = (st.counts && st.counts.projects) || 0;
-  metricTime.textContent = lastTs || "--:--";
+  // 2. 메트릭
+  metricEvents.textContent = recordCount;
+  metricProjects.textContent = counts.projects || 0;
+  metricAttention.textContent = attention;
 
-  // 3. 답변 카드 & 게이트 카드
+  // 3. 답변 카드: 진행 중·실패 직후 알림 > 직전 답변
   if (Date.now() < askNoticeUntil) {
     answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = askNotice.q;
     roMainBubble.textContent = askNotice.msg;
-  } else if (st.last_answer) {
+    feedbackBtns.style.display = "none";
+  } else if (st.last_answer && !recallShown) {
+    const ans = st.last_answer;
     answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
-    userQuestionPill.textContent = st.last_answer.question;
-    roMainBubble.textContent = st.last_answer.output;
-    const projs = (st.last_answer.projects || []).join(", ") || "-";
-    subStatusText.textContent = `${st.last_answer.engine} (${projs})`;
-    feedbackBtns.style.display = st.last_answer.feedback_given ? "none" : "inline-flex";
+    userQuestionPill.textContent = ans.question;
+    roMainBubble.textContent = ans.output;
+    askCancelBtn.style.display = "none";
+    const projs = (ans.projects || []).join(", ");
+    subStatusText.textContent = ans.ok === false ? `${ans.engine} · 답을 받지 못했어요`
+      : (projs ? `${ans.engine} · ${projs}` : ans.engine);
+    feedbackBtns.style.display = (ans.ok === false || ans.feedback_given) ? "none" : "inline-flex";
     fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
   } else {
     answerCard.style.display = "none";
@@ -3045,9 +3076,19 @@ function applyState(st) {
   pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
 
   if (st.write_pending) {
+    const wp = st.write_pending;
     writeCard.style.display = "flex";
-    writeText.textContent = `[${st.write_pending.engine}] ${st.write_pending.task}`;
-    if (!wasPending) writeCard.scrollIntoView({ block: "nearest" });  // 새 승인 요청은 보이는 곳으로
+    writeText.textContent = wp.kind && wp.kind.startsWith("organize") ? wp.task : `${wp.engine}: ${wp.task}`;
+    const files = wp.files || [];
+    const fkey = JSON.stringify(files);
+    if (writeFiles.dataset.key !== fkey) {
+      writeFiles.dataset.key = fkey;
+      writeFiles.replaceChildren(...files.map(f => h("li", { title: f.to ? `${f.from} → ${f.to}` : f.from },
+        h("span", { text: f.from }), f.to ? h("span", { class: "arrow", text: "→" }) : null, f.to ? h("span", { text: f.to }) : null)));
+      if (wp.more) writeFiles.append(h("li", {}, h("span", { class: "arrow", text: `외 ${wp.more}건` })));
+    }
+    writeFiles.style.display = files.length ? "block" : "none";
+    if (!wasPending) { hideToast(); writeCard.scrollIntoView({ block: "nearest" }); }  // 새 승인 요청이 가려지지 않게
   } else {
     writeCard.style.display = "none";
   }
@@ -3056,7 +3097,7 @@ function applyState(st) {
     const r = st.pending_rules[0];
     currentRuleId = r.id;
     ruleCard.style.display = "flex";
-    const total = (st.counts && st.counts.pending_rules) || st.pending_rules.length;
+    const total = counts.pending_rules || st.pending_rules.length;
     ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total} · 승인 전 미적용)`;
     ruleText.textContent = `${r.text} (${r.evidence})`;
     ruleText.title = ruleText.textContent;
@@ -3065,68 +3106,63 @@ function applyState(st) {
     ruleCard.style.display = "none";
   }
 
-  // 4. 최근 활동 리스트 (기본 탭)
-  const logs = st.recent_logs || [];
-  logCountBadge.textContent = `${logs.length}건`;
-  const actKey = JSON.stringify(logs.slice(-4));
+  // 4. 최근 기록 (홈): 배지는 오늘 기록 수, 목록은 최근 4개 + 전체 보기
+  logCountBadge.textContent = `${recordCount}건`;
+  const shown = logs.slice().reverse().slice(0, RECENT_SHOWN);
+  const actKey = JSON.stringify([recordCount, shown]);
   if (actKey !== lastActKey) {  // 450ms 폴링마다 같은 내용으로 DOM을 다시 만들지 않는다
     lastActKey = actKey;
-    activityList.innerHTML = "";
-    if (logs.length === 0) {
-      activityList.innerHTML = '<div style="font-size:10.5px;color:var(--muted);text-align:center;padding:12px 0;">오늘 아직 기록이 없습니다.</div>';
+    activityList.replaceChildren();
+    if (shown.length === 0) {
+      activityList.append(h("div", { class: "stats-empty", text: "오늘 아직 기록이 없습니다." }));
     } else {
-      logs.slice().reverse().slice(0, 4).forEach((item) => {
-        const card = document.createElement("div");
-        card.className = "activity-card";
-
-        const dot = document.createElement("span");
-        dot.className = `act-dot ${item.kind === "route" ? "route" : ""}`;
-
-        const title = document.createElement("span");
-        title.className = "act-summary";
-        title.textContent = item.summary;
-        title.title = `${item.kind} · ${item.summary}`;
-
-        const time = document.createElement("span");
-        time.className = "act-time";
-        time.textContent = (item.ts || "").slice(0, 5);
-
-        card.appendChild(dot);
-        card.appendChild(title);
-        card.appendChild(time);
-        activityList.appendChild(card);
+      shown.forEach((item) => {
+        activityList.append(h("div", { class: "activity-card" },
+          h("span", { class: "act-dot" }),
+          h("span", { class: "act-summary", text: item.summary, title: `${item.kind_label} · ${item.summary}` }),
+          h("span", { class: "act-time", text: (item.ts || "").slice(0, 5) })));
       });
     }
+    activityMoreBtn.style.display = recordCount > shown.length ? "inline-block" : "none";
+    activityMoreBtn.textContent = `타임라인에서 전체 보기 (${recordCount}건)`;
   }
 
-  // 5. 타임라인 리스트 (타임라인 탭)
-  timelineCountText.textContent = `오늘 ${todayCount}건`;
-  const tlKey = JSON.stringify(logs);
+  // 5. 통계 (홈의 통계 보기): 오늘 일어난 일을 종류별로
+  const stats = st.stats || [];
+  statsTotal.textContent = `${eventCount}건`;
+  const stKey = JSON.stringify(stats);
+  if (statsList.dataset.key !== stKey) {
+    statsList.dataset.key = stKey;
+    const max = Math.max(1, ...stats.map(x => x[1]));
+    statsList.replaceChildren(...(stats.length ? stats.map(([label, n]) => h("div", { class: "stats-row" },
+      h("span", { text: label }), h("span", { class: "bar", style: `width:${Math.round(n / max * 100)}%` }),
+      h("span", { class: "n", text: n })))
+      : [h("div", { class: "stats-empty", text: "오늘 아직 아무 일도 없었어요." })]));
+  }
+
+  // 6. 타임라인 (오늘 일어난 모든 일)
+  timelineCountText.textContent = `${eventCount}건`;
+  const tlKey = JSON.stringify([eventCount, tl]);
   if (tlKey !== lastTlKey) {
     lastTlKey = tlKey;
-    timelineList.innerHTML = "";
-    if (logs.length === 0) {
-      timelineList.innerHTML = '<div style="font-size:11px;color:var(--muted);text-align:center;padding:24px 0;">기록된 내역이 없습니다.</div>';
+    timelineList.replaceChildren();
+    if (tl.length === 0) {
+      timelineList.append(h("div", { class: "stats-empty", text: "기록된 내역이 없습니다." }));
     } else {
-      const total = logs.length;
-      logs.slice().reverse().forEach((item, idx) => {
-        const stepIndex = String(total - idx).padStart(2, "0");
-        const row = document.createElement("div");
-        row.className = "timeline-row";
-        row.dataset.id = item.id || "";
-        row.innerHTML = `
-          <span class="step-badge">${stepIndex}</span>
-          <div class="timeline-body">
-            <div class="timeline-meta">
-              <span class="timeline-tag">${esc(item.kind)}</span>
-              <span class="timeline-time">${esc(item.ts)}</span>
-            </div>
-            <div class="timeline-text">${esc(item.summary)}</div>
-          </div>
-        `;
+      tl.slice().reverse().forEach((item, idx) => {
+        const row = h("div", { class: "timeline-row", "data-id": item.id || "" },
+          h("span", { class: "step-badge", text: String(eventCount - idx).padStart(2, "0") }),
+          h("div", { class: "timeline-body" },
+            h("div", { class: "timeline-meta" },
+              h("span", { class: "timeline-tag", text: item.kind_label }),
+              h("span", { class: "timeline-time", text: (item.ts || "").slice(0, 5) })),
+            h("div", { class: "timeline-text", text: item.summary })));
         timelineList.appendChild(row);
       });
     }
+    const hidden = eventCount - tl.length;
+    timelineMore.style.display = hidden > 0 ? "block" : "none";
+    timelineMore.textContent = `이전 ${hidden}건은 터미널의 ro log에서 볼 수 있어요`;
   }
   applyAmbient(st);
 }
@@ -3147,6 +3183,88 @@ async function refreshState() {
   } catch (err) {}
 }
 
+/* 입력창: 기록 회상은 로컬에서, 그 밖의 질문은 보내기 전 확인을 거쳐 엔진으로. '/기록 …'은 바로 기록 */
+let pendingSend = null;
+function resetInput() {
+  askInput.value = "";
+  plusIcon.style.display = "block";
+  sendIcon.style.display = "none";
+}
+function hideSendCard() {
+  sendCard.style.display = "none";
+  pendingSend = null;
+}
+async function submitInput(q) {
+  const rec = q.match(/^\/기록\s+(.+)$/s);
+  if (rec) { await capture("text", "직접 기록", rec[1].trim(), rec[1].length); return; }
+  if (RECALL_INTENT.test(q)) { await runRecall(q); return; }
+  await previewAsk(q);
+}
+async function previewAsk(q) {
+  hideSendCard();
+  let pv = null;
+  try { pv = await apiPost("/api/ask/preview", { question: q }); } catch (err) {}
+  if (!pv || !pv.ok) {
+    if (!askInput.value) askInput.value = q;
+    askNotice = { q, msg: pv ? (pv.output || pv.error || "보낼 준비를 하지 못했어요.") : "서버에 연결하지 못했어요." };
+    askNoticeUntil = Date.now() + 8000;
+    await refreshState();
+    return;
+  }
+  pendingSend = { q, id: pv.id };
+  let where = pv.projects.length ? `프로젝트 ${pv.projects.join(", ")} 정보 ${pv.context_chars}자를 함께 보냅니다.`
+                                 : "프로젝트 정보 없이 질문만 보냅니다.";
+  if (pv.map_stale_days) where += ` 프로젝트 지도가 ${pv.map_stale_days}일 전 것이라 설명이 낡았을 수 있어요(터미널: ro map).`;
+  sendHead.textContent = `${pv.engine}(으)로 보낼까요?`;
+  sendText.replaceChildren(h("div", { text: `“${q}”` }), h("div", { class: "block-sub", text: where }),
+    pv.context_preview ? h("details", { class: "rc-ev" }, h("summary", { text: "보낼 내용 보기" }),
+      h("div", { class: "send-ctx", text: pv.context_preview + (pv.context_chars > pv.context_preview.length ? " …" : "") })) : null);
+  hideToast();
+  sendCard.style.display = "flex";
+  sendCard.scrollIntoView({ block: "nearest" });
+  document.getElementById("sendApproveBtn").focus();
+}
+async function sendAsk() {
+  if (!pendingSend) return;
+  const { q, id } = pendingSend;
+  hideSendCard();
+  recallShown = false;
+  recallCard.style.display = "none";
+  recOrgCard.style.display = "none";
+  askInput.disabled = true;
+  askSubmit.disabled = true;
+  previewLockUntil = 0;
+  askNotice = { q, msg: "생각하는 중..." };
+  askNoticeUntil = Infinity;
+  answerCard.style.display = "flex";
+  userMsgRow.style.display = "flex";
+  userQuestionPill.textContent = q;
+  roMainBubble.textContent = askNotice.msg;
+  subStatusText.textContent = "답을 기다리는 중";
+  feedbackBtns.style.display = "none";
+  askCancelBtn.style.display = "inline-block";
+  setMoodClass("focus");
+  let res = null;
+  try {
+    res = await apiPost("/api/ask", { question: q, preview_id: id });
+  } catch (err) {
+    res = null;
+  } finally {
+    askInput.disabled = false;
+    askSubmit.disabled = false;
+    askCancelBtn.style.display = "none";
+  }
+  askNoticeUntil = 0;
+  if (!res || !res.ok) {
+    // 답을 못 받았으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
+    if (!askInput.value) askInput.value = q;
+    if (!res || res.reason === "needs_preview" || res.busy) {
+      askNotice = { q, msg: res ? res.output : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
+      askNoticeUntil = Date.now() + 8000;
+    }
+  }
+  await refreshState();
+}
 askForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const q = askInput.value.trim();
@@ -3154,37 +3272,24 @@ askForm.addEventListener("submit", async (e) => {
     askInput.focus();
     return;
   }
-  askInput.value = "";
-  plusIcon.style.display = "block";
-  sendIcon.style.display = "none";
-  askInput.disabled = true;
-  askSubmit.disabled = true;
-  previewLockUntil = 0;
-  askNotice = { q, msg: "기록을 살피며 풀어내는 중..." };
-  askNoticeUntil = Infinity;
-  answerCard.style.display = "flex";
-  userMsgRow.style.display = "flex";
-  userQuestionPill.textContent = q;
-  roMainBubble.textContent = askNotice.msg;
-  subStatusText.textContent = "풀어내는 중...";
-  petWrap.className = "pet-wrap mood-focus";
-  let res = null;
-  try {
-    res = await apiPost("/api/ask", { question: q });
-  } catch (err) {
-    res = null;
-  } finally {
-    askInput.disabled = false;
-    askSubmit.disabled = false;
-  }
-  askNoticeUntil = 0;
-  if (!res || !res.ok) {
-    // 답을 못 받았거나 엔진이 실패했으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
-    if (!askInput.value) askInput.value = q;
-    askNotice = { q, msg: res ? (res.output || res.error) : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
-    askNoticeUntil = Date.now() + 8000;
-  }
-  await refreshState();
+  resetInput();
+  await submitInput(q);
+});
+document.getElementById("sendApproveBtn").addEventListener("click", sendAsk);
+document.getElementById("sendRecordBtn").addEventListener("click", async () => {
+  if (!pendingSend) return;
+  const q = pendingSend.q;
+  hideSendCard();
+  await capture("text", "직접 기록", q, q.length);
+});
+document.getElementById("sendCancelBtn").addEventListener("click", () => {
+  if (pendingSend && !askInput.value) askInput.value = pendingSend.q;
+  hideSendCard();
+  askInput.focus();
+});
+askCancelBtn.addEventListener("click", async () => {
+  askCancelBtn.disabled = true;
+  try { await apiPost("/api/ask/cancel", {}); } finally { askCancelBtn.disabled = false; }
 });
 
 document.getElementById("ruleApproveBtn").addEventListener("click", async () => {
@@ -3200,13 +3305,13 @@ document.getElementById("ruleRejectBtn").addEventListener("click", async () => {
 document.getElementById("writeApproveBtn").addEventListener("click", async () => {
   const kind = pendingKind;
   const r = await apiPost("/api/write_gate", { approve: true });
-  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
+  if (kind && kind.startsWith("organize")) setOrgMsg(r.output || "");
   await refreshState();
 });
 document.getElementById("writeRejectBtn").addEventListener("click", async () => {
   const kind = pendingKind;
   const r = await apiPost("/api/write_gate", { approve: false });
-  if (kind && kind.startsWith("organize")) orgMsg.textContent = r.output || "";
+  if (kind && kind.startsWith("organize")) setOrgMsg(r.output || "");
   await refreshState();
 });
 /* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
@@ -3221,7 +3326,7 @@ function orgChip(parent, text, title, body, cls) {
   b.title = title;
   b.addEventListener("click", async () => {
     const r = await apiPost("/api/organize/apply", body);
-    orgMsg.textContent = r.ok ? "아래에서 승인하면 실행합니다." : (r.output || "");
+    setOrgMsg(r.ok ? "아래 확인 카드에서 승인하면 실행합니다." : (r.output || ""), r.ok ? 0 : 6000);
     await refreshState();
   });
   parent.appendChild(b);
@@ -3242,30 +3347,44 @@ function renderOrganize(o) {
   const quar = o.quarantine || [];
   const qn = quar.reduce((a, g) => a + g[2], 0);
   const parts = [];
-  if (total) parts.push(`정리 ${total}`);
-  if (qn) parts.push(`치울 후보 ${qn}(${fmtBytes(o.reclaim)})`);
-  if (o.review) parts.push(`검토 ${o.review}`);
-  orgSummary.textContent = parts.length
-    ? `${parts.join(" · ")} — 누르면 승인 요청이 올라갑니다.` + (o.review ? " 검토 항목은 터미널 ro organize edit로." : "")
-    : "옮기거나 치울 항목이 없습니다.";
-  if (o.trashed) orgSummary.textContent += ` 격리 보관 중 ${fmtBytes(o.trashed)} — 공간을 비우려면 터미널에서 ro organize trash --empty(7일 지난 것만).`;
-  o.counts.forEach(([cat, n]) => orgChip(orgCats, `${cat} ${n}`, `${cat} ${n}건 이동 승인 요청`, { category: cat }));
+  if (total) parts.push(`옮길 파일 ${total}개`);
+  if (qn) parts.push(`치울 후보 ${qn}개(${fmtBytes(o.reclaim)})`);
+  const lines = [parts.length ? `${parts.join(" · ")} — 누르면 파일 목록을 보여 드리고, 승인하면 옮깁니다.`
+                              : "지금은 옮기거나 치울 파일이 없습니다."];
+  if (o.recent_skipped) lines.push(`최근 10분 안에 받거나 고친 파일 ${o.recent_skipped}개는 아직 쓰는 중일 수 있어 건너뛰었어요.`);
+  const nodes = lines.map(t => h("div", { text: t }));
+  if (o.review) {
+    nodes.push(h("details", { class: "rc-ev" }, h("summary", { text: `분류가 애매한 ${o.review}개는 옮기지 않아요` }),
+      (o.review_names || []).map(n => h("div", { class: "block-sub", text: n })),
+      h("div", { class: "block-sub" }, "직접 분류하려면 터미널에서 ", h("code", { text: "ro organize edit" }))));
+  }
+  if (o.trashed) nodes.push(h("div", {}, `보관함에 ${fmtBytes(o.trashed)} 보관 중. 7일 지난 것은 터미널에서 `,
+    h("code", { text: "ro organize trash --empty" }), "로 비울 수 있어요."));
+  orgSummary.replaceChildren(...nodes);
+  o.counts.forEach(([cat, n]) => orgChip(orgCats, `${cat} ${n}`, `${cat} ${n}개 옮기기 — 승인 전에 목록을 보여 줍니다`, { category: cat }));
   quar.forEach(([kind, label, n, size]) => orgChip(orgQuar, `${label} ${n} · ${fmtBytes(size)}`,
-    `${label} ${n}건을 격리(삭제 아님, 되돌리기 가능) 승인 요청`, { kind }, "quar"));
+    `${label} ${n}개를 보관함으로(지우지 않음, 되돌리기 가능) — 승인 전에 목록을 보여 줍니다`, { kind }, "quar"));
   if (o.undo) {
     orgUndoBtn.style.display = "inline-block";
-    orgUndoBtn.textContent = `되돌리기 (${o.undo.count}건)`;
+    orgUndoBtn.textContent = `되돌리기 · ${o.undo.when} ${o.undo.count}개`;
   } else {
     orgUndoBtn.style.display = "none";
   }
 }
 
+let orgMsgTimer = null;
+function setOrgMsg(text, ms = 6000) {
+  clearTimeout(orgMsgTimer);
+  orgMsg.textContent = text || "";
+  if (text && ms) orgMsgTimer = setTimeout(() => { orgMsg.textContent = ""; }, ms);
+}
+
 orgScanBtn.addEventListener("click", async () => {
   orgScanBtn.disabled = true;
-  orgMsg.textContent = "정리안을 만드는 중... (파일은 옮기지 않습니다)";
+  setOrgMsg("정리안을 만드는 중... (파일은 옮기지 않습니다)", 0);
   try {
     const r = await apiPost("/api/organize/scan", {});
-    orgMsg.textContent = r.ok ? "정리안을 새로 만들었습니다." : (r.output || "실패");
+    setOrgMsg(r.ok ? "정리안을 새로 만들었습니다." : (r.output || "정리안을 만들지 못했어요."));
   } finally {
     orgScanBtn.disabled = false;
     await refreshState();
@@ -3273,7 +3392,7 @@ orgScanBtn.addEventListener("click", async () => {
 });
 orgUndoBtn.addEventListener("click", async () => {
   const r = await apiPost("/api/organize/undo", {});
-  orgMsg.textContent = r.ok ? "아래에서 승인하면 되돌립니다." : (r.output || "");
+  setOrgMsg(r.ok ? "아래 확인 카드에서 승인하면 되돌립니다." : (r.output || ""), r.ok ? 0 : 6000);
   await refreshState();
 });
 async function sendFeedback(accepted) {
@@ -3301,10 +3420,11 @@ document.documentElement.addEventListener("mouseleave", () => {
 const RoMotion = (() => {
   const SPEC = {
     press: { ms: 80, sx: 1.08, sy: 0.86, rel: [600, 15], delay: [60, 30, 0], happyAfter: 240, happyMs: 600, doneMs: 1000 },
-    grab: { holdMs: 300, moveStart: 8, hang: [5, 17], hangSpring: [400, 24], follow: [1.0, 0.35, 0.2], damping: 0.65, tilt: 0.25, tiltMax: 8,
-            maxLag: 60, wobbleDeg: 1.4, wobbleHz: 1.5 },
-    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 10, dizzyAfter: 1500, dizzyMs: 1200,
-             spinMs: 600, endGap: 450, calmMs: 900, stopSpeed: 150, stopMs: 100, calmDamping: 12 },
+    // 세게 흔들어도 몸이 펫 창(176×168) 밖으로 나가 잘리지 않게 움직임을 작게 묶는다
+    grab: { holdMs: 300, moveStart: 8, hang: [5, 17], hangSpring: [400, 24], follow: [1.0, 0.35, 0.2], damping: 0.65, tilt: 0.25, tiltMax: 4,
+            maxLag: 12, wobbleDeg: 1.4, wobbleHz: 1.5 },
+    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 4, dizzyAfter: Infinity, dizzyMs: 0,
+             spinMs: 600, endGap: 450, calmMs: 900, stopSpeed: 150, stopMs: 100, calmDamping: 12, keepRatio: 0.5, slowWindow: 120 },
     drop: { g: 2400, maxFallMs: 280, stretch: [0.94, 1.08], landMs: 90, land: [1.12, 0.82], bounce: 0.2,
             bounceSpring: [500, 18], stack: [0, 60, 120], restMs: 360, fadeMs: 150 },
     gap: 1,
@@ -3413,7 +3533,7 @@ const RoMotion = (() => {
     const sign = S.vx > 60 ? 1 : S.vx < -60 ? -1 : 0;
     if (sign !== 0) {
       if (S.sign !== 0 && sign !== S.sign) {
-        if (S.peak >= SPEC.shake.speed) pushReversal(t);
+        if (S.peak >= SPEC.shake.speed * (S.shakeActive ? SPEC.shake.keepRatio : 1)) pushReversal(t);
         S.peak = 0;
       }
       S.sign = sign;
@@ -3466,6 +3586,13 @@ const RoMotion = (() => {
     }
   }
 
+  /* 최근 slowWindow(ms) 안의 가장 빠른 속도. 방향이 바뀌는 순간 속도가 0을 지나도 멈춘 것으로 보지 않는다 */
+  function recentSpeed(t) {
+    let m = Math.abs(velAt(t));
+    for (let i = S.hist.length - 1; i >= 0 && t - S.hist[i].t <= SPEC.shake.slowWindow; i--) m = Math.max(m, Math.abs(S.hist[i].v));
+    return t - (S.lastMoveT ?? -1e9) > SPEC.shake.slowWindow ? Math.abs(velAt(t)) : m;
+  }
+
   function velAt(t) {
     const h = S.hist;
     if (!h.length) return 0;
@@ -3478,7 +3605,7 @@ const RoMotion = (() => {
     if (S.phase === "idle") return;
     if (S.phase === "press" && S.upAt == null && t - S.downAt >= SPEC.grab.holdMs) enterGrab(t);
     if (S.shakeActive) {
-      if (Math.abs(velAt(t)) < SPEC.shake.stopSpeed) { if (S.slowSince == null) S.slowSince = t; } else S.slowSince = null;
+      if (recentSpeed(t) < SPEC.shake.stopSpeed) { if (S.slowSince == null) S.slowSince = t; } else S.slowSince = null;
     }
     const stopped = S.shakeActive && S.slowSince != null && t - S.slowSince >= SPEC.shake.stopMs;
     if (S.shakeActive && (stopped || t - S.shakeLast > SPEC.shake.endGap)) {
@@ -3531,7 +3658,7 @@ const RoMotion = (() => {
     for (let i = 0; i < 3; i++) {
       L[i].rot += wob * Math.sin(2 * Math.PI * G.wobbleHz * (t - S.grabAt) / 1000 + i * 1.3);
       L[i].rot += S.osc[i].th;
-      L[i].rot = clamp(L[i].rot, -SPEC.shake.maxRot, SPEC.shake.maxRot);   // 층 회전 최대 10°
+      L[i].rot = clamp(L[i].rot, -SPEC.shake.maxRot, SPEC.shake.maxRot);   // 층 회전 최대 4°
     }
     return L;
   }
@@ -3593,10 +3720,6 @@ const RoMotion = (() => {
         for (let i = 0; i < 3; i++) Object.assign(P.l[i], L[i]);
         separate(P.l);
         if (P.eyes.shape === "big") { P.eyes.lx = clamp(S.vx / 900, -1, 1) * 3; P.eyes.ly = clamp(S.vy / 900, -1, 1) * 2; }
-        if (!S.reduced) {                                              // 빠르게 움직이면 머리 뒤에 속도선이 생긴다
-          const sp = Math.abs(S.vx);
-          P.streak = { o: clamp((sp - 250) / 600, 0, 1) * 0.85, w: 8 + clamp(sp / 150, 0, 8), dir: S.vx > 0 ? -1 : 1 };
-        }
       }
       return P;
     }
@@ -3743,7 +3866,6 @@ function applyAmbient(st) {
   projectNames = st.project_names || projectNames;
   ambient = st.ambient || null;
   if (!ambient) return;
-  petWrap.style.setProperty("--base-px", ambient.base_px + "px");
   petWrap.classList.toggle("focus-mode", ambient.focus);
   petWrap.classList.toggle("drop-ready", dropActive);
   attnDot.hidden = !ambient.attention;
@@ -3751,6 +3873,8 @@ function applyAmbient(st) {
   muteBadge.querySelector("span").textContent = ambient.held;
   muteBadge.setAttribute("aria-label", `알림 ${ambient.held}건 모아둠`);
   focusBtn.setAttribute("aria-pressed", ambient.focus ? "true" : "false");
+  focusBtn.textContent = ambient.focus ? "집중 모드 끄기" : "집중 모드 켜기";
+  focusBtn.classList.toggle("active", !!ambient.focus);
   petWrap.setAttribute("aria-label", `ro · ${ambient.focus ? "집중 모드" : ambient.label}${ambient.attention ? " · 확인 필요" : ""}`);
   if (!currentAction && Date.now() >= previewLockUntil) {
     petCaption.textContent = dropActive ? "놓으면 기록해요" : (ambient.focus ? "집중 모드" : ambient.label);
@@ -3859,16 +3983,19 @@ async function runRecall(q) {
       h("span", { class: "d", text: e.ts }),
       h("button", { class: "mini-btn", type: "button", "aria-label": `기록 ${e.n} 열기`, text: "↗", onclick: () => openRecord(e.id) })))) : null;
   const chips = h("div", { class: "chip-row" },
-    r.found ? h("button", { class: "mini-btn", type: "button", text: (r.followups || [])[0] || "오늘 이어서 할 일은?",
-      onclick: () => runRecall("오늘 뭐 했지?") }) : null,
+    (r.followups || []).filter(f => f !== q).map(f => h("button", { class: "mini-btn", type: "button", text: f,
+      onclick: () => runRecall(f) })),
     r.found ? h("button", { class: "mini-btn", type: "button", text: "메모로 저장", onclick: () =>
-      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null);
+      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null,
+    r.found ? null : h("button", { class: "mini-btn", type: "button", text: "엔진에 물어보기", onclick: () => previewAsk(q) }));
   recallCard.replaceChildren(
     h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: r.headline }),
     items.length ? h("ul", { class: "rc-list" }, items) : null, ev, chips,
     h("div", { class: "rc-foot", text: r.note || "" }));
   recallCard.style.display = "flex";
   answerCard.style.display = "none";
+  recallShown = true;
+  hideSendCard();
 }
 
 /* D · 미리 보고 되돌리는 정리 */
@@ -3988,10 +4115,8 @@ async function runPalette() {
     return;
   }
   closePalette();
-  if (RECALL_INTENT.test(r.ask)) { await runRecall(r.ask); return; }
   pushRecent(r.ask);
-  askInput.value = r.ask;
-  askForm.requestSubmit();
+  await submitInput(r.ask);
 }
 palInput.addEventListener("input", () => { palIndex = 0; renderPalette(); });
 window.addEventListener("keydown", (e) => {
@@ -4022,8 +4147,10 @@ setPollRate(!bubble.classList.contains("hidden"));
 """
 
 
-def render_html(token):
-    return PET_HTML.replace("__RO_TOKEN__", token)
+def render_html(token, prefs=None):
+    """토큰과 저장된 화면 설정(재질·색상)을 넣어 페이지를 만든다. 설정은 고정 선택지만 통과시킨다."""
+    p = {k: v for k, v in (prefs or {}).items() if k in ("material", "theme") and v in PREF_CHOICES[k]}
+    return PET_HTML.replace("__RO_TOKEN__", token).replace("__RO_PREFS__", json.dumps(p))
 
 
 def make_handler(runtime):
@@ -4075,7 +4202,7 @@ def make_handler(runtime):
                 return
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                body = render_html(runtime.token).encode("utf-8")
+                body = render_html(runtime.token, runtime.prefs()).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")
@@ -4100,10 +4227,15 @@ def make_handler(runtime):
                 return
 
             parsed = urlparse(self.path)
-            if parsed.path == "/api/ask":
-                res = runtime.ask_question(data.get("question", ""), engine=data.get("engine"),
-                                           project=data.get("project"))
+            if parsed.path == "/api/ask/preview":
+                self._send_json(200, runtime.preview_question(data.get("question", ""), engine=data.get("engine"),
+                                                              project=data.get("project")))
+            elif parsed.path == "/api/ask":
+                # 패널에서는 보내기 전 확인(preview)을 거친 계획만 보낸다
+                res = runtime.ask_question(data.get("question", ""), preview_id=str(data.get("preview_id") or ""))
                 self._send_json(200, res)
+            elif parsed.path == "/api/ask/cancel":
+                self._send_json(200, runtime.cancel_ask())
             elif parsed.path == "/api/feedback":
                 self._send_json(200, runtime.record_feedback(bool(data.get("accepted"))))
             elif parsed.path == "/api/learn":
@@ -4136,6 +4268,8 @@ def make_handler(runtime):
                                                                       kind or None))
             elif parsed.path == "/api/organize/undo":
                 self._send_json(200, runtime.queue_organize_undo())
+            elif parsed.path == "/api/prefs":
+                self._send_json(200, runtime.set_prefs(data if isinstance(data, dict) else {}))
             elif parsed.path == "/api/focus":
                 self._send_json(200, runtime.set_focus(bool(data.get("on"))))
             elif parsed.path == "/api/clear":
@@ -4229,7 +4363,7 @@ def launch(port=0, mode="overlay", wander=True, build_only=False):
     server = start_server(runtime, "127.0.0.1", port)
     actual_port = server.server_address[1]
     url = f"http://127.0.0.1:{actual_port}/"
-    log.append("pet", f"펫 UI 시작 ({mode})", {"port": actual_port, "mode": mode})
+    log.append("pet", "펫 시작", {"port": actual_port, "mode": mode})
     child_proc = None
 
     def _cleanup(*_args):

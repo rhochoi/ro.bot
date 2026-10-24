@@ -54,7 +54,7 @@ def render(st):
     lines.append("엔진: " + ", ".join(f"{e} {'설치됨' if v['installed'] else '미설치'}" for e, v in st["engines"].items())
                  + f" / 선호: {st['engine_preference'] or '자동'}")
     c = st["collect"]
-    lines.append(f"수집(기본 꺼짐): git {len(c['git'])}곳, 셸 {'켜짐' if c['shell'] else '꺼짐'}, 세션 "
+    lines.append(f"수집(처음엔 모두 꺼짐 · 지금): git {len(c['git'])}곳, 셸 {'켜짐' if c['shell'] else '꺼짐'}, 세션 "
                  + ", ".join(f"{k} {'켜짐' if v else '꺼짐'}" for k, v in c["sessions"].items())
                  + "   (ro collect allow|deny ...)")
     lines.append("수집하지 않는 것:")
