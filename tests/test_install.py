@@ -83,6 +83,7 @@ class InstallScriptTest(unittest.TestCase):
     def test_launches_pet_in_background(self):
         self.stub("gh", GH)
         self.stub("uv", UV)
+        self.stub("uname", "#!/bin/bash\necho Darwin\n")  # 펫은 macOS에서만 띄운다: Linux CI에서도 같은 흐름을 본다
         r, _ = self.run_script()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(self.wait_log("ro pet"))
