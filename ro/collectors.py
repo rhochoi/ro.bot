@@ -311,6 +311,16 @@ def run(sources=SOURCES, dry=False, home=HOME, log_dir=log.LOG_DIR):
     return result
 
 
+def render_status(cfg):
+    on = lambda v: "켜짐" if v else "꺼짐"
+    lines = ["수집 허용 상태 (허용한 소스만 읽습니다)",
+             f"  git: {len(cfg['git'])}곳" + "".join(f"\n    - {r}" for r in cfg["git"]),
+             f"  셸 기록: {on(cfg['shell'])}",
+             "  세션: " + ", ".join(f"{k} {on(v)}" for k, v in cfg["sessions"].items()),
+             "바꾸기: ro collect allow|deny <git|shell|sessions> [대상]"]
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ro.collectors")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -318,7 +328,7 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("source", choices=SOURCES)
         p.add_argument("target", nargs="?")
-    sub.add_parser("status")
+    sub.add_parser("status").add_argument("--json", action="store_true", help="기계용 JSON 출력")
     r = sub.add_parser("run")
     r.add_argument("--source", choices=SOURCES, action="append")
     r.add_argument("--dry-run", action="store_true", help="기록·커서 갱신 없이 신규 건수만")
@@ -329,7 +339,8 @@ def main(argv=None):
             print(f"{args.cmd}: {args.source} {args.target or ''}".strip())
             print(json.dumps(cfg, ensure_ascii=False))
         elif args.cmd == "status":
-            print(json.dumps(load_config(), ensure_ascii=False, indent=2))
+            cfg = load_config()
+            print(json.dumps(cfg, ensure_ascii=False, indent=2) if args.json else render_status(cfg))
         else:
             res = run(args.source or SOURCES, args.dry_run)
             print(("[dry-run] " if args.dry_run else "") + ", ".join(f"{k} {v}건" for k, v in res.items()))

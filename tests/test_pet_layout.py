@@ -99,61 +99,52 @@ class PetLayoutTest(unittest.TestCase):
             with page.expect_response(lambda r: urlsplit(r.url).path == "/api/recall"):
                 page.press("#askInput", "Enter")
             page.wait_for_selector("#recallCard", state="visible")
-            self.assertIn("/api/recall", paths)
+            self.assertNotIn("/api/ask/preview", paths)
             self.assertNotIn("/api/ask", paths)
 
             page.click('[data-tab="settings"]')
             page.fill("#askInput", "2 더하기 2는?")
             page.press("#askInput", "Enter")
-            send = page.locator("#answerCard").get_by_role("button", name="보내기", exact=True)
-            send.wait_for(state="visible")
-            self.assertIn("active", page.locator("#tabBtnHome").get_attribute("class"))
-            self.assertEqual(len(asks), 1)
-            self.assertIsNot(asks[0].get("confirm"), True)
-            self.assertIn("외부 엔진으로 보냅니다", page.inner_text("#answerCard"))
+            page.wait_for_selector("#sendCard", state="visible")  # 확인 카드는 탭 밖이라 설정 탭에서도 보인다
+            self.assertIn("/api/ask/preview", paths)
+            self.assertEqual(asks, [])
             run.assert_not_called()
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/ask"
-                                      and r.request.post_data_json.get("confirm") is True):
-                send.click()
+            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/ask"):
+                page.click("#sendApproveBtn")
             page.wait_for_function("document.querySelector('#roMainBubble').innerText === '답'")
-            self.assertEqual([a.get("confirm") is True for a in asks], [False, True])
+            self.assertEqual(len(asks), 1)
+            self.assertTrue(asks[0].get("preview_id"))
             run.assert_called_once()
 
-    def test_main_input_commands_and_preview_cancel(self):
+    def test_main_input_record_and_preview_cancel(self):
         page = self.open_page()
         asks = []
         page.on("request", lambda r: asks.append(r.post_data_json)
                 if urlsplit(r.url).path == "/api/ask" and r.method == "POST" else None)
         with mock.patch("ro.route.run", side_effect=AssertionError("미승인 외부 실행")) as run:
-            page.fill("#askInput", "/기록")
-            page.press("#askInput", "Enter")
-            self.assertEqual(page.input_value("#askInput"), "/기록")
-            self.assertTrue(page.locator("#askInput").evaluate("el => el === document.activeElement"))
             page.fill("#askInput", "/기록 직접 남긴 메모")
             with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):
                 page.press("#askInput", "Enter")
             page.wait_for_selector("#toast select", state="visible")
-            self.assertEqual(asks, [])
-            page.fill("#askInput", "/없는명령 오늘 질문")
+            page.fill("#askInput", "2 더하기 3은?")
             page.press("#askInput", "Enter")
-            page.wait_for_selector("#askPreviewCard", state="visible")
-            page.click("#askCancelBtn")
-            self.assertEqual(page.input_value("#askInput"), "/없는명령 오늘 질문")
-            self.assertFalse(page.locator("#askPreviewCard").is_visible())
-            self.assertEqual(len(asks), 1)
-            self.assertIsNot(asks[0].get("confirm"), True)
+            page.wait_for_selector("#sendCard", state="visible")
+            page.click("#sendCancelBtn")
+            self.assertEqual(page.input_value("#askInput"), "2 더하기 3은?")
+            self.assertFalse(page.locator("#sendCard").is_visible())
+            self.assertEqual(asks, [])
             run.assert_not_called()
 
-    def test_organize_approval_visible_in_settings(self):
+    def test_organize_approval_visible_in_organize_tab(self):
         # 서버가 보는 HOME만 임시 경로로 바꾼다. 승인하지 않은 파일은 그대로 둔다
         with mock.patch.dict(os.environ, {"HOME": str(Path(self.fs.name).resolve())}):
             page = self.open_page()
-            page.click('[data-tab="settings"]')
+            page.click('[data-tab="organize"]')
             page.click("#orgScanBtn")
-            page.wait_for_function("document.querySelector('#orgMsg').innerText.includes('새로 만들었습니다')")
+            page.wait_for_function("document.querySelector('#orgCats button')")
             page.locator("#orgCats button").first.click()
             page.wait_for_selector("#writeCard", state="visible")
-            self.assertIn("active", page.locator("#tabBtnSettings").get_attribute("class"))
+            self.assertIn("active", page.locator("#tabBtnOrganize").get_attribute("class"))
             self.assertIn("파일 정리", page.inner_text("#writeText"))
             page.click("#writeRejectBtn")
             page.wait_for_selector("#writeCard", state="hidden")

@@ -17,7 +17,9 @@ from collections import defaultdict
 from pathlib import Path
 
 MAX_ZIP_ENTRIES = 5000  # 이보다 큰 압축은 대조 비용이 커서 판단하지 않는다
-VERSION_RE = re.compile(r"^(?P<base>.*?)[ _-]v(?P<n>\d+(?:\.\d+)*)$", re.I)  # 기획안_v13, app_v1.2
+# 기획안_v13, app_v1.2, 보고서_v3_really_final(버전 뒤에 붙은 final·최종 반복은 같은 버전의 꼬리로 본다)
+VERSION_RE = re.compile(r"^(?P<base>.*?)[ _-]v(?P<n>\d+(?:\.\d+)*)(?:[ _-](?:final|최종|really|real|진짜))*$", re.I)
+DOTTED_RE = re.compile(r"^(?P<base>.*?)[ _-](?P<n>\d+(?:\.\d+)+)$")  # app-1.2, app-1.10 (점이 있어야 버전)
 FINAL_RE = re.compile(r"^(?P<base>.+?)(?P<f>(?:[ _-](?:final|최종))+)$", re.I)  # 보고서_최종, report_final_final
 COPY_RES = (re.compile(r"^(?P<base>.*?)\s*\((?P<n>\d+)\)$"),  # 문서 (1)
             re.compile(r"^(?P<base>.*?)[_-](?P<n>\d{1,2})$"))  # 문서_1
@@ -127,6 +129,9 @@ def version_key(stem):
     stem = unicodedata.normalize("NFC", stem)
     m = VERSION_RE.match(stem)
     if m:
+        return m["base"].strip().lower(), tuple(int(x) for x in m["n"].split(".")), True
+    m = DOTTED_RE.match(stem)
+    if m and m["base"].strip():
         return m["base"].strip().lower(), tuple(int(x) for x in m["n"].split(".")), True
     m = FINAL_RE.match(stem)
     if m and m["base"].strip():

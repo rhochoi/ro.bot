@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -158,7 +159,7 @@ def describe_project(path):
             if lang:
                 langs[lang] += 1
     info = {
-        "path": str(path), "name": path.name, "markers": sorted(markers),
+        "path": str(path), "name": unicodedata.normalize("NFC", path.name), "markers": sorted(markers),
         "languages": dict(langs.most_common(5)),
         "summary": summarize_project(path),
     }

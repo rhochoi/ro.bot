@@ -10,11 +10,9 @@ from ro import log, mapper, pet
 
 
 class AmbientTest(unittest.TestCase):
-    def test_base_length_grows_with_records_and_caps(self):
-        self.assertEqual(pet.ambient_state(0, 9)["base_px"], 60)
-        self.assertEqual(pet.ambient_state(12, 14)["base_px"], 96)
-        self.assertEqual(pet.ambient_state(26, 20)["base_px"], 138)
-        self.assertEqual(pet.ambient_state(500, 20)["base_px"], 140)
+    def test_body_size_never_follows_record_count(self):
+        self.assertNotIn("base_px", pet.ambient_state(500, 20))
+        self.assertNotIn("--base-px", pet.PET_HTML)
 
     def test_time_band_focus_and_attention(self):
         self.assertEqual(pet.ambient_state(0, 9)["label"], "아침 · 0건")
@@ -39,6 +37,7 @@ class ApiFlowTest(unittest.TestCase):
 
     def tearDown(self):
         self.server.shutdown()
+        self.server.server_close()
         self.tmp.cleanup()
 
     def post(self, path, body=None, token=None):
@@ -46,49 +45,44 @@ class ApiFlowTest(unittest.TestCase):
                       headers={"X-Ro-Token": token or self.rt.token, "Content-Type": "application/json"})
         return json.loads(urlopen(req).read())
 
-    def test_ask_requires_explicit_confirm_and_preview_logs_nothing(self):
+    def test_ask_without_matching_preview_never_runs_engine(self):
+        q = "ro.bot 구조 설명해줘"
         with mock.patch("ro.route.run", side_effect=AssertionError("미승인 외부 실행")) as run:
-            for confirm in (None, False, "true", 1):
-                with self.subTest(confirm=confirm):
-                    body = {"question": "ro.bot 구조 설명해줘"}
-                    if confirm is not None:
-                        body["confirm"] = confirm
+            pv = self.post("/api/ask/preview", {"question": q})
+            self.assertTrue(pv["ok"])
+            self.assertEqual(pv["projects"], ["ro.bot"])
+            self.assertGreater(pv["context_chars"], 0)
+            for body in ({"question": q}, {"question": q, "confirm": True}, {"question": q, "preview_id": "wrong"},
+                         {"question": "다른 질문", "preview_id": pv["id"]}):
+                with self.subTest(body=body):
                     r = self.post("/api/ask", body)
-                    self.assertTrue(r["ok"])
-                    self.assertTrue(r["preview"])
-                    self.assertTrue(r["engine"])
-                    self.assertIn("model", r)
-                    self.assertEqual(r["projects"], ["ro.bot"])
-                    self.assertGreater(r["context_chars"], 0)
+                    self.assertEqual((r["ok"], r["reason"]), (False, "needs_preview"))
             run.assert_not_called()
         self.assertEqual(log.read(time.strftime("%Y-%m-%d"), self.tmp.name), [])
         self.assertIsNone(self.rt.last_answer)
         self.assertFalse(self.rt.busy)
 
-    def test_ask_confirm_executes_once(self):
+    def test_ask_with_preview_id_executes_once(self):
+        q = "ro.bot 구조 설명해줘"
+        pv = self.post("/api/ask/preview", {"question": q})
         with mock.patch("ro.route.run", return_value={"ok": True, "output": "답", "code": 0,
                                                      "duration": 0.1}) as run:
-            r = self.post("/api/ask", {"question": "ro.bot 구조 설명해줘", "confirm": True})
+            r = self.post("/api/ask", {"question": q, "preview_id": pv["id"]})
         run.assert_called_once()
         self.assertEqual((r["ok"], r["output"]), (True, "답"))
-        self.assertNotIn("preview", r)
         self.assertEqual([e["kind"] for e in log.read(time.strftime("%Y-%m-%d"), self.tmp.name)], ["route"])
 
     def test_preview_shares_question_validation(self):
         with mock.patch("ro.route.run", side_effect=AssertionError("미승인 외부 실행")):
             self.assertEqual(self.rt.preview_question(" "), self.rt.ask_question(" "))
             Path(self.rt.map_path).unlink()
-            self.assertEqual(self.rt.preview_question("질문"), self.rt.ask_question("질문"))
             self.assertEqual(self.rt.preview_question("질문")["reason"], "needs_setup")
 
-    def test_today_stats_counts_live_kinds_and_engines(self):
-        log.append("note", "메모 하나", engine="codex", log_dir=self.tmp.name)
-        log.append("note", "메모 둘", engine="codex", log_dir=self.tmp.name)
-        log.append("pet", "펫 실행", engine="claude", log_dir=self.tmp.name)
-        log.append("unknown_kind", "기타", log_dir=self.tmp.name)
-        stats = self.rt.snapshot()["today_stats"]
-        self.assertEqual(stats["kinds"], [["메모", 2], ["펫 실행", 1], ["unknown_kind", 1]])
-        self.assertEqual(stats["engines"], [["codex", 2], ["claude", 1]])
+    def test_stats_counts_today_kinds(self):
+        log.append("note", "메모 하나", log_dir=self.tmp.name)
+        log.append("note", "메모 둘", log_dir=self.tmp.name)
+        log.append("route", "질문 하나", engine="codex", log_dir=self.tmp.name)
+        self.assertEqual([list(r) for r in self.rt.snapshot()["stats"]], [["기록", 2], ["질문", 1]])
 
     def test_capture_undo_hides_from_state(self):
         r = self.post("/api/capture", {"kind": "text", "name": "메모", "text": "ro.bot 팔레트 정리", "size": 10})
@@ -97,7 +91,7 @@ class ApiFlowTest(unittest.TestCase):
         self.assertEqual(self.rt.snapshot()["counts"]["today_events"], 1)
         self.assertTrue(self.post("/api/capture_undo", {"id": r["id"]})["ok"])
         self.assertEqual(self.rt.snapshot()["counts"]["today_events"], 0)
-        self.assertEqual(self.rt.snapshot()["today_stats"], {"kinds": [], "engines": []})
+        self.assertEqual(list(self.rt.snapshot()["stats"]), [])
 
     def test_recall_organize_and_focus_flow(self):
         log.append("note", "ro.bot 작업 하나", log_dir=self.tmp.name)
