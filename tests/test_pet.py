@@ -513,6 +513,18 @@ class PetTest(unittest.TestCase):
         for leak in ("evaluateJavaScript", "print(", "NSLog", "FileManager", "URLSession"):
             self.assertNotIn(leak, scan)
 
+    def test_self_load_fixes(self):
+        # 9단계 실측: 말풍선이 닫혀 있으면 상태 폴링을 2초로 늦춘다 (데스크톱 6.3% → 3.8%, 코어 하나 기준)
+        html = pet.PET_HTML
+        self.assertIn("window._poll = setInterval(refreshState, fast ? 450 : 2000);", html)
+        self.assertIn("if (window._poll !== undefined) setPollRate(open);", html)
+        self.assertIn('setPollRate(!bubble.classList.contains("hidden"));', html)
+        self.assertNotIn("setInterval(refreshState, 450);", html)
+        # 아이콘은 기기 픽셀에 맞춰 그려 1x 화면에서도 층 사이와 눈이 번지지 않는다
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        self.assertIn("let px = max(1, NSGraphicsContext.current?.cgContext.ctm.a ?? 2)", src)
+        self.assertIn("body.origin.y = base.minY - max(1 / px, round(pose.base.minY - pose.body.maxY)) - body.height", src)
+
     @unittest.skipUnless(shutil.which("swiftc"), "swiftc 없음")
     def test_cpu_gait_selftest(self):
         # 앱을 띄우지 않고 계산만 확인한다: idle 인덱스, UInt32 wrap, 순간 튐, 50% 흔들림, 계단 반응, 과열 해제

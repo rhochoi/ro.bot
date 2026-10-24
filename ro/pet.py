@@ -2403,6 +2403,7 @@ function notifyHost(payload) {
 function setBubbleOpen(open) {
   bubble.classList.toggle("hidden", !open);
   notifyHost({ type: "bubble", open: !!open });
+  if (window._poll !== undefined) setPollRate(open);
 }
 
 window.toggleBubbleFromHost = function(forceOpen) {
@@ -2947,6 +2948,14 @@ function renderLogs(logs, todayCount) {
   }));
 }
 
+/* 상태 폴링: 말풍선이 열려 있을 때만 0.45초, 닫혀 있으면 2초.
+   펫만 떠 있을 때 0.45초 폴링이 파이썬·WebKit 네트워킹·WebContent에 코어 하나의 약 4%를 썼다 (9단계 실측) */
+function setPollRate(fast) {
+  clearInterval(window._poll);
+  window._poll = setInterval(refreshState, fast ? 450 : 2000);
+  if (fast) refreshState();
+}
+
 async function refreshState() {
   try {
     const res = await fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } });
@@ -3107,7 +3116,7 @@ if (!isNativeHost) {
   setBubbleOpen(true);
 }
 refreshState();
-window._poll = setInterval(refreshState, 450);
+setPollRate(!bubble.classList.contains("hidden"));
 </script>
 </body>
 </html>

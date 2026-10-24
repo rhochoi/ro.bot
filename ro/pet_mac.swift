@@ -761,19 +761,37 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         let img = NSImage(size: NSSize(width: iconCanvas, height: iconCanvas), flipped: true) { _ in
             let ink = NSColor(calibratedRed: 0x1A/255.0, green: 0x19/255.0, blue: 0x17/255.0, alpha: 1.0)
             ink.setFill()
-            for r in [pose.head, pose.body, pose.base] {
+            // 기기 픽셀에 맞춘다. 안 맞추면 1x 화면에서 0.8pt 층 사이와 1.3pt 눈이 회색으로 번진다 (9단계 확인).
+            // 위치와 크기를 따로 반올림해 두 눈 크기가 같게, 층은 받침부터 쌓아 층 사이가 1px 아래로 붙지 않게 한다
+            let px = max(1, NSGraphicsContext.current?.cgContext.ctm.a ?? 2)
+            func round(_ v: CGFloat) -> CGFloat { (v * px).rounded() / px }
+            func snap(_ r: NSRect) -> NSRect {
+                NSRect(x: round(r.minX), y: round(r.minY), width: max(1 / px, round(r.width)), height: max(1 / px, round(r.height)))
+            }
+            let base = snap(pose.base)
+            var body = snap(pose.body)
+            body.origin.y = base.minY - max(1 / px, round(pose.base.minY - pose.body.maxY)) - body.height
+            var head = snap(pose.head)
+            head.origin.y = body.minY - max(1 / px, round(pose.body.minY - pose.head.maxY)) - head.height
+            for r in [head, body, base] {
                 let radius = min(r.height / 2, 2.5)
                 NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill()
             }
             // 템플릿 이미지는 알파만 쓰므로 눈은 색을 칠하지 않고 투명하게 뚫는다. 과열이면 가늘게 뜬다
-            let hd = pose.head
+            let hd = head
             let eyes = pose.narrowEyes
                 ? [NSRect(x: hd.minX + 5.3, y: hd.minY + hd.height * 0.42, width: 1.7, height: 1.0),
                    NSRect(x: hd.minX + 7.9, y: hd.minY + hd.height * 0.42, width: 1.5, height: 1.0)]
                 : [NSRect(x: hd.minX + 5.5, y: hd.minY + hd.height * 0.24, width: 1.3, height: hd.height * 0.5),
                    NSRect(x: hd.minX + 8.0, y: hd.minY + hd.height * 0.28, width: 1.2, height: hd.height * 0.42)]
             NSGraphicsContext.current?.compositingOperation = .clear
-            for e in eyes {
+            // 눈은 크기를 먼저 반올림하고 원래 중심에 다시 놓는다 (두 눈 높이가 어긋나 보이지 않게)
+            func snapEye(_ e: NSRect) -> NSRect {
+                // 높이는 내림: 1x에서 2.5pt·2.1pt 눈이 3px·2px로 갈려 한쪽이 들려 보이던 것을 막는다 (2x는 5px·4px 유지)
+                let w = max(1 / px, round(e.width)), h = max(1 / px, (e.height * px).rounded(.down) / px)
+                return NSRect(x: round(e.midX - w / 2), y: round(e.midY - h / 2), width: w, height: h)
+            }
+            for e in eyes.map(snapEye) {
                 NSBezierPath(roundedRect: e, xRadius: 0.5, yRadius: 0.5).fill()
             }
             NSGraphicsContext.current?.compositingOperation = .sourceOver
