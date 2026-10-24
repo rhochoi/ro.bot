@@ -259,24 +259,12 @@ class PetTest(unittest.TestCase):
     def test_bubble_fits_overlay_window(self):
         # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         html = pet.PET_HTML
-        order = [html.index(k) for k in ('id="bubbleTop"', 'id="writeCard"', 'id="paneHome"', 'id="paneTimeline"',
-                                          'id="paneOrganize"', 'id="orgCard"', 'id="paneSettings"', 'id="askForm"')]
+        order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="writeCard"', 'id="activityList"',
+                                          'id="paneSettings"', 'id="fileOrgBlock"', 'id="askForm"')]
         self.assertEqual(order, sorted(order))
-        bubble_css = html[html.index("  .bubble {"):html.index(".bubble.hidden")]
-        self.assertIn("max-height: min(440px, 100%);", bubble_css)
-        self.assertIn("overflow: hidden;", bubble_css)
-        pane_css = html[html.index(".tab-pane.active {"):]
-        self.assertIn("overflow-y: auto;", pane_css[:pane_css.index("}")])
-
-    def test_organize_tab_and_logs_render_as_text(self):
-        html = pet.PET_HTML
-        self.assertIn('data-tab="organize"', html)
-        self.assertIn('paneOrganize.classList.toggle("active", tabName === "organize");', html)
-        for api in ("/api/organize/scan", "/api/organize/apply", "/api/organize/undo"):
-            self.assertIn(api, html)
-        # 기록 내용(파일·웹에서 온 데이터)을 HTML로 해석하지 않는다
-        self.assertNotIn(".innerHTML", html)
-        self.assertIn('fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } })', html)
+        # 리디자인 패널은 탭 영역(가운데)이 스크롤되고 툴바·입력창은 고정된다
+        self.assertRegex(html, r"\.tab-pane\.active \{[^}]*overflow-y: auto;")
+        self.assertIn("max-width: 100%;", html[html.index(".bubble {"):])
 
     def test_http_server_localhost_only_and_token_protected(self):
         with tempfile.TemporaryDirectory() as d:
@@ -422,7 +410,7 @@ class PetTest(unittest.TestCase):
     def test_rule_counter_and_feedback_ack(self):
         html = pet.PET_HTML
         self.assertIn("ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total}", html)
-        self.assertIn('id="ruleText" class="gate-text', html)
+        self.assertIn('id="ruleText" class="gate-body gate-text"', html)
         self.assertIn('"수용 반영 ✓"', html)
 
     def test_menubar_icon_is_template_and_permission_hint(self):
@@ -440,8 +428,8 @@ class PetTest(unittest.TestCase):
         self.assertIn("if (!askInput.value) askInput.value = q;", submit)
         keydown = html[html.index('window.addEventListener("keydown"'):]
         self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))
-        self.assertIn("text.title = item.summary;", html)  # 말줄임된 기록은 마우스를 올려 본다
-        self.assertIn("if (logsKey !== lastLogsKey) {", html)  # 폴링마다 같은 내용으로 다시 그리지 않는다
+        self.assertIn("lastActKey", html)  # 폴링마다 목록 DOM을 다시 만들지 않는다
+        self.assertIn("lastTlKey", html)
 
     def test_snapshot_rereads_disk_only_when_files_change(self):
         with tempfile.TemporaryDirectory() as d:

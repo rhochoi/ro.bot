@@ -36,7 +36,8 @@ def render(tool, root=ROOT):
     if tool == "agents":
         return f"{MARK}\n{INTRO}\n{_principles(root).strip()}\n"
     if tool == "claude":
-        return f"{MARK}\n{INTRO}\n@{PRINCIPLES}\n"
+        return (f"{MARK}\n{INTRO}\n@{PRINCIPLES}\n"
+                "\n구현·탐색·테스트는 scripts/delegate.sh codex로, 브라우저·UI는 agy로 위임한다. Claude는 조율·검토만 한다.\n")
     raise ValueError(tool)
 
 
