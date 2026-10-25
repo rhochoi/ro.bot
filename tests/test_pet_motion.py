@@ -425,12 +425,32 @@ class ShakeTest(MotionBase):
         self.assertGreater(worst, -0.5)
 
     def test_long_shake_does_not_turn_dizzy(self):
-        # 모션은 하나씩만: 흔들기가 어지러움(swirl)으로 이어지지 않는다
+        # 흔드는 동안은 찡그리기만 한다(눈이 돌지 않는다)
         pg = self.page()
         pg.evaluate(SHAKE_JS, [1000, 130, 2, 2400])
         rows = pg.evaluate("window.__rot")
         self.assertIn("squint", [r[4] for r in rows])
         self.assertNotIn("swirl", [r[4] for r in rows])
+
+    def test_swirl_starts_on_landing_after_shake_release(self):
+        pg = self.page()
+        tend = pg.evaluate(SHAKE_JS, [1000, 130, 2, 1000])
+        self.assertTrue(pg.evaluate("RoMotion.state.shakeActive"))
+        pg.evaluate("(t) => RoMotion.up(t, true, 200)", tend)        # 흔들다 놓아 200px 떨어진다
+        land = pg.evaluate("RoMotion.state.dizzyFrom")
+        self.assertAlmostEqual(land - tend, pg.evaluate("RoMotion.state.tFall") * 1000, delta=1)
+        eyes = lambda t: pg.evaluate("(t) => { RoMotion.advance(t); return RoMotion.pose(t).eyes.shape; }", t)
+        self.assertEqual(eyes(land - 20), "big")                   # 떨어지는 동안은 아직 돌지 않는다
+        for d in (10, 600, 1150):
+            self.assertEqual(eyes(land + d), "swirl")              # 착지한 순간부터 1.2초 동안 돈다
+        self.assertNotEqual(eyes(land + 1250), "swirl")
+
+    def test_release_without_shake_does_not_swirl(self):
+        pg = self.page()
+        tend = pg.evaluate(DRAG_JS, [1000, 600, 300, 0])
+        pg.evaluate("(t) => RoMotion.up(t, true, 200)", tend)
+        shapes = pg.evaluate("(t0) => { const out = []; for (let t = t0; t < t0 + 1500; t += 20) { RoMotion.advance(t); out.push(RoMotion.pose(t).eyes.shape); } return out; }", tend)
+        self.assertNotIn("swirl", shapes)
 
     def test_swirl_spins_360_per_0_6s(self):
         pg = self.page()
@@ -529,16 +549,12 @@ class LiveInputTest(MotionBase):
             pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=8000)
             self.assertFalse(pg.evaluate("document.querySelector('.act-btn.active') !== null"))
 
-    def test_shake_preview_squints_and_never_swirls(self):
+    def test_shake_preview_squints_then_swirls_after_landing(self):
         pg = self.live()
-        pg.evaluate("""() => { window.__eyes = []; new MutationObserver(() => window.__eyes.push(
-            document.getElementById('petWrap').dataset.eyes)).observe(document.getElementById('petWrap'),
-            {attributes: true, attributeFilter: ['data-eyes']}); }""")
         pg.evaluate("window.triggerAction('shake', 0)")
         pg.wait_for_function("document.getElementById('petWrap').dataset.eyes === 'squint'", timeout=4000)
+        pg.wait_for_function("document.getElementById('petWrap').dataset.eyes === 'swirl'", timeout=6000)
         pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=9000)
-        self.assertNotIn("swirl", pg.evaluate("window.__eyes"))
-
     def test_hover_squish_does_not_fight_the_engine(self):
         pg = self.live()
         x, y = self.center(pg)
