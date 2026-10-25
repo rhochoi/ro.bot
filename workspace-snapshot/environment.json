@@ -1,0 +1,20 @@
+{
+  "python": "3.13.16",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "uv": "uv 0.12.23 (x86_64-unknown-linux-gnu)",
+  "packages": [
+    {
+      "name": "pyserial",
+      "version": "3.5"
+    },
+    {
+      "name": "rog-bot",
+      "version": "0.0.0.post1.dev131+g23b38f56f"
+    }
+  ],
+  "browser_verification": {
+    "playwright": "1.64.1",
+    "axe_core": "4.10.3",
+    "chromium_executable": "/usr/bin/chromium"
+  }
+}

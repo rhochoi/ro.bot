@@ -1,0 +1,48 @@
+[
+  {
+    "case": "S16_busy_cancel",
+    "second_rejected": true,
+    "cancel_ok": true,
+    "cancelled": true,
+    "busy_after": false
+  },
+  {
+    "case": "S17_restart_state",
+    "last_answer_restored": false,
+    "preview_restored": false,
+    "route_events_preserved": 1
+  },
+  {
+    "case": "S18_route_privacy_contract",
+    "unmasked_task_reaches_runner": true
+  },
+  {
+    "case": "S19_browser_record_recall",
+    "visible": true,
+    "capture_request": true,
+    "recall_request": true
+  },
+  {
+    "case": "S20_browser_preferences_failure",
+    "glass_shown": true,
+    "glass_persisted": false,
+    "error_visible": false
+  },
+  {
+    "case": "S20b_browser_reload",
+    "glass_after_reload": false
+  },
+  {
+    "case": "S21_same_second_reapply",
+    "same_batch": true,
+    "second_move": 1,
+    "pending_undo": 0,
+    "source_exists": false
+  },
+  {
+    "case": "S22_all_skipped_result",
+    "ok": true,
+    "output": "이미지 0건 이동 (되돌리기 가능), 건너뜀 1건",
+    "resolved": true
+  }
+]

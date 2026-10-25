@@ -1,0 +1,97 @@
+[
+  {
+    "case": "S01_HTTP_guards",
+    "no_token": 403,
+    "bad_host": 403,
+    "valid": 200
+  },
+  {
+    "case": "S02_capture_recall_revoke",
+    "capture_ok": true,
+    "found_before": true,
+    "undo_ok": true,
+    "found_after": false
+  },
+  {
+    "case": "S03_ask_without_preview",
+    "reason": "needs_preview",
+    "engine_calls": 0
+  },
+  {
+    "case": "S04_expired_preview",
+    "reason": "needs_preview",
+    "engine_calls": 0
+  },
+  {
+    "case": "S05_question_feedback",
+    "answer_ok": true,
+    "routes": 1,
+    "feedbacks": 3,
+    "engine_calls": 1
+  },
+  {
+    "case": "S06_record_identity_collision",
+    "same_id": true,
+    "remaining": 0
+  },
+  {
+    "case": "S07_last_root_removed",
+    "saved_roots": [],
+    "visible_projects": [
+      "alpha"
+    ],
+    "next_scan_roots": [
+      "~/Developer",
+      "~/Projects"
+    ]
+  },
+  {
+    "case": "S08_scope_changed_after_preview",
+    "current_projects": 0,
+    "sent_revoked_context": true,
+    "ok": true
+  },
+  {
+    "case": "S09_memory_consumption",
+    "approved": true,
+    "file_contains_memory": true,
+    "prompt_contains_memory": false
+  },
+  {
+    "case": "S10_memory_partial_commit",
+    "pending_after_error": false,
+    "approved_after_error": true
+  },
+  {
+    "case": "S11_plan_edited_after_preview",
+    "displayed": "1970-01-01_sample.png",
+    "actual": "1970-01-01_different-approved-name.png",
+    "ok": true,
+    "same": false
+  },
+  {
+    "case": "S12_organize_restore",
+    "restored": 1,
+    "skipped": 0,
+    "content_restored": true
+  },
+  {
+    "case": "S13_move_without_journal",
+    "source_exists": false,
+    "dest_exists": true,
+    "new_undo_entries": 0
+  },
+  {
+    "case": "S14_revoke_consumers",
+    "recall_found": false,
+    "stats_activity": 1,
+    "external_context_contains_revoked": true
+  },
+  {
+    "case": "S15_delete_derived_state",
+    "raw_events": 0,
+    "stats_days": 3,
+    "memory_candidates": 1,
+    "history_survives": true
+  }
+]

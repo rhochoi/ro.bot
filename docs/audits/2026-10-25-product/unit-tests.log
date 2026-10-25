@@ -1,0 +1,15 @@
+..............................................................................................경고: rules.json 손상 → /tmp/tmpf9emyl37/rules.json.corrupt-1792904919 로 보존하고 초기화
+..........F.....................................................................s........................................s...ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss......................................................................
+======================================================================
+FAIL: test_private_repo_without_gh_stops (tests.test_install.InstallScriptTest.test_private_repo_without_gh_stops)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/ro.bot/tests/test_install.py", line 135, in test_private_repo_without_gh_stops
+    self.assertIn("gh가 필요합니다", r.stderr)
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'gh가 필요합니다' not found in '\x1b[33m주의:\x1b[0m macOS가 아닙니다. 펫(ro pet) 등 일부 기능은 macOS 전용입니다.\n/workspace/ro.bot/install.sh: 줄 54: /dev/tty: 그런 장치 혹은 주소가 없음\n'
+
+----------------------------------------------------------------------
+Ran 353 tests in 16.548s
+
+FAILED (failures=1, skipped=66)

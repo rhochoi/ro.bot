@@ -1,0 +1,41 @@
+[
+  {
+    "case": "S23_wheel_serial",
+    "exit_code": 1,
+    "error": "ModuleNotFoundError: No module named 'serial_link'"
+  },
+  {
+    "case": "S24_write_gate_identity",
+    "different_ids": true,
+    "executed_second": true,
+    "approval_takes_id": false
+  },
+  {
+    "case": "S25_first_run_question",
+    "reason": "needs_setup"
+  },
+  {
+    "inventory": "top_level_cli",
+    "count": 18,
+    "names": [
+      "map",
+      "show",
+      "route",
+      "learn",
+      "audit",
+      "eval",
+      "ambient",
+      "tidy",
+      "organize",
+      "update",
+      "doctor",
+      "ask",
+      "feedback",
+      "setup",
+      "collect",
+      "bench",
+      "log",
+      "pet"
+    ]
+  }
+]
