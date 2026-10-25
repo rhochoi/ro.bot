@@ -28,7 +28,7 @@ def _tilde(path):
 
 def status(home=config.HOME, map_path="~/.ro/map.json"):
     cfg = config.load(home)
-    configured = bool(cfg.get("roots"))
+    configured = isinstance(cfg.get("roots"), list)
     mp = Path(map_path).expanduser()
     engines = {e: {"installed": bool(shutil.which(e))} for e in route.ENGINES}
     return {
@@ -47,7 +47,7 @@ def status(home=config.HOME, map_path="~/.ro/map.json"):
 def render(st):
     lines = ["== ro 설정 상태 =="]
     lines.append("스캔 폴더 (" + ("설정됨" if st["roots_configured"] else "기본값 — 직접 정하세요") + "): "
-                 + ", ".join(st["roots"]))
+                 + (", ".join(st["roots"]) or "없음 — 지도·질문에 쓰는 프로젝트가 없습니다(ro setup roots add 폴더)"))
     found = [c["path"] for c in st["root_candidates"] if c["exists"]]
     lines.append("  추가 후보: " + (", ".join(found) or "없음") + "   (ro setup roots add 폴더)")
     lines.append("지도: " + ("있음" if st["map_exists"] else "없음 — `ro map`으로 만드세요"))

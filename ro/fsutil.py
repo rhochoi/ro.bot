@@ -1,7 +1,23 @@
-"""ro 데이터 파일 공통 입출력: 비공개 권한(0700/0600) + 원자적 쓰기."""
+"""ro 데이터 파일 공통 입출력: 비공개 권한(0700/0600) + 원자적 쓰기 + 프로세스 간 잠금."""
+import contextlib
+import fcntl
 import os
 import tempfile
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def locked(lock_path):
+    """lock_path에 배타 잠금(flock)을 건다. 같은 파일을 읽고-바꾸고-쓰는 프로세스들(펫·CLI)을 줄 세운다."""
+    lock_path = Path(lock_path).expanduser()
+    ensure_dir(lock_path.parent)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def ensure_dir(path):

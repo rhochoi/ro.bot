@@ -92,9 +92,31 @@ def _epoch(iso):
         return None
 
 
+_SEEN = None  # run()이 채우는 이미 기록된 활동 키. 커서 저장이 실패한 뒤 다시 돌려도 같은 활동을 두 번 쓰지 않는다
+
+
+def _key(source, kind, at, summary, data):
+    return (source, kind, str(data.get("ref")), str(data.get("id")), data.get("rev"), int(at), summary)
+
+
+def _seen_keys(log_dir):
+    keys = set()
+    for e in log.read_all(log_dir):
+        d = e.get("data") or {}
+        if e.get("kind") == "activity" and "at" in d:
+            keys.add(_key(d.get("source"), d.get("type"), d.get("at"), e.get("summary"), d))
+    return keys
+
+
 def _emit(source, kind, at, summary, data, dry, log_dir):
+    summary = ambient.sanitize(summary)
+    if _SEEN is not None:
+        k = _key(source, kind, at, summary, data)
+        if k in _SEEN:
+            return 0
+        _SEEN.add(k)
     if not dry:
-        log.append("activity", ambient.sanitize(summary), {"source": source, "type": kind, **data},
+        log.append("activity", summary, {"source": source, "type": kind, "at": int(at), **data},
                    log_dir=log_dir, at=at)
     return 1
 
@@ -111,13 +133,13 @@ def collect_git(cfg, state, dry=False, home=HOME, log_dir=log.LOG_DIR):
             continue
         last = state.setdefault("git", {}).get(repo)
         email = git("config", "user.email").stdout.strip()
-        args = ["log", "--reverse", "--max-count=200", "--format=%H%x1f%cI%x1f%s"]
+        args = ["log", "--reverse", "--format=%H%x1f%cI%x1f%s"]
         if email:
             args.append(f"--author=<{email}>")  # 본인 커밋만(공동 저장소의 남의 활동은 수집하지 않음)
         if last and git("merge-base", "--is-ancestor", last, "HEAD").returncode == 0:
-            args.append(f"{last}..HEAD")
+            args.append(f"{last}..HEAD")  # 이어서 수집할 때는 개수 제한 없이 끝까지(커서를 HEAD로 옮기므로)
         else:
-            args.append(f"--since={FIRST_RUN_DAYS}.days")
+            args += [f"--since={FIRST_RUN_DAYS}.days", "--max-count=200"]  # 처음에만 최근 것으로 제한
         for line in git(*args).stdout.splitlines():
             h, iso, subject = (line.split("\x1f", 2) + ["", ""])[:3]
             at = _epoch(iso)
@@ -297,12 +319,17 @@ def collect_sessions(cfg, state, dry=False, home=HOME, log_dir=log.LOG_DIR, now=
 # ---------- 실행 ----------
 def run(sources=SOURCES, dry=False, home=HOME, log_dir=log.LOG_DIR):
     """허용된 소스만 수집. 반환: {소스: 신규 이벤트 수}. dry면 아무것도 쓰지 않는다(커서 포함)."""
+    global _SEEN
     cfg = load_config(home)
     state = _load("collect_state.json", {}, home)
     fns = {"git": collect_git, "shell": collect_shell, "sessions": collect_sessions}
     result = {}
-    for s in sources:
-        result[s] = fns[s](cfg, state, dry, home, log_dir)
+    _SEEN = _seen_keys(log_dir)
+    try:
+        for s in sources:
+            result[s] = fns[s](cfg, state, dry, home, log_dir)
+    finally:
+        _SEEN = None
     if not dry:
         _save("collect_state.json", state, home)
         total = sum(result.values())

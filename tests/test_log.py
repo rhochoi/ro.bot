@@ -51,6 +51,17 @@ class LogTest(unittest.TestCase):
         for plain in ("비밀번호는 어떻게 바꿔?", "암호화는 뭐야", "password 재설정 방법", "tokens: 5 used"):
             self.assertEqual(r(plain), plain)
 
+    def test_redact_whole_pem_block_and_url_credentials(self):
+        pem = "앞\n-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKBODYMARKER\nabc==\n-----END RSA PRIVATE KEY-----\n뒤"
+        out = log.redact(pem)
+        self.assertNotIn("BODYMARKER", out)
+        self.assertEqual(out, f"앞\n{log.MASK}\n뒤")
+        cut = log.redact("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1CUTMARKER")  # END가 잘린 블록
+        self.assertNotIn("CUTMARKER", cut)
+        self.assertEqual(log.redact("clone https://alice:s3cret@example.com/r.git"),
+                         f"clone https://{log.MASK}@example.com/r.git")
+        self.assertEqual(log.redact("https://example.com/a@b"), "https://example.com/a@b")  # 경로의 @는 그대로
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -66,3 +77,23 @@ class LogDeleteTest(unittest.TestCase):
             self.assertEqual(len(list(Path(d).glob("*.jsonl"))), 2)
             self.assertEqual(log.delete(log_dir=d), 2)
             self.assertEqual(log.delete(log_dir=d), 0)
+
+    def test_delete_also_removes_derived_state(self):
+        with tempfile.TemporaryDirectory() as h:
+            ld = Path(h) / "log"
+            log.append("note", "x", log_dir=ld)
+            (Path(h) / "stats").mkdir()
+            (Path(h) / "stats" / "2026-01-01.json").write_text("{}")
+            (Path(h) / "pending.json").write_text("[]")
+            (Path(h) / "last_ask.json").write_text("{}")
+            (Path(h) / "ro-model.md").write_text("- 승인한 기억")
+            log.delete(log_dir=ld)
+            self.assertEqual(sorted(p.name for p in Path(h).rglob("*") if p.is_file()), ["ro-model.md"])
+
+    def test_delete_with_other_folder_leaves_parent_alone(self):
+        with tempfile.TemporaryDirectory() as h:
+            d = Path(h) / "custom"
+            log.append("note", "x", log_dir=d)
+            (Path(h) / "pending.json").write_text("[]")
+            log.delete(log_dir=d)
+            self.assertTrue((Path(h) / "pending.json").exists())

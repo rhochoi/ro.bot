@@ -6,6 +6,7 @@
 import datetime
 import hashlib
 import json
+import re
 import sys
 import time
 from collections import Counter, defaultdict
@@ -109,26 +110,67 @@ def _pop(cid, home):
 
 
 def approve(cid, home=HOME, memory_path=MEMORY_PATH, routing_path=None):
-    peek = next((c for c in pending(home) if c["id"] == cid), None)
-    if peek and peek.get("kind") == "routing":
-        from . import revise  # 지연 임포트(순환 방지)
-        # routing.toml 적용이 검증을 통과해야만 대기열에서 빼고 규칙으로 기록한다
-        revise.apply_to_toml(peek, routing_path)
-    cand = _pop(cid, home)
+    """효과(routing.toml·기억 파일·규칙)를 모두 저장한 뒤에야 대기열에서 뺀다.
+    중간에 실패하면 후보가 대기열에 남아 다시 승인할 수 있고, 이미 반영된 단계는 다시 하지 않는다."""
+    cand = next((c for c in pending(home) if c["id"] == cid), None)
+    if cand is None:
+        raise KeyError(f"후보 없음: {cid}")
     rules = load_rules(home)
-    rules.append(log.redact(cand))
-    _save("rules.json", home, rules)
-    if cand.get("kind") == "memory":
+    done = any(r.get("id") == cid for r in rules)
+    if cand.get("kind") == "routing" and not done and not _routing_applied(cand, routing_path):
+        from . import revise  # 지연 임포트(순환 방지)
+        revise.apply_to_toml(cand, routing_path)  # 검증을 통과해야만 다음 단계로 간다
+    if cand.get("kind") == "memory" and not _memory_has(cand, memory_path):
         append_memory(cand, memory_path)
+    if not done:
+        _save("rules.json", home, rules + [log.redact(cand)])
+    _pop(cid, home)
     return cand
+
+
+def active_memories(path=MEMORY_PATH, today=None, limit=8):
+    """질문에 붙일 승인된 기억(유효 기간 안, 최근 것부터 limit개). ro learn이 남긴 형식의 줄만 읽는다."""
+    today = today or datetime.date.today()
+    p = Path(path).expanduser()
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^- (.+?) · 출처: (.+?) · 확인: \S+ · 유효: (\d{4}-\d{2}-\d{2})까지", line)
+        if not m:
+            continue
+        try:
+            until = datetime.date.fromisoformat(m[3])
+        except ValueError:
+            continue
+        if until >= today:  # 유효 기간이 지난 기억은 다시 확인받기 전까지 쓰지 않는다
+            out.append({"text": m[1], "source": m[2], "until": m[3]})
+    return out[-limit:]
+
+
+def _routing_applied(cand, routing_path=None):
+    """routing.toml에 이미 반영됐는지(승인 중간 실패 뒤 재시도)."""
+    from . import route
+    p = Path(routing_path or route.USER_ROUTING).expanduser()
+    if not p.exists():
+        return False
+    return route.default_engine(cand.get("category"), route.load_routing(p)) == cand.get("engine")
+
+
+def _memory_text(cand):
+    return ambient.sanitize(" ".join(str(cand["text"]).split()), MEMORY_MAX).replace(" · ", " ")
+
+
+def _memory_has(cand, path=MEMORY_PATH):
+    p = Path(path)
+    return p.exists() and f"- {_memory_text(cand)} · " in p.read_text(encoding="utf-8")
 
 
 def append_memory(cand, path=MEMORY_PATH, today=None):
     """승인된 기억 후보를 ~/.ro/ro-model.md에 한 줄로 추가한다(출처·확인일·유효기간·신뢰 포함).
     파일만 수정한다 — 커밋은 사용자가 diff를 보고 직접 한다."""
     today = today or datetime.date.today()
-    text = ambient.sanitize(" ".join(str(cand["text"]).split()), MEMORY_MAX)
-    text = text.replace(" · ", " ")  # 필드 구분자와 충돌하지 않게
+    text = _memory_text(cand)  # 필드 구분자(" · ")와 충돌하지 않게 정리한 한 줄
     until = today + datetime.timedelta(days=MEMORY_TTL_DAYS)
     source = ambient.sanitize(str(cand.get("source", "ro learn")), 40).replace(" · ", " ")
     trust = cand.get("trust") if cand.get("trust") in ("높음", "보통", "낮음") else "낮음"
@@ -144,6 +186,9 @@ def append_memory(cand, path=MEMORY_PATH, today=None):
 
 
 def reject(cid, home=HOME):
-    cand = _pop(cid, home)
-    _save("rejected.json", home, _load("rejected.json", home, []) + [cid])
-    return cand
+    if not any(c["id"] == cid for c in pending(home)):
+        raise KeyError(f"후보 없음: {cid}")
+    rejected = _load("rejected.json", home, [])
+    if cid not in rejected:  # 거절을 먼저 남겨야 중간 실패 뒤 propose가 같은 후보를 되살리지 않는다
+        _save("rejected.json", home, rejected + [cid])
+    return _pop(cid, home)

@@ -1,6 +1,7 @@
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 from ro import log, records
 
@@ -35,6 +36,19 @@ class RecordsTest(unittest.TestCase):
         r = records.capture("link", "참고", "https://example.com/a/b?token=zzz#x", 0, PROJECTS, log_dir=self.d)
         self.assertEqual(r["excerpt"], ["https://example.com/a/b"])
         self.assertFalse(records.capture("link", "x", "file:///etc/passwd", 0, PROJECTS, log_dir=self.d)["ok"])
+
+    def test_same_second_same_text_records_are_revoked_separately(self):
+        with unittest.mock.patch.object(log.time, "time", return_value=1_790_000_000.0):
+            a = records.capture("text", "메모", "같은 내용", 0, PROJECTS, log_dir=self.d)
+            b = records.capture("text", "메모", "같은 내용", 0, PROJECTS, log_dir=self.d)
+        self.assertNotEqual(a["id"], b["id"])
+        self.assertTrue(records.revoke(a["id"], log_dir=self.d)["ok"])
+        self.assertEqual([records.eid(e) for e in records.live(log.read_all(self.d))], [b["id"]])
+
+    def test_old_events_without_id_keep_their_hash_id(self):
+        ev = {"ts": "2026-10-20T10:00:00+0900", "kind": "note", "summary": "옛 기록"}
+        self.assertEqual(len(records.eid(ev)), 10)
+        self.assertEqual(records.eid({**ev, "id": "abc123"}), "abc123")
 
     def test_revoke_hides_event_without_deleting_it(self):
         r = records.capture("text", "메모", "되돌릴 기록", 0, PROJECTS, log_dir=self.d)

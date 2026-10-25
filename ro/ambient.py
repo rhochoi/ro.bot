@@ -50,7 +50,8 @@ def pump(lines, source, max_per_min=MAX_PER_MIN, log_dir=log.LOG_DIR, now=time.t
 def serial_lines(port, baud):
     """시리얼 포트에서 줄을 읽는 제너레이터(Ctrl+C로 종료)."""
     import serial
-    from serial_link import find_port  # 저장소 루트에서 실행
+
+    from .serial_link import find_port  # 패키지 안에 있어 설치본에서도 불러올 수 있다
 
     port = port or find_port()
     if not port:

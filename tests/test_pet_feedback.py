@@ -177,11 +177,54 @@ class OrganizeHeuristicsTest(unittest.TestCase):
                 item = rt.queue_organize_apply(category="이미지")["pending"]
                 self.assertEqual(item["files"][0]["from"], "pic.png")
                 self.assertTrue(item["files"][0]["to"].endswith(".png"))
-                self.assertTrue(rt.resolve_write_approval(True)["ok"])
+                self.assertTrue(rt.resolve_write_approval(True, rt.write_pending["id"])["ok"])
                 undo = rt.queue_organize_undo()["pending"]
         self.assertNotIn("batch", undo["task"])
         self.assertRegex(undo["task"], r"\d\d/\d\d \d\d:\d\d")
         self.assertEqual(pet._batch_when("20261022-160545"), "10/22 16:05")
+
+    def test_edit_after_request_is_not_executed_and_all_files_are_listed(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d).resolve()
+            root = base / "dl"
+            root.mkdir()
+            for n in range(35):  # 예전에는 30개만 보여 주고 35개를 옮겼다
+                f = root / f"pic{n:02}.png"
+                f.write_text(f"IMG{n}")
+                os.utime(f, (1, 1))
+            rt = pet.PetRuntime(home=str(base / "ro"), log_dir=str(base / "ro"), map_path=str(base / "map.json"))
+            rt.organize_root, rt.organize_dest = str(root), str(base / "sorted")
+            with mock.patch.dict(os.environ, {"HOME": str(base)}):
+                rt.organize_scan()
+                item = rt.queue_organize_apply(category="이미지")["pending"]
+                self.assertEqual((len(item["files"]), item["more"], item["count"]), (35, 0, 35))
+                cid = organize.load_plan(str(base / "ro"))["items"][0]["id"]
+                organize.edit(cid, name="다른-이름", home=str(base / "ro"), log_dir=str(base / "ro"))
+                r = rt.resolve_write_approval(True, rt.write_pending["id"])
+            self.assertFalse(r["ok"])
+            self.assertIn("정리안이 바뀌었", r["output"])
+            self.assertEqual(len(list(root.iterdir())), 35)  # 아무것도 옮기지 않았다
+
+    def test_skipped_files_are_named_and_zero_done_is_not_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d).resolve()
+            root = base / "dl"
+            root.mkdir()
+            f = root / "pic.png"
+            f.write_text("IMG")
+            os.utime(f, (1, 1))
+            rt = pet.PetRuntime(home=str(base / "ro"), log_dir=str(base / "ro"), map_path=str(base / "map.json"))
+            rt.organize_root, rt.organize_dest = str(root), str(base / "sorted")
+            with mock.patch.dict(os.environ, {"HOME": str(base)}):
+                rt.organize_scan()
+                rt.queue_organize_apply(category="이미지")
+                f.write_text("changed")  # 승인 전에 파일이 바뀐다
+                os.utime(f, (1, 1))
+                r = rt.resolve_write_approval(True, rt.write_pending["id"])
+            self.assertEqual((r["ok"], r["status"], r["done"]), (False, "skipped", 0))
+            self.assertEqual(r["skipped"][0]["name"], "pic.png")
+            self.assertIn("바뀜", r["skipped"][0]["reason"])
+            self.assertNotEqual(rt.snapshot()["mood"], "resolved")  # 0건이면 '해결' 표정을 짓지 않는다
 
 
 class PrefsAndMapTest(unittest.TestCase):

@@ -27,6 +27,20 @@ END:VCALENDAR
 """
 
 
+class SerialPackagingTest(unittest.TestCase):
+    def test_serial_lines_uses_packaged_helper(self):
+        # 저장소 루트의 serial_link.py 없이(설치본처럼) 패키지 안 모듈만으로 포트를 찾는다
+        port = mock.Mock(device="/dev/tty.usbserial-1")
+        ser = mock.MagicMock()
+        ser.__enter__.return_value.readline.side_effect = [b"hello\n", KeyboardInterrupt()]
+        fake_serial = mock.Mock(Serial=mock.Mock(return_value=ser))
+        fake_tools = mock.Mock(list_ports=mock.Mock(comports=mock.Mock(return_value=[port])))
+        with mock.patch.dict("sys.modules", {"serial": fake_serial, "serial.tools": fake_tools,
+                                             "serial.tools.list_ports": fake_tools.list_ports, "serial_link": None}):
+            self.assertEqual(list(ambient.serial_lines(None, 115200)), ["hello\n"])
+        fake_serial.Serial.assert_called_once_with("/dev/tty.usbserial-1", 115200, timeout=1)
+
+
 class AmbientTest(unittest.TestCase):
     def test_sanitize(self):
         self.assertEqual(ambient.sanitize("a\x00b\x1b[0m\n"), "ab[0m")

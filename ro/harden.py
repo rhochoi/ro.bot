@@ -42,8 +42,17 @@ def audit(home=HOME, fix=False):
                 fixed.append(str(path))
         if not is_dir and path.suffix in (".json", ".jsonl"):
             text = path.read_text(encoding="utf-8", errors="replace")
-            if log.SECRET_VALUE.search(text):
+            if log.SECRET_VALUE.search(text) or log.PEM_BLOCK.search(text):
                 findings.append(f"비밀 패턴 발견(수동 확인 필요): {path}")
+            if path.suffix == ".jsonl":  # 읽을 때 건너뛰는 손상 줄을 '기록 없음'으로 숨기지 않고 알린다
+                bad = []
+                for n, line in enumerate(text.splitlines(), 1):
+                    try:
+                        json.loads(line)
+                    except json.JSONDecodeError:
+                        bad.append(n)
+                if bad:
+                    findings.append(f"손상된 줄 {len(bad)}개(첫 줄 {bad[0]}): {path}")
     rules_path = home / "rules.json"
     if rules_path.exists():
         try:

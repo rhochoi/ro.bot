@@ -260,12 +260,66 @@ class OrganizeTest(unittest.TestCase):
         self.assertTrue(trashed.exists())
         self.assertFalse(a.exists() or b.exists())
         ops = [e["op"] for e in organize.read_journal(self.ro)]
-        self.assertEqual(ops, ["quarantine", "move"])
+        self.assertEqual(ops, ["intent", "quarantine", "intent", "move"])  # 옮기기 전마다 의도를 먼저 남긴다
         _, back, _ = organize.undo(home=self.ro, log_dir=self.log)
         self.assertEqual(len(back), 2)
         self.assertEqual((a.read_text(), b.read_text()), ("dup", "dup"))
         self.assertEqual(stat.S_IMODE(b.stat().st_mode), 0o644)
         self.assertFalse((self.ro / "cleanup" / "trash" / batch).exists())  # 빈 배치 폴더 정리
+
+    def test_move_is_recoverable_when_completion_record_fails(self):
+        a = self.w("a.pdf", "only")
+        items = self.scan()
+        real = organize._append
+        def flaky(entry, home, source="cleanup"):
+            if entry["op"] == "move":
+                raise OSError(28, "No space left on device")
+            return real(entry, home, source)
+        with mock.patch.object(organize, "_append", flaky):
+            _, done, skipped = organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+        self.assertEqual((len(done), skipped), (1, []))
+        self.assertFalse(a.exists())
+        self.assertEqual(len(organize.pending(self.ro)), 1)          # 의도 기록과 파일 상태로 되돌릴 수 있다
+        _, back, _ = organize.undo(home=self.ro, log_dir=self.log)
+        self.assertEqual((len(back), a.read_text()), (1, "only"))
+
+    def test_nothing_moves_when_intent_cannot_be_recorded(self):
+        a = self.w("a.pdf", "only")
+        items = self.scan()
+        with mock.patch.object(organize, "_append", side_effect=OSError(28, "No space left on device")):
+            _, done, skipped = organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+        self.assertEqual(done, [])
+        self.assertIn("기록을 남기지 못해", skipped[0][1])
+        self.assertTrue(a.exists())
+        self.assertEqual([p for p in (self.ro.parent).rglob("*.pdf") if p != a], [])  # 자리 표시 파일도 남지 않는다
+
+    def test_file_created_at_destination_after_check_is_not_overwritten(self):
+        self.w("a.pdf", "mine")
+        items = self.scan()
+        dest = Path(items["a.pdf"]["dest"])
+        real = organize._reserve
+        def racing(dst, unique=True):
+            if dst == dest and not dst.exists():  # 확인 직후 다른 프로그램이 같은 이름을 만든다
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text("someone else")
+            return real(dst, unique)
+        with mock.patch.object(organize, "_reserve", racing):
+            _, done, _ = organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+        self.assertEqual(dest.read_text(), "someone else")
+        self.assertNotEqual(done[0]["dest"], str(dest))
+        self.assertEqual(Path(done[0]["dest"]).read_text(), "mine")
+
+    def test_reapply_in_same_second_is_a_new_undoable_batch(self):
+        a = self.w("a.pdf", "only")
+        items = self.scan()
+        with mock.patch.object(organize.time, "strftime", return_value="20261025-120000"):
+            b1, _, _ = organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+            organize.undo(home=self.ro, log_dir=self.log)
+            b2, done, _ = organize.apply(self.ids(items, "a.pdf"), home=self.ro, log_dir=self.log)
+        self.assertNotEqual(b1, b2)
+        self.assertEqual(len(done), 1)
+        self.assertEqual([e["batch"] for e in organize.pending(self.ro)], [b2])
+        self.assertFalse(a.exists())
 
     def test_quarantine_refused_when_kept_side_moved_earlier(self):
         self.w("a.pdf", "dup", OLD - 100)

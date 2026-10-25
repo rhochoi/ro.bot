@@ -59,9 +59,14 @@ def collect(events, days=30, now=None):
             r["retry"] += 1
         if s:
             last_seen[s] = t
+    rated = set()
     for e in events:
         d = e.get("data") or {}
         if e.get("kind") == "feedback" and (_ts(e) or 0) >= cutoff and all((d.get("category"), d.get("engine"))):
+            if d.get("answer"):  # 같은 답변의 평가는 처음 한 번만 센다
+                if d["answer"] in rated:
+                    continue
+                rated.add(d["answer"])
             r = rows[(d["category"], d["engine"])]
             r["acc_n"] += 1
             r["acc"] += bool(d.get("accepted"))

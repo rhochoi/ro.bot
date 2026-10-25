@@ -132,7 +132,8 @@ def plan_arm(task, arm, mapdata, engine, neutral_dir):
     """한 조건의 실행 계획: {prompt, cwd}. 실행하지 않는다."""
     q = task["question"]
     if arm == "ctx":
-        pl = ask.plan(q, mapdata, use_context=True, engine=engine, project=task.get("project"))
+        pl = ask.plan(q, mapdata, use_context=True, engine=engine, project=task.get("project"),
+                      memory_path=False)  # 비교 실험이 개인 기억에 따라 달라지지 않게
         return {"prompt": pl["prompt"], "cwd": neutral_dir, "context_chars": len(pl["context"])}
     if arm == "none":
         return {"prompt": q, "cwd": neutral_dir, "context_chars": 0}

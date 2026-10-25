@@ -83,6 +83,7 @@ def main(argv=None):
     fb.add_argument("--engine", required=True, choices=route.ENGINES)
     fb.add_argument("--category", required=True)
     fb.add_argument("--projects", default="", help="쉼표로 구분")
+    fb.add_argument("--answer", default=None, help="답변 ID(ask --json의 feedback_args). 같은 답변은 한 번만 센다")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더, 선호 엔진")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
@@ -236,7 +237,7 @@ def main(argv=None):
                       engine=args.engine or config.load().get("engine") or None, rules=learn.load_rules(), project=args.project,
                       model=args.model, history=ask.load_history() if args.cont else None)
         head = (f"엔진: {pl['engine']} / 모델: {pl['model'] or '엔진 기본'} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
-                f" / 컨텍스트 {len(pl['context'])}자")
+                f" / 컨텍스트 {len(pl['context'])}자" + (f" (승인된 기억 {pl['memories']}개 포함)" if pl["memories"] else ""))
         preview = {"event": "preview", "engine": pl["engine"], "category": pl["category"],
                    "projects": pl["projects"], "context_chars": len(pl["context"]), "prompt": pl["prompt"]}
         if args.dry_run or (args.json and not args.yes):
@@ -264,7 +265,7 @@ def main(argv=None):
         done = {"event": "done", "ok": res["ok"], "reason": res["reason"], "help": help_text,
                 "duration": res["duration"], "output": res["output"],
                 "feedback_args": {"engine": pl["engine"], "category": pl["category"],
-                                  "projects": pl["projects"]}}
+                                  "projects": pl["projects"], "answer": pl.get("answer_id")}}
         if args.json:
             print(json.dumps(done, ensure_ascii=False), flush=True)
         else:
@@ -295,7 +296,7 @@ def main(argv=None):
         except ValueError as e:
             raise SystemExit(str(e))
     elif args.cmd == "feedback":
-        ask.feedback({"engine": args.engine, "category": args.category,
+        ask.feedback({"engine": args.engine, "category": args.category, "answer_id": args.answer,
                       "projects": [x for x in args.projects.split(",") if x]}, args.verdict == "y")
         print("기록됨")
     elif args.cmd == "collect":
@@ -313,7 +314,7 @@ def main(argv=None):
             return
         if args.write and input("쓰기 모드로 실행합니다. 계속? [y/N] ").strip().lower() != "y":
             raise SystemExit("취소됨")
-        res = route.run(engine, args.task, args.write, args.cwd, model=model)
+        res = route.run(engine, log.redact(args.task), args.write, args.cwd, model=model)  # ask와 같은 마스킹
         log.append("route", args.task[:80], {
             "engine": engine, "model": model, "category": category, "mode": mode, "ok": res["ok"],
             "code": res["code"], "duration": res["duration"]}, engine=engine)
@@ -386,7 +387,8 @@ def main(argv=None):
         elif args.log_cmd == "delete":
             if not args.yes:
                 raise SystemExit("기록을 삭제합니다(되돌릴 수 없음). 확인하려면 --yes를 붙이세요.")
-            print(f"기록 파일 {log.delete(args.before)}개 삭제")
+            print(f"기록 파일 {log.delete(args.before)}개 삭제 (같은 기간의 통계·승인 대기 후보도 지움. "
+                  "승인한 기억은 ~/.ro/ro-model.md에서 직접 지우세요)")
         else:
             print(log.summarize(getattr(args, "date", None) or time.strftime("%Y-%m-%d")))
     elif args.cmd == "pet":

@@ -5,6 +5,7 @@
 import json
 import os
 import re
+import secrets
 import time
 from collections import Counter
 from pathlib import Path
@@ -29,6 +30,11 @@ SECRET_KO = re.compile(
     r"(비밀\s*번호|패스워드|암호|토큰)(\s*[:=]\s*|\s*(?:은|는|이|가)\s+(?=\"|'|\S*[0-9!@#$%^&*_-]))"
     r"(?!\[REDACTED\])(\"[^\"]*\"|'[^']*'|\S+)")
 BEARER = re.compile(r"\bBearer\s+(?!\[REDACTED\])[A-Za-z0-9._~+/-]+=*", re.I)
+# 여러 줄 키 블록은 머리만이 아니라 본문까지 통째로 가린다(END가 잘려 없으면 끝까지)
+PEM_BLOCK = re.compile(r"-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE|PGP PRIVATE KEY BLOCK)-----"
+                       r"[\s\S]*?(?:-----END [A-Z0-9 ]*-----|\Z)")
+# https://user:pass@host 의 아이디·비밀번호
+URL_USERINFO = re.compile(r"\b([a-z][a-z0-9+.-]*://)[^/\s@]+@", re.I)
 
 
 def redact(obj):
@@ -37,6 +43,8 @@ def redact(obj):
     if isinstance(obj, list):
         return [redact(v) for v in obj]
     if isinstance(obj, str):
+        obj = PEM_BLOCK.sub(MASK, obj)
+        obj = URL_USERINFO.sub(lambda m: m[1] + MASK + "@", obj)
         obj = SECRET_VALUE.sub(MASK, obj)
         obj = BEARER.sub("Bearer " + MASK, obj)
         obj = SECRET_ASSIGN.sub(lambda m: m[1] + m[2] + MASK, obj)
@@ -53,6 +61,7 @@ def append(kind, summary, data=None, engine=None, log_dir=LOG_DIR, at=None):
     now = at if at is not None else time.time()
     event = redact({
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+        "id": secrets.token_hex(6),  # 같은 초·같은 요약의 다른 기록도 따로 가리킬 수 있게
         "kind": kind, "engine": engine, "summary": summary, "data": data or {},
     })
     path = _file(time.strftime("%Y-%m-%d", time.localtime(now)), log_dir)
@@ -100,11 +109,27 @@ def read_all(log_dir=LOG_DIR):
     return events
 
 
-def delete(before=None, log_dir=LOG_DIR):
-    """기록 삭제(사용자 요청 전용). before(YYYY-MM-DD)를 주면 그 날짜 이전만, 없으면 전부. 삭제한 파일 수 반환."""
+def delete(before=None, log_dir=LOG_DIR, home=None):
+    """기록 삭제(사용자 요청 전용). before(YYYY-MM-DD)를 주면 그 날짜 이전만, 없으면 전부. 삭제한 파일 수 반환.
+    기록에서 만들어진 것도 함께 지운다: 같은 날짜의 일간 통계, 기록에서 나온 학습 후보(승인 대기),
+    전부 지울 때는 직전 질문·답변(ask -c). 이미 승인한 규칙·기억은 사용자가 따로 지운다(ro-model.md)."""
     n = 0
     for path in Path(log_dir).expanduser().glob("*.jsonl"):
         if before is None or path.stem < before:
             path.unlink()
             n += 1
+    if home:
+        h = Path(home).expanduser()
+    elif Path(log_dir).expanduser().name == "log":  # ~/.ro/log → ~/.ro. 다른 폴더를 넘기면 위쪽을 건드리지 않는다
+        h = Path(log_dir).expanduser().parent
+    else:
+        return n
+    for path in (h / "stats").glob("*.json"):
+        if before is None or path.stem < before:
+            path.unlink(missing_ok=True)
+    pending = h / "pending.json"
+    if pending.exists():  # 남은 기록으로 다음 propose/distill 때 다시 계산된다
+        pending.unlink()
+    if before is None:
+        (h / "last_ask.json").unlink(missing_ok=True)
     return n

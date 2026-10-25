@@ -4,9 +4,10 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import log, mapper, pet
+from ro import ask, config, log, mapper, pet
 
 
 class AmbientTest(unittest.TestCase):
@@ -71,6 +72,47 @@ class ApiFlowTest(unittest.TestCase):
         run.assert_called_once()
         self.assertEqual((r["ok"], r["output"]), (True, "답"))
         self.assertEqual([e["kind"] for e in log.read(time.strftime("%Y-%m-%d"), self.tmp.name)], ["route"])
+
+    def test_feedback_counts_once_per_answer(self):
+        q = "ro.bot 구조 설명해줘"
+        pv = self.post("/api/ask/preview", {"question": q})
+        with mock.patch("ro.route.run", return_value={"ok": True, "output": "답", "code": 0, "duration": 0.1}):
+            self.post("/api/ask", {"question": q, "preview_id": pv["id"]})
+        rs = [self.post("/api/feedback", {"accepted": True}) for _ in range(3)]
+        self.assertEqual([r.get("already", False) for r in rs], [False, True, True])
+        fb = [e for e in log.read(time.strftime("%Y-%m-%d"), self.tmp.name) if e["kind"] == "feedback"]
+        self.assertEqual(len(fb), 1)
+        self.assertTrue(fb[0]["data"]["answer"])
+
+    def test_preview_is_refused_when_allowed_roots_change_after_it(self):
+        q = "ro.bot 구조 설명해줘"
+        pv = self.post("/api/ask/preview", {"question": q})
+        other = tempfile.mkdtemp(dir=self.tmp.name)
+        config.update(self.tmp.name, roots=[other])  # 확인 뒤 다른 폴더만 허용
+        with mock.patch("ro.route.run", side_effect=AssertionError("철회된 범위 전송")) as run:
+            r = self.post("/api/ask", {"question": q, "preview_id": pv["id"]})
+        run.assert_not_called()
+        self.assertEqual((r["ok"], r["reason"]), (False, "needs_preview"))
+
+    def test_empty_roots_hide_old_map_projects(self):
+        config.update(self.tmp.name, roots=[])
+        self.assertEqual(ask.load_map(self.rt.map_path, self.tmp.name)["projects"], [])
+        self.assertEqual(mapper.default_roots(self.tmp.name), [])  # 다음 지도도 기본 폴더를 훑지 않는다
+
+    def test_write_gate_needs_the_shown_request_id_and_a_real_boolean(self):
+        with mock.patch("ro.route.run") as run:
+            first = self.rt.queue_write_approval("A 작업")
+            second = self.rt.queue_write_approval("B 작업")
+            r = self.post("/api/write_gate", {"approve": True, "id": first["id"]})  # 예전 카드의 승인
+            self.assertEqual((r["ok"], r["reason"]), (False, "stale"))
+            run.assert_not_called()
+            req = Request(self.base + "/api/write_gate", data=json.dumps({"approve": "false", "id": second["id"]}).encode(),
+                          headers={"X-Ro-Token": self.rt.token, "Content-Type": "application/json"})
+            with self.assertRaises(HTTPError) as ctx:
+                urlopen(req)
+            self.assertEqual(ctx.exception.code, 400)
+            run.assert_not_called()
+            self.assertEqual(self.rt.write_pending["id"], second["id"])  # 대기 중인 요청은 그대로
 
     def test_preview_shares_question_validation(self):
         with mock.patch("ro.route.run", side_effect=AssertionError("미승인 외부 실행")):

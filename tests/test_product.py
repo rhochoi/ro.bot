@@ -100,6 +100,22 @@ class EngineErrorTest(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["reason"], "")
 
+    def test_timeout_also_stops_engine_children(self):
+        with tempfile.TemporaryDirectory() as m:
+            marker = Path(m) / "child-finished"
+            res = self.run_engine(f'(sleep 1.5; touch "{marker}") & sleep 5', timeout=0.3)
+            self.assertEqual(res["reason"], "timeout")
+            time.sleep(2)
+            self.assertFalse(marker.exists())  # 엔진이 띄운 자식도 함께 끝났다
+
+    def test_engine_prompt_is_masked_on_every_path(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as m:
+            seen = Path(m) / "argv"
+            fake_engine(d, f'printf "%s" "$*" > "{seen}"')
+            with mock.patch.dict(os.environ, {"PATH": d + ":/bin:/usr/bin"}):
+                route.run("claude", "배포해줘 token=FIXTURE_NOT_REAL")
+            self.assertNotIn("FIXTURE_NOT_REAL", seen.read_text())
+
 
 class CliTest(unittest.TestCase):
     def setUp(self):
