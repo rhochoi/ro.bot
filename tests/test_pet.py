@@ -441,6 +441,8 @@ class PetTest(unittest.TestCase):
         self.assertIn('} else if type == "glass" {', src)
         self.assertIn("window.setNativeGlass('\\(NativeGlass.kind)')", src)
         self.assertEqual(src.count("refreshGlass()"), 3)  # 정의 + 말풍선 열기/닫기
+        self.assertIn("rects.allSatisfy({ $0.count == 6 })", src)  # 자리·기울기·불투명도
+        self.assertIn("v.frameCenterRotation = rotation", src)
         self.assertNotIn("CGWindowListCreateImage", src)  # 화면을 캡처하지 않는다
         self.assertIn('notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });', pet.PET_HTML)
 

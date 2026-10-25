@@ -1840,7 +1840,7 @@ PET_HTML = r"""<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce) {
     body.material-glass .g-env, body.material-glass .pill .g-env::before { transition: none; }
   }
-  /* Mac 앱이 몸통 아래에 시스템 유리를 깔았을 때(native-glass-*). 움직이는 동안에는 이 클래스가 빠지고 위의 CSS 유리로 돌아간다.
+  /* Mac 앱이 몸통 아래에 시스템 유리를 깔았을 때(native-glass-*). 들거나 흔드는 동안에도 시스템 유리가 층을 따라온다.
      liquid(macOS 26): 굴절·흐림은 시스템 유리가 맡고, CSS는 옅은 광택·윤곽·눈만 남긴다.
      blur(그보다 낮은 macOS): 뒤 화면은 시스템이 실제로 흐리고, 휘어진 풍경(굴절 흉내)은 그대로 얹되 덧칠 색만 줄인다. */
   body.material-glass.native-glass-liquid .pill {
@@ -3141,10 +3141,10 @@ setInterval(() => {
 
 /* 드래그 */
 const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost);
-/* 네이티브 유리(Mac 앱): 몸통 세 층 아래에 시스템 유리를 깐다. macOS 26은 굴절하는 유리("liquid"),
+/* 네이티브 유리(Mac 앱): 몸통 세 층 아래에 층마다 시스템 유리를 하나씩 깐다. macOS 26 이상은 굴절하는 유리("liquid"),
    그보다 낮으면 뒤 화면을 실제로 흐리는 유리("blur") — 어느 쪽인지는 Mac 앱이 setNativeGlass로 알려 준다.
-   웹 화면은 층 위치만 알려 주고(초당 30번, 바뀔 때만), 층이 기울거나 따로 흔들리는 동안은
-   시스템 유리를 거두고 CSS 유리로 그린다(시스템 유리는 회전·층별 흔들림을 따라오지 못한다).
+   웹 화면은 층마다 자리·기울기·불투명도를 알려 주고, Mac 앱은 유리를 그대로 옮기고 돌린다.
+   들거나 흔드는 동안에도 같은 유리가 따라오도록 움직이는 중에는 매 프레임, 가만히 있을 때는 초당 30번(바뀔 때만) 보낸다.
    updateMaterialUI가 이 선언보다 먼저 불리므로 var로 둔다(let이면 선언 전 접근 오류). */
 var nativeGlassKind = "";
 var nativeGlassSent = "";
@@ -3160,16 +3160,30 @@ function kickNativeGlass() {
   nativeGlassLoop = true;
   requestAnimationFrame(syncNativeGlass);
 }
-function glassCalm() {
-  if (typeof RoMotion === "undefined" || RoMotion.busy() || dockCaption !== null) return false;
-  for (const el of [petWrap, document.getElementById("roBot"), layerHead, layerBody, layerBase]) {
-    const t = el ? getComputedStyle(el).transform : "none";
-    if (t && t !== "none") {
-      const m = new DOMMatrixReadOnly(t);
-      if (Math.abs(m.b) > 0.002 || Math.abs(m.c) > 0.002) return false;  // 기울어짐
+/* 층 하나의 [x, y, 너비, 높이, 기울기(도, 시계 방향), 불투명도]. x·y·너비·높이는 돌리기 전 상자.
+   돌린 사각형의 테두리 상자 중심은 원래 중심과 같으므로 중심은 getBoundingClientRect에서, 크기는 레이아웃 크기 × 배율로 구한다.
+   층 자신과 조상의 transform(숨쉬기·두리번 등 CSS 애니메이션)과 rotate·scale(모션 엔진)을 모두 합친다. */
+function glassPose(el) {
+  let rot = 0, sx = 1, sy = 1, op = 1;
+  for (let n = el; n && n !== document.body; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    if (cs.transform && cs.transform !== "none") {
+      const m = new DOMMatrixReadOnly(cs.transform);
+      rot += Math.atan2(m.b, m.a) * 180 / Math.PI;
+      sx *= Math.hypot(m.a, m.b);
+      sy *= Math.hypot(m.c, m.d);
     }
+    if (cs.rotate && cs.rotate !== "none") rot += parseFloat(cs.rotate) || 0;
+    if (cs.scale && cs.scale !== "none") {
+      const [a, b = a] = cs.scale.split(" ").map(parseFloat);
+      sx *= a || 1; sy *= b || 1;
+    }
+    op *= parseFloat(cs.opacity);
   }
-  return true;
+  const r = el.getBoundingClientRect();
+  const w = el.offsetWidth * sx, h = el.offsetHeight * sy;
+  const q = (v, k) => Math.round(v * k) / k;
+  return [q(r.left + r.width / 2 - w / 2, 4), q(r.top + r.height / 2 - h / 2, 4), q(w, 4), q(h, 4), q(rot, 10), q(op, 50)];
 }
 function setNativeGlassClass(on) {
   for (const k of ["liquid", "blur"]) document.body.classList.toggle(`native-glass-${k}`, on && nativeGlassKind === k);
@@ -3182,16 +3196,11 @@ function syncNativeGlass() {
     return;
   }
   requestAnimationFrame(syncNativeGlass);
+  const moving = typeof RoMotion !== "undefined" && RoMotion.busy();
   nativeGlassTick = (nativeGlassTick + 1) % 2;
-  if (nativeGlassTick) return;
-  let rects = null;
-  if (glassCalm()) {
-    rects = [layerHead, layerBody, layerBase].map(el => {
-      const r = el.getBoundingClientRect();
-      return [r.left, r.top, r.width, r.height].map(v => Math.round(v * 4) / 4);
-    });
-    if (!rects.every(r => r[2] >= 1 && r[3] >= 1)) rects = null;  // 숨은 펫
-  }
+  if (nativeGlassTick && !moving) return;
+  let rects = [layerHead, layerBody, layerBase].map(glassPose);
+  if (!rects.every(r => r[2] >= 1 && r[3] >= 1 && r[5] > 0.02)) rects = null;  // 숨은 펫
   setNativeGlassClass(!!rects);
   const dark = document.body.classList.contains("theme-chalk");
   const key = rects ? JSON.stringify(rects) + dark : "off";

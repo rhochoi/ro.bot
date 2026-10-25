@@ -122,20 +122,26 @@ class PressTest(MotionBase):
         pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
         self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
 
-    def test_native_glass_follows_calm_body_and_steps_aside_while_moving(self):
+    def test_native_glass_follows_every_layer_even_while_moving(self):
         pg = self.page()
         pg.evaluate("materialMode = 'glass'; updateMaterialUI(); window.setNativeGlass('liquid')")
         pg.wait_for_function("document.body.classList.contains('native-glass-liquid')")
-        sent = pg.evaluate("JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))")
-        self.assertEqual(len(sent), 3)  # 머리·몸·받침 자리
-        head = pg.evaluate("(() => { const r = layerHead.getBoundingClientRect(); return [r.left, r.width]; })()")
-        self.assertAlmostEqual(sent[0][0], head[0], delta=3)
-        self.assertAlmostEqual(sent[0][2], head[1], delta=3)
+        sent = lambda: pg.evaluate("JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))")
+        rest = sent()
+        self.assertEqual([len(r) for r in rest], [6, 6, 6])  # 머리·몸·받침: x, y, 너비, 높이, 기울기, 불투명도
+        head = pg.evaluate("[layerHead.offsetWidth, layerHead.getBoundingClientRect().left]")
+        self.assertAlmostEqual(rest[0][2], head[0], delta=0.5)
+        self.assertAlmostEqual(rest[0][0], head[1], delta=0.5)
         self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
-        pg.evaluate("RoMotion.down(1000)")  # 움직이는 동안은 시스템 유리를 걷고 CSS 유리로
-        pg.wait_for_function("!document.body.classList.contains('native-glass-liquid') && nativeGlassSent === 'off'")
+        # 기울고 눌린 층: 유리를 걷지 않고 같은 기울기·크기로 따라간다(예전엔 여기서 웹 유리로 바뀌어 유리가 계속 바뀌었다)
+        pg.evaluate("RoMotion.down(1000); layerHead.style.rotate = '-4deg'; layerHead.style.scale = '1.1 0.9'")
+        pg.wait_for_function("nativeGlassSent.startsWith('[[') && JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))[0][4] === -4")
+        self.assertTrue(pg.evaluate("document.body.classList.contains('native-glass-liquid')"))
+        moved = sent()[0]
+        self.assertAlmostEqual(moved[2], rest[0][2] * 1.1, delta=0.5)
+        self.assertAlmostEqual(moved[3], rest[0][3] * 0.9, delta=0.5)
+        self.assertAlmostEqual(moved[0] + moved[2] / 2, rest[0][0] + rest[0][2] / 2, delta=0.5)  # 중심 기준
         pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
-        pg.wait_for_function("document.body.classList.contains('native-glass-liquid')")
         pg.evaluate("window.setNativeGlass('blur')")  # 흐림만 되는 Mac: 휘어진 풍경은 남긴다
         pg.wait_for_function("document.body.classList.contains('native-glass-blur')")
         self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "block")

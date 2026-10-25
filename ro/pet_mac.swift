@@ -43,11 +43,15 @@ enum NativeGlass {
         return v
     }
 
-    /// 알약 모양(높이의 절반 반지름)으로 frame에 맞춘다. dark면 연기 낀 유리
-    static func shape(_ v: NSView, frame: NSRect, dark: Bool) {
+    /// 알약 모양(높이의 절반 반지름)으로 frame에 맞추고, 중심을 축으로 rotation도(웹 화면의 시계 방향)만큼 돌린다.
+    /// 부모가 뒤집힌 좌표(아래로 +y)라 양수 회전이 화면에서 시계 방향이 되어 CSS rotate와 같은 방향이다. dark면 연기 낀 유리
+    static func shape(_ v: NSView, frame: NSRect, rotation: CGFloat, alpha: CGFloat, dark: Bool) {
         v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        v.frameCenterRotation = 0  // 돌린 채로 frame을 바꾸면 테두리 상자 기준으로 바뀐다
         let sizeChanged = v.frame.size != frame.size
         v.frame = frame
+        v.frameCenterRotation = rotation
+        v.alphaValue = alpha
         #if compiler(>=6.2)
         if #available(macOS 26.0, *), let g = v as? NSGlassEffectView {
             g.cornerRadius = frame.height / 2
@@ -1076,9 +1080,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         webView.evaluateJavaScript("window.setNativeGlass && window.setNativeGlass('\(NativeGlass.kind)');", completionHandler: nil)
     }
 
-    /// 웹 화면이 알려 준 몸통 세 층 자리에 유리를 맞춘다. on=false(재질이 다르거나 움직이는 중)면 걷는다
+    /// 웹 화면이 알려 준 몸통 세 층의 자리·기울기·불투명도에 유리를 맞춘다. on=false(재질이 다르거나 펫이 숨음)면 걷는다
     private func updateGlass(on: Bool, rects: [[Double]], dark: Bool) {
-        guard on, rects.count == 3, rects.allSatisfy({ $0.count == 4 }) else {
+        guard on, rects.count == 3, rects.allSatisfy({ $0.count == 6 }) else {
             glassLayer.isHidden = true
             return
         }
@@ -1088,9 +1092,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             glassViews.append(v)
         }
         CATransaction.begin()
-        CATransaction.setDisableActions(true)  // 숨쉬기를 따라갈 때 미끄러지는 애니메이션 없이 바로 옮긴다
+        CATransaction.setDisableActions(true)  // 숨쉬기·흔들기를 따라갈 때 미끄러지는 애니메이션 없이 바로 옮긴다
         for (v, r) in zip(glassViews, rects) {
-            NativeGlass.shape(v, frame: NSRect(x: r[0], y: r[1], width: r[2], height: r[3]), dark: dark)
+            NativeGlass.shape(v, frame: NSRect(x: r[0], y: r[1], width: r[2], height: r[3]),
+                              rotation: CGFloat(r[4]), alpha: CGFloat(r[5]), dark: dark)
         }
         CATransaction.commit()
         glassLayer.isHidden = false
