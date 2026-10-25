@@ -14,6 +14,61 @@ final class FloatingPetPanel: NSPanel {
     }
 }
 
+// MARK: - 몸통 아래 시스템 유리
+// 웹 화면은 투명 창 뒤를 볼 수 없어 CSS로는 굴절·흐림을 못 낸다. 그래서 몸통 세 층 자리에 시스템 유리를 깐다.
+// macOS 26 이상: 뒤 화면을 굴절시키는 유리(NSGlassEffectView). 그보다 낮으면: 뒤 화면을 실제로 흐리는 NSVisualEffectView.
+// NSGlassEffectView는 macOS 26 SDK(Swift 6.2)에만 있으므로, 예전 Xcode에서도 빌드되게 컴파일러 버전으로 감싼다.
+
+/// 웹 화면 좌표(왼쪽 위 기준, CSS 픽셀 = 포인트)를 그대로 쓰기 위한 뒤집힌 뷰
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+enum NativeGlass {
+    /// 웹 화면에 알려 줄 유리 종류: "liquid"(굴절) 또는 "blur"(흐림)
+    static var kind: String {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) { return "liquid" }
+        #endif
+        return "blur"
+    }
+
+    static func make() -> NSView {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) { return NSGlassEffectView() }
+        #endif
+        let v = NSVisualEffectView()
+        v.blendingMode = .behindWindow
+        v.state = .active
+        return v
+    }
+
+    /// 알약 모양(높이의 절반 반지름)으로 frame에 맞춘다. dark면 연기 낀 유리
+    static func shape(_ v: NSView, frame: NSRect, dark: Bool) {
+        v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        let sizeChanged = v.frame.size != frame.size
+        v.frame = frame
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *), let g = v as? NSGlassEffectView {
+            g.cornerRadius = frame.height / 2
+            g.tintColor = dark ? NSColor.black.withAlphaComponent(0.28) : nil
+            return
+        }
+        #endif
+        guard let e = v as? NSVisualEffectView else { return }
+        e.material = dark ? .hudWindow : .popover
+        if sizeChanged || e.maskImage == nil { e.maskImage = pillMask(frame.size) }
+    }
+
+    static func pillMask(_ size: NSSize) -> NSImage {
+        NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+            return true
+        }
+    }
+}
+
 // MARK: - CPU 걸음 (07). 순수 계산만 두어 --selftest로 GUI 없이 확인한다
 
 // host_statistics(HOST_CPU_LOAD_INFO)의 누적 틱. 배열 순서는 USER, SYSTEM, IDLE, NICE (idle은 인덱스 2)
@@ -337,6 +392,8 @@ enum PetMode: String {
 final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var panel: FloatingPetPanel!
     private var webView: WKWebView!
+    private var glassLayer: FlippedView!   // 웹 화면 아래, 몸통 자리에 시스템 유리를 까는 층
+    private var glassViews: [NSView] = []
     private var statusItem: NSStatusItem!
     private var wanderItem: NSMenuItem!
     private var modeItem: NSMenuItem!
@@ -491,6 +548,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let newFrame = NSRect(origin: newOrigin, size: expandedSize)
             panel.setFrame(newFrame, display: true)
             webView.frame = NSRect(origin: .zero, size: expandedSize)
+            refreshGlass()
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         } else {
@@ -502,6 +560,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             let newFrame = NSRect(origin: newOrigin, size: compactSize)
             panel.setFrame(newFrame, display: true)
             webView.frame = NSRect(origin: .zero, size: compactSize)
+            refreshGlass()
             revealPet()
         }
     }
@@ -991,8 +1050,16 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         webView = WKWebView(frame: NSRect(origin: .zero, size: compactSize), configuration: config)
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
+        webView.autoresizingMask = [.width, .height]
 
-        panel.contentView = webView
+        // 시스템 유리는 웹 화면 아래에 깔리고, 마우스는 위의 웹 화면이 받는다
+        let container = FlippedView(frame: NSRect(origin: .zero, size: compactSize))
+        glassLayer = FlippedView(frame: container.bounds)
+        glassLayer.autoresizingMask = [.width, .height]
+        glassLayer.isHidden = true
+        container.addSubview(glassLayer)
+        container.addSubview(webView)
+        panel.contentView = container
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
@@ -1000,6 +1067,33 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
+        webView.evaluateJavaScript("window.setNativeGlass && window.setNativeGlass('\(NativeGlass.kind)');", completionHandler: nil)
+    }
+
+    /// 창 크기가 바뀌면 몸통 자리도 바뀌므로, 예전 자리의 유리를 걷고 웹 화면에 자리를 다시 받는다
+    private func refreshGlass() {
+        glassLayer.isHidden = true
+        webView.evaluateJavaScript("window.setNativeGlass && window.setNativeGlass('\(NativeGlass.kind)');", completionHandler: nil)
+    }
+
+    /// 웹 화면이 알려 준 몸통 세 층 자리에 유리를 맞춘다. on=false(재질이 다르거나 움직이는 중)면 걷는다
+    private func updateGlass(on: Bool, rects: [[Double]], dark: Bool) {
+        guard on, rects.count == 3, rects.allSatisfy({ $0.count == 4 }) else {
+            glassLayer.isHidden = true
+            return
+        }
+        while glassViews.count < rects.count {
+            let v = NativeGlass.make()
+            glassLayer.addSubview(v)
+            glassViews.append(v)
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)  // 숨쉬기를 따라갈 때 미끄러지는 애니메이션 없이 바로 옮긴다
+        for (v, r) in zip(glassViews, rects) {
+            NativeGlass.shape(v, frame: NSRect(x: r[0], y: r[1], width: r[2], height: r[3]), dark: dark)
+        }
+        CATransaction.commit()
+        glassLayer.isHidden = false
     }
 
     private func setupWanderTimer() {
@@ -1377,6 +1471,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)
+        } else if type == "glass" {
+            let rects = (dict["rects"] as? [[NSNumber]])?.map { $0.map { $0.doubleValue } } ?? []
+            updateGlass(on: (dict["on"] as? Bool) ?? false, rects: rects, dark: (dict["dark"] as? Bool) ?? false)
         } else if type == "toggleWander" {
             let enabled = (dict["enabled"] as? Bool) ?? !wanderEnabled
             wanderEnabled = enabled

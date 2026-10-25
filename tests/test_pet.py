@@ -431,6 +431,19 @@ class PetTest(unittest.TestCase):
         self.assertIn('if (isNativeHost) notifyHost({ type: "menu" });', pet.PET_HTML)
         self.assertIn("else cycleMoodPreview();", pet.PET_HTML)  # 브라우저는 기존 동작
 
+    def test_native_glass_under_body(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        # macOS 26 SDK가 없는 Xcode에서도 빌드되고, 26 미만 Mac은 시스템 흐림으로 내려간다
+        self.assertIn("#if compiler(>=6.2)", src)
+        self.assertIn("if #available(macOS 26.0, *) { return NSGlassEffectView() }", src)
+        self.assertIn("v.blendingMode = .behindWindow", src)
+        self.assertIn("container.addSubview(glassLayer)\n        container.addSubview(webView)", src)  # 유리는 웹 화면 아래
+        self.assertIn('} else if type == "glass" {', src)
+        self.assertIn("window.setNativeGlass('\\(NativeGlass.kind)')", src)
+        self.assertEqual(src.count("refreshGlass()"), 3)  # 정의 + 말풍선 열기/닫기
+        self.assertNotIn("CGWindowListCreateImage", src)  # 화면을 캡처하지 않는다
+        self.assertIn('notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });', pet.PET_HTML)
+
     def test_drag_up_docks_into_menubar(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         self.assertIn("private let dockZone: CGFloat = 80.0", src)

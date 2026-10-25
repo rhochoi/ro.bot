@@ -1840,6 +1840,25 @@ PET_HTML = r"""<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce) {
     body.material-glass .g-env, body.material-glass .pill .g-env::before { transition: none; }
   }
+  /* Mac 앱이 몸통 아래에 시스템 유리를 깔았을 때(native-glass-*). 움직이는 동안에는 이 클래스가 빠지고 위의 CSS 유리로 돌아간다.
+     liquid(macOS 26): 굴절·흐림은 시스템 유리가 맡고, CSS는 옅은 광택·윤곽·눈만 남긴다.
+     blur(그보다 낮은 macOS): 뒤 화면은 시스템이 실제로 흐리고, 휘어진 풍경(굴절 흉내)은 그대로 얹되 덧칠 색만 줄인다. */
+  body.material-glass.native-glass-liquid .pill {
+    background: radial-gradient(130% 95% at 28% -10%, rgba(255, 255, 255, 0.20) 0%, rgba(255, 255, 255, 0) 55%);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+    box-shadow: 0 0 0 0.6px var(--g-edge);
+  }
+  body.material-glass.native-glass-liquid .pill::after { opacity: 0.5; }
+  body.material-glass.native-glass-liquid .g-env { display: none; }
+  body.material-glass.native-glass-blur .pill {
+    --g-tint-top: rgba(255, 255, 255, 0.16);
+    --g-tint-bot: rgba(255, 255, 255, 0.04);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  body.theme-chalk.material-glass.native-glass-blur .pill {
+    --g-tint-top: rgba(40, 42, 52, 0.25);
+    --g-tint-bot: rgba(14, 15, 20, 0.30);
+  }
   /* 어두운 색상 모드: 연기 낀 유리 */
   body.theme-chalk.material-glass .pill {
     --g-tint-top: rgba(40, 42, 52, 0.55);
@@ -2783,6 +2802,7 @@ function updateMaterialUI() {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
     btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
+  kickNativeGlass();
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
@@ -3121,6 +3141,64 @@ setInterval(() => {
 
 /* 드래그 */
 const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost);
+/* 네이티브 유리(Mac 앱): 몸통 세 층 아래에 시스템 유리를 깐다. macOS 26은 굴절하는 유리("liquid"),
+   그보다 낮으면 뒤 화면을 실제로 흐리는 유리("blur") — 어느 쪽인지는 Mac 앱이 setNativeGlass로 알려 준다.
+   웹 화면은 층 위치만 알려 주고(초당 30번, 바뀔 때만), 층이 기울거나 따로 흔들리는 동안은
+   시스템 유리를 거두고 CSS 유리로 그린다(시스템 유리는 회전·층별 흔들림을 따라오지 못한다).
+   updateMaterialUI가 이 선언보다 먼저 불리므로 var로 둔다(let이면 선언 전 접근 오류). */
+var nativeGlassKind = "";
+var nativeGlassSent = "";
+var nativeGlassLoop = false;
+var nativeGlassTick = 0;
+window.setNativeGlass = function(kind) {
+  nativeGlassKind = (kind === "liquid" || kind === "blur") ? kind : "";
+  nativeGlassSent = "";
+  kickNativeGlass();
+};
+function kickNativeGlass() {
+  if (nativeGlassLoop) return;
+  nativeGlassLoop = true;
+  requestAnimationFrame(syncNativeGlass);
+}
+function glassCalm() {
+  if (typeof RoMotion === "undefined" || RoMotion.busy() || dockCaption !== null) return false;
+  for (const el of [petWrap, document.getElementById("roBot"), layerHead, layerBody, layerBase]) {
+    const t = el ? getComputedStyle(el).transform : "none";
+    if (t && t !== "none") {
+      const m = new DOMMatrixReadOnly(t);
+      if (Math.abs(m.b) > 0.002 || Math.abs(m.c) > 0.002) return false;  // 기울어짐
+    }
+  }
+  return true;
+}
+function setNativeGlassClass(on) {
+  for (const k of ["liquid", "blur"]) document.body.classList.toggle(`native-glass-${k}`, on && nativeGlassKind === k);
+}
+function syncNativeGlass() {
+  if (!nativeGlassKind || materialMode !== "glass") {
+    nativeGlassLoop = false;
+    setNativeGlassClass(false);
+    if (nativeGlassSent !== "off") { nativeGlassSent = "off"; notifyHost({ type: "glass", on: false }); }
+    return;
+  }
+  requestAnimationFrame(syncNativeGlass);
+  nativeGlassTick = (nativeGlassTick + 1) % 2;
+  if (nativeGlassTick) return;
+  let rects = null;
+  if (glassCalm()) {
+    rects = [layerHead, layerBody, layerBase].map(el => {
+      const r = el.getBoundingClientRect();
+      return [r.left, r.top, r.width, r.height].map(v => Math.round(v * 4) / 4);
+    });
+    if (!rects.every(r => r[2] >= 1 && r[3] >= 1)) rects = null;  // 숨은 펫
+  }
+  setNativeGlassClass(!!rects);
+  const dark = document.body.classList.contains("theme-chalk");
+  const key = rects ? JSON.stringify(rects) + dark : "off";
+  if (key === nativeGlassSent) return;
+  nativeGlassSent = key;
+  notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });
+}
 let webDragStart = null;
 let webDidDrag = false;
 let webLastX = 0;

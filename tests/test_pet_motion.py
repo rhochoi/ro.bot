@@ -122,6 +122,27 @@ class PressTest(MotionBase):
         pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
         self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
 
+    def test_native_glass_follows_calm_body_and_steps_aside_while_moving(self):
+        pg = self.page()
+        pg.evaluate("materialMode = 'glass'; updateMaterialUI(); window.setNativeGlass('liquid')")
+        pg.wait_for_function("document.body.classList.contains('native-glass-liquid')")
+        sent = pg.evaluate("JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))")
+        self.assertEqual(len(sent), 3)  # 머리·몸·받침 자리
+        head = pg.evaluate("(() => { const r = layerHead.getBoundingClientRect(); return [r.left, r.width]; })()")
+        self.assertAlmostEqual(sent[0][0], head[0], delta=3)
+        self.assertAlmostEqual(sent[0][2], head[1], delta=3)
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
+        pg.evaluate("RoMotion.down(1000)")  # 움직이는 동안은 시스템 유리를 걷고 CSS 유리로
+        pg.wait_for_function("!document.body.classList.contains('native-glass-liquid') && nativeGlassSent === 'off'")
+        pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
+        pg.wait_for_function("document.body.classList.contains('native-glass-liquid')")
+        pg.evaluate("window.setNativeGlass('blur')")  # 흐림만 되는 Mac: 휘어진 풍경은 남긴다
+        pg.wait_for_function("document.body.classList.contains('native-glass-blur')")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "block")
+        pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
+        pg.wait_for_function("!document.body.classList.contains('native-glass-blur') && nativeGlassSent === 'off'")
+        pg.evaluate("window.setNativeGlass('')")
+
     def test_eyes_squint_then_open_then_happy_600ms(self):
         pg = self.page()
         eyes = lambda t: pg.evaluate("(t) => RoMotion.pose(t).eyes.shape", t)
