@@ -24,18 +24,31 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// 시스템 유리만 담는 창. 펫 창 바로 아래에 자식 창으로 붙어 함께 움직인다.
+/// 유리는 창이 비활성이면 사라지는데, 펫 창은 다른 앱을 쓰는 동안 늘 비활성이다. 이 창은 마우스·키 입력을 받지 않으므로
+/// 항상 활성이라고 답해도 부작용이 없다(펫 창 자체를 그렇게 속이면 말풍선 입력이 깨질 수 있다).
+final class GlassBackdropWindow: NSWindow {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+    override var isKeyWindow: Bool { true }
+    override var isMainWindow: Bool { true }
+}
+
 enum NativeGlass {
+    /// `defaults write ro.pet ro.glass blur` 로 굴절 유리 대신 흐림 유리를 강제할 수 있다(되돌리기: defaults delete ro.pet ro.glass)
+    static var forceBlur = false
+
     /// 웹 화면에 알려 줄 유리 종류: "liquid"(굴절) 또는 "blur"(흐림)
     static var kind: String {
         #if compiler(>=6.2)
-        if #available(macOS 26.0, *) { return "liquid" }
+        if #available(macOS 26.0, *), !forceBlur { return "liquid" }
         #endif
         return "blur"
     }
 
     static func make() -> NSView {
         #if compiler(>=6.2)
-        if #available(macOS 26.0, *) { return NSGlassEffectView() }
+        if #available(macOS 26.0, *), !forceBlur { return NSGlassEffectView() }
         #endif
         let v = NSVisualEffectView()
         v.blendingMode = .behindWindow
@@ -396,7 +409,8 @@ enum PetMode: String {
 final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler, WKNavigationDelegate {
     private var panel: FloatingPetPanel!
     private var webView: WKWebView!
-    private var glassLayer: FlippedView!   // 웹 화면 아래, 몸통 자리에 시스템 유리를 까는 층
+    private var glassWindow: GlassBackdropWindow!  // 펫 창 바로 아래에 붙은, 유리만 담는 창
+    private var glassLayer: FlippedView!   // 그 창 안에서 몸통 자리에 시스템 유리를 까는 층
     private var glassViews: [NSView] = []
     private var statusItem: NSStatusItem!
     private var wanderItem: NSMenuItem!
@@ -1008,6 +1022,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else {
             panel.orderFrontRegardless()
         }
+        attachGlassWindow()
     }
 
     // 메뉴 막대 모드에서는 말풍선이 열려 있을 때만 창을 보인다
@@ -1017,6 +1032,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else {
             panel.orderOut(nil)
         }
+        attachGlassWindow()
     }
 
     @objc private func toggleMode() {
@@ -1054,16 +1070,9 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         webView = WKWebView(frame: NSRect(origin: .zero, size: compactSize), configuration: config)
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
-        webView.autoresizingMask = [.width, .height]
 
-        // 시스템 유리는 웹 화면 아래에 깔리고, 마우스는 위의 웹 화면이 받는다
-        let container = FlippedView(frame: NSRect(origin: .zero, size: compactSize))
-        glassLayer = FlippedView(frame: container.bounds)
-        glassLayer.autoresizingMask = [.width, .height]
-        glassLayer.isHidden = true
-        container.addSubview(glassLayer)
-        container.addSubview(webView)
-        panel.contentView = container
+        panel.contentView = webView
+        setupGlassWindow()
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
         }
@@ -1072,6 +1081,41 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
         webView.evaluateJavaScript("window.setNativeGlass && window.setNativeGlass('\(NativeGlass.kind)');", completionHandler: nil)
+    }
+
+    /// 시스템 유리는 펫 창 아래의 자식 창에 깐다: 펫 창과 함께 움직이고, 마우스는 위의 펫 창이 받는다
+    private func setupGlassWindow() {
+        NativeGlass.forceBlur = defaults.string(forKey: "ro.glass") == "blur"
+        glassWindow = GlassBackdropWindow(contentRect: panel.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        glassWindow.isOpaque = false
+        glassWindow.backgroundColor = .clear
+        glassWindow.hasShadow = false
+        glassWindow.ignoresMouseEvents = true
+        glassWindow.isReleasedWhenClosed = false
+        glassWindow.collectionBehavior = panel.collectionBehavior
+        glassLayer = FlippedView(frame: NSRect(origin: .zero, size: panel.frame.size))
+        glassLayer.autoresizingMask = [.width, .height]
+        glassLayer.isHidden = true
+        glassWindow.contentView = glassLayer
+        attachGlassWindow()
+        // 자식 창은 부모를 따라 움직이기만 하므로, 말풍선을 열고 닫아 펫 창 크기가 바뀌면 같이 맞춘다
+        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: panel, queue: .main) { [weak self] _ in
+            guard let self = self else { return }
+            self.glassWindow.setFrame(self.panel.frame, display: false)
+        }
+    }
+
+    /// 펫 창이 보이면 유리 창을 바로 아래 자식 창으로 붙이고, 숨으면 같이 숨긴다(숨겼다 다시 보일 때 떨어져 있을 수 있다)
+    private func attachGlassWindow() {
+        guard let gw = glassWindow else { return }  // setMode가 유리 창을 만들기 전에 불릴 수 있다
+        if panel.isVisible {
+            gw.level = panel.level
+            gw.setFrame(panel.frame, display: false)
+            if gw.parent !== panel { panel.addChildWindow(gw, ordered: .below) }
+        } else {
+            gw.parent?.removeChildWindow(gw)
+            gw.orderOut(nil)
+        }
     }
 
     /// 창 크기가 바뀌면 몸통 자리도 바뀌므로, 예전 자리의 유리를 걷고 웹 화면에 자리를 다시 받는다

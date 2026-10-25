@@ -435,9 +435,18 @@ class PetTest(unittest.TestCase):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
         # macOS 26 SDK가 없는 Xcode에서도 빌드되고, 26 미만 Mac은 시스템 흐림으로 내려간다
         self.assertIn("#if compiler(>=6.2)", src)
-        self.assertIn("if #available(macOS 26.0, *) { return NSGlassEffectView() }", src)
+        self.assertIn("if #available(macOS 26.0, *), !forceBlur { return NSGlassEffectView() }", src)
         self.assertIn("v.blendingMode = .behindWindow", src)
-        self.assertIn("container.addSubview(glassLayer)\n        container.addSubview(webView)", src)  # 유리는 웹 화면 아래
+        self.assertIn("if gw.parent !== panel { panel.addChildWindow(gw, ordered: .below) }", src)  # 유리는 펫 창 아래의 자식 창
+        self.assertEqual(src.count("attachGlassWindow()"), 4)  # 정의 + 만들 때 + 모드 전환 + 보이기/숨기기
+        self.assertIn("glassWindow.ignoresMouseEvents = true", src)
+        # 다른 앱을 쓰는 동안(펫 창 비활성)에도 유리가 사라지지 않게 유리 창만 늘 활성이라고 답한다
+        backdrop = src[src.index("final class GlassBackdropWindow"):src.index("enum NativeGlass")]
+        self.assertIn("override var isKeyWindow: Bool { true }", backdrop)
+        self.assertIn("override var canBecomeKey: Bool { false }", backdrop)
+        floating = src[src.index("final class FloatingPetPanel"):src.index("// MARK: - 몸통 아래 시스템 유리")]
+        self.assertNotIn("isKeyWindow", floating)  # 펫 창은 속이지 않는다(말풍선 입력)
+        self.assertIn('defaults.string(forKey: "ro.glass") == "blur"', src)
         self.assertIn('} else if type == "glass" {', src)
         self.assertIn("window.setNativeGlass('\\(NativeGlass.kind)')", src)
         self.assertEqual(src.count("refreshGlass()"), 3)  # 정의 + 말풍선 열기/닫기
