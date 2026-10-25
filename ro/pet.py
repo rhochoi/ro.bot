@@ -1796,6 +1796,50 @@ PET_HTML = r"""<!DOCTYPE html>
     -webkit-mask-composite: xor;
     mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
   }
+  /* 굴절: 창 뒤 화면은 웹 화면이 볼 수 없으니, 유리 안에 가상의 주변 풍경(밝은 위·지평선·어두운 바닥·빛 창)을 두고
+     렌즈처럼 휘게 그린다. 가운데는 풍경이 바로 서서 크게 보이고(확대), 가장자리 고리에서는 뒤집혀 눌려 보인다(두꺼운 렌즈).
+     움직이면 가운데와 가장자리 풍경이 서로 반대로 밀려(--gx, --gy) 유리 속 상이 출렁인다. 유리 재질에서만 보인다. */
+  .g-env { display: none; }
+  body.material-glass .g-env {
+    --env-sky: rgba(255, 255, 255, 0.55);
+    --env-haze: rgba(214, 228, 255, 0.22);
+    --env-horizon: rgba(52, 60, 86, 0.20);
+    --env-floor: rgba(26, 30, 44, 0.06);
+    --env-light: rgba(255, 255, 255, 0.85);
+    --env-warm: rgba(255, 214, 170, 0.55);
+    --env-scene:
+      radial-gradient(9% 16% at 24% 30%, var(--env-light), rgba(255, 255, 255, 0) 100%),
+      radial-gradient(7% 12% at 71% 26%, var(--env-warm), rgba(255, 214, 170, 0) 100%),
+      linear-gradient(180deg, var(--env-sky) 0%, var(--env-haze) 40%, var(--env-horizon) 50%, var(--env-floor) 64%, rgba(255, 255, 255, 0.08) 100%);
+    display: block; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+    border-radius: inherit; overflow: hidden; opacity: 0.75;
+    background: var(--env-scene);
+    background-size: 150% 230%;
+    background-position: calc(50% + var(--gx, 0px)) calc(46% + var(--gy, 0px));
+    transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
+  }
+  /* 가장자리 고리: 같은 풍경을 위아래로 뒤집고 눌러 담는다. 움직임은 가운데와 반대 방향, 더 크게 */
+  body.material-glass .pill .g-env::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit;
+    background: var(--env-scene);
+    background-size: 90% 140%;
+    background-position: calc(50% - 1.6 * var(--gx, 0px)) calc(52% - 1.6 * var(--gy, 0px));
+    transform: scaleY(-1);
+    mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
+    -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
+    transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
+  }
+  body.theme-chalk.material-glass .g-env {
+    --env-sky: rgba(190, 200, 225, 0.30);
+    --env-haze: rgba(120, 132, 165, 0.20);
+    --env-horizon: rgba(0, 0, 0, 0.30);
+    --env-floor: rgba(0, 0, 0, 0.10);
+    --env-light: rgba(255, 255, 255, 0.55);
+    --env-warm: rgba(255, 196, 140, 0.38);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body.material-glass .g-env, body.material-glass .pill .g-env::before { transition: none; }
+  }
   /* 어두운 색상 모드: 연기 낀 유리 */
   body.theme-chalk.material-glass .pill {
     --g-tint-top: rgba(40, 42, 52, 0.55);
@@ -2544,6 +2588,7 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="roBot" class="ro-bot">
       <span id="streak" class="streak" aria-hidden="true"></span>
       <div id="layerHead" class="pill pill-head">
+        <i class="g-env" aria-hidden="true"></i>
         <span id="attnDot" class="attn-dot" aria-hidden="true" hidden></span>
         <span id="muteBadge" class="mute-badge" hidden><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1H3z"/><line x1="2" y1="2" x2="14" y2="14"/></svg><span>0</span></span>
         <div id="eyesWrap" class="eyes">
@@ -2554,8 +2599,8 @@ PET_HTML = r"""<!DOCTYPE html>
           </svg>
         </div>
       </div>
-      <div id="layerBody" class="pill pill-body"></div>
-      <div id="layerBase" class="pill pill-base"></div>
+      <div id="layerBody" class="pill pill-body"><i class="g-env" aria-hidden="true"></i></div>
+      <div id="layerBase" class="pill pill-base"><i class="g-env" aria-hidden="true"></i></div>
     </div>
     <div id="petCaption" class="pet-label">기본</div>
   </div>
@@ -4044,6 +4089,9 @@ const RoMotion = (() => {
       el.style.translate = `${tx.toFixed(2)}px ${ty.toFixed(2)}px`;
       el.style.rotate = `${l.rot.toFixed(2)}deg`;
       el.style.scale = `${l.sx.toFixed(4)} ${l.sy.toFixed(4)}`;
+      // 유리 속 풍경은 몸이 가는 반대쪽으로 밀리고, 기울면 옆으로, 눌리면 위아래로 출렁인다
+      el.style.setProperty("--gx", `${clamp(-0.6 * tx - 1.2 * l.rot, -10, 10).toFixed(2)}px`);
+      el.style.setProperty("--gy", `${clamp(-0.6 * ty + 30 * (1 - l.sy), -8, 8).toFixed(2)}px`);
     });
     bot.style.opacity = P.op === 1 ? "" : String(P.op);
     const st = document.getElementById("streak");
@@ -4060,7 +4108,10 @@ const RoMotion = (() => {
   }
 
   function clearStyles() {
-    [layerHead, layerBody, layerBase].forEach(el => { el.style.translate = ""; el.style.rotate = ""; el.style.scale = ""; });
+    [layerHead, layerBody, layerBase].forEach(el => {
+      el.style.translate = ""; el.style.rotate = ""; el.style.scale = "";
+      el.style.removeProperty("--gx"); el.style.removeProperty("--gy");
+    });
     const bot = document.getElementById("roBot");
     if (bot) bot.style.opacity = "";
     const st = document.getElementById("streak");

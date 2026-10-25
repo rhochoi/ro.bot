@@ -109,6 +109,19 @@ class PressTest(MotionBase):
         self.assertGreater(wide, rest[1] * 0)  # 납작하게 퍼진다
         pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
 
+    def test_glass_scene_sloshes_with_motion_and_resets(self):
+        pg = self.page()
+        pg.evaluate("materialMode = 'glass'; updateMaterialUI();")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "block")
+        pg.evaluate("RoMotion.down(1000); RoMotion.apply(RoMotion.pose(1080))")  # 눌리면 풍경이 위아래로 밀린다
+        gy = pg.evaluate("parseFloat(layerHead.style.getPropertyValue('--gy'))")
+        self.assertNotEqual(gy, 0)
+        self.assertLessEqual(abs(gy), 8)
+        pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
+        self.assertEqual(pg.evaluate("layerHead.style.getPropertyValue('--gy')"), "")
+        pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
+
     def test_eyes_squint_then_open_then_happy_600ms(self):
         pg = self.page()
         eyes = lambda t: pg.evaluate("(t) => RoMotion.pose(t).eyes.shape", t)
