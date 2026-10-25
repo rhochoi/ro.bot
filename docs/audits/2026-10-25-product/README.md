@@ -1,6 +1,16 @@
-# 제품 전체 기능 분석 — 2026-10-25
+# UX/UI · 백엔드 · 전체 기능 분석 — 2026-10-25
 
-[전체 보고서](./REPORT.ko.md) · [연결부 관찰](./connection-results.json) · [복구·UI 관찰](./recovery-results.json) · [배포 관찰](./distribution-results.json)
+| 순서 | 보고서 | 다루는 범위 |
+|---|---|---|
+| 1 | [UX/UI 분석](./UX-UI.ko.md) | 화면·동선·상태 피드백·오류 회복·접근성과 검증 한계 |
+| 2 | [백엔드 분석](./BACKEND.ko.md) | 로컬 API·권한·실행·저장·비동기·복구·배포 경계 |
+| 3 | [전체 기능·사용자 목표 분석](./REPORT.ko.md) | 28개 기능군·25개 시나리오군·공통 원인·통합 우선순위 |
+
+UX/UI와 백엔드 보고서는 사용자가 지정한 별도 분석의 원본이다. 각각 「저장소 UX/UI 심층 분석」과 「백엔드 구조와 위험 분석」 채팅의 파일 작성·후속 수정 기록에서 복원했다. 원문은 [UX/UI 보관본](../../../workspace-snapshot/scratch/ux-audit/UX-UI-review.ko.md), [백엔드 보관본](../../../workspace-snapshot/scratch/backend-audit/report.ko.md)에 보존하고 SHA-256과 출처를 [manifest](../../../workspace-snapshot/manifest.json)에 기록했다. 열람용 사본은 코드 근거를 분석 커밋으로 연결한다.
+
+세 보고서의 문제 번호와 검증 실행은 서로 독립적이다. 제품 보고서의 통합 우선순위는 원래 분석 범위이며 이번 게시 작업에서 선행 두 보고서와 다시 통합 분석한 것은 아니다. UX/UI·백엔드 원본이 참조하는 첨부 스크린샷·로그·재현 파일은 이번 복원에 포함되지 않았으며, 본문에서 미포함으로 표시한다. 아래 실행 자료와 재현 안내는 **전체 기능 분석**에 해당한다.
+
+[연결부 관찰](./connection-results.json) · [복구·UI 관찰](./recovery-results.json) · [배포 관찰](./distribution-results.json)
 
 28개 기능군과 25개 시나리오군을 사용자 목표에 연결한 분석이다. 보고서는 실제 검증한 커밋 `23b38f56fa4f82390d721b70654acfa9e7c8b273`의 소스에 링크한다. 이 디렉터리는 문서·검증 자료이며 앱 동작이나 기존 테스트를 변경하지 않는다.
 

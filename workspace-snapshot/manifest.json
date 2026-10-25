@@ -523,5 +523,62 @@
     "ro.bot/.git (history retained through branch ancestry)",
     "ro.bot-product-audit (duplicate worktree; new artifacts included under docs)"
   ],
-  "scope": "Entire project, work artifacts, and environment reproduction files; installed runtime/venv/cache excluded by user choice."
+  "scope": "Entire project, work artifacts, and environment reproduction files; installed runtime/venv/cache excluded by user choice.",
+  "additional_report_imports": [
+    {
+      "source_path": "/workspace/scratch/ux-audit/UX-UI-review.ko.md",
+      "archived_path": "workspace-snapshot/scratch/ux-audit/UX-UI-review.ko.md",
+      "view_path": "docs/audits/2026-10-25-product/UX-UI.ko.md",
+      "source_thread_id": "01a17174-1fd8-7178-b73c-a5f4f15710a8",
+      "recovery_method": "Original report heredoc in command history; backend subsequent text replacements applied. Historical commands were parsed as data, not executed.",
+      "bytes": 54588,
+      "sha256": "6ad39fdc744a91802654ea2a2554d7e1aecbc4653cb0ad9c39067d76d1e84a17",
+      "unavailable_attachments": [
+        "/workspace/scratch/ux-audit/01-empty-home.png",
+        "/workspace/scratch/ux-audit/02-needs-setup.png",
+        "/workspace/scratch/ux-audit/05-preview.png",
+        "/workspace/scratch/ux-audit/06-answer-hidden-settings.png",
+        "/workspace/scratch/ux-audit/07-answer-home.png",
+        "/workspace/scratch/ux-audit/08-yesterday-evidence.png",
+        "/workspace/scratch/ux-audit/09-evidence-opens-today.png",
+        "/workspace/scratch/ux-audit/10-file-approval-35.png",
+        "/workspace/scratch/ux-audit/11-file-partial.png",
+        "/workspace/scratch/ux-audit/12-network-failure.png",
+        "/workspace/scratch/ux-audit/13-audit-attention.png",
+        "/workspace/scratch/ux-audit/15-main-organize-command.png",
+        "/workspace/scratch/ux-audit/16-search-excerpt.png",
+        "/workspace/scratch/ux-audit/17-missing-engine.png",
+        "/workspace/scratch/ux-audit/18-reload-busy.png",
+        "/workspace/scratch/ux-audit/19-token-expired.png",
+        "/workspace/scratch/ux-audit/20-record-lost-input.png",
+        "/workspace/scratch/ux-audit/21-small-height.png",
+        "/workspace/scratch/ux-audit/audit_followup.py",
+        "/workspace/scratch/ux-audit/audit_run.py",
+        "/workspace/scratch/ux-audit/followup.json",
+        "/workspace/scratch/ux-audit/keyboard.json",
+        "/workspace/scratch/ux-audit/observations.json",
+        "/workspace/scratch/ux-audit/overlay-rerun.log",
+        "/workspace/scratch/ux-audit/unittest.log"
+      ]
+    },
+    {
+      "source_path": "/workspace/scratch/backend-audit/report.ko.md",
+      "archived_path": "workspace-snapshot/scratch/backend-audit/report.ko.md",
+      "view_path": "docs/audits/2026-10-25-product/BACKEND.ko.md",
+      "source_thread_id": "01a17174-6beb-7490-974a-fb0e4708f0b2",
+      "recovery_method": "Original report heredoc in command history; backend subsequent text replacements applied. Historical commands were parsed as data, not executed.",
+      "bytes": 50895,
+      "sha256": "323b6c6d750d269034a893d84506459ec919259399286d06252d336d3c69bb81",
+      "unavailable_attachments": [
+        "/workspace/scratch/backend-audit/reproduce.py",
+        "/workspace/scratch/backend-audit/results.json",
+        "/workspace/scratch/backend-audit/supplement-results.json",
+        "/workspace/scratch/backend-audit/supplement.py",
+        "/workspace/scratch/backend-audit/wheel-results.json",
+        "/workspace/scratch/backend-audit/wheel_probe.py",
+        "/workspace/scratch/backend-unittest.log"
+      ]
+    }
+  ],
+  "tracked_project_files_note": "Hashes describe the original audited source snapshot. README.md subsequently gained report navigation."
 }
