@@ -3423,7 +3423,7 @@ const RoMotion = (() => {
     // 세게 흔들어도 몸이 펫 창(176×168) 밖으로 나가 잘리지 않게 움직임을 작게 묶는다
     grab: { holdMs: 300, moveStart: 8, hang: [5, 17], hangSpring: [400, 24], follow: [1.0, 0.35, 0.2], damping: 0.65, tilt: 0.25, tiltMax: 4,
             maxLag: 12, wobbleDeg: 1.4, wobbleHz: 1.5 },
-    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 4, dizzyAfter: Infinity, dizzyMs: 0,
+    shake: { reversals: 3, windowMs: 1000, speed: 1200, spring: [180, 8], maxRot: 4, dizzyAfter: Infinity, dizzyMs: 0, landDizzyMs: 1200,
              spinMs: 600, endGap: 450, calmMs: 900, stopSpeed: 150, stopMs: 100, calmDamping: 12, keepRatio: 0.5, slowWindow: 120 },
     drop: { g: 2400, maxFallMs: 280, stretch: [0.94, 1.08], landMs: 90, land: [1.12, 0.82], bounce: 0.2,
             bounceSpring: [500, 18], stack: [0, 60, 120], restMs: 360, fadeMs: 150 },
@@ -3465,7 +3465,7 @@ const RoMotion = (() => {
     S = { phase: "idle", downAt: null, upAt: null, grabAt: null, grabbed: false, tap: false,
           anchor: null, head: { x: 0, y: 0 }, pos: [mkPos(0, 0), mkPos(0, 0), mkPos(0, 0)],
           vx: 0, vy: 0, lastMoveT: null, peak: 0, sign: 0, revs: [], tau: 80,
-          shakeActive: false, shakeStart: null, shakeLast: -1e9, shakeEnd: null, dizzyUntil: 0, sg: 0, slowSince: null,
+          shakeActive: false, shakeStart: null, shakeLast: -1e9, shakeEnd: null, dizzyFrom: 0, dizzyUntil: 0, sg: 0, slowSince: null,
           hist: [], osc: [{ th: 0, w: 0 }, { th: 0, w: 0 }, { th: 0, w: 0 }], simT: 0,
           dropAt: null, fall: 0, tFall: 0.1, L0: null, reduced: false };
   }
@@ -3553,6 +3553,8 @@ const RoMotion = (() => {
 
   function startDrop(t, fall) {
     S.L0 = grabLayers(t);                              // 놓는 순간의 매달린 자세를 기억한다
+    // 흔드는 동안은 찡그리기만 하고, 흔들다 놓으면 착지한 순간부터 눈이 돈다
+    const shaken = S.shakeActive || (S.shakeEnd != null && t - S.shakeEnd <= SPEC.shake.endGap);
     if (S.shakeActive) { S.shakeActive = false; S.shakeEnd = S.shakeLast; }
     if (S.shakeEnd != null && S.shakeLast - S.shakeStart >= SPEC.shake.dizzyAfter) S.dizzyUntil = Math.max(S.dizzyUntil, t + SPEC.shake.dizzyMs);
     S.phase = "drop";
@@ -3560,6 +3562,10 @@ const RoMotion = (() => {
     S.fall = Math.max(0, fall);
     const sec = S.fall > 0.5 ? Math.sqrt(2 * S.fall / SPEC.drop.g) : 0.1;
     S.tFall = clamp(sec, 0.04, SPEC.drop.maxFallMs / 1000);
+    if (shaken) {
+      S.dizzyFrom = t + S.tFall * 1000;
+      S.dizzyUntil = Math.max(S.dizzyUntil, S.dizzyFrom + SPEC.shake.landDizzyMs);
+    }
   }
 
   function stepSim(cur, dt) {
@@ -3683,7 +3689,7 @@ const RoMotion = (() => {
 
   function eyesAt(t) {
     const D = SPEC.drop, P = SPEC.press, K = SPEC.shake;
-    const swirl = (S.shakeActive && S.shakeStart != null && t - S.shakeStart >= K.dizzyAfter) || t < S.dizzyUntil;
+    const swirl = (S.shakeActive && S.shakeStart != null && t - S.shakeStart >= K.dizzyAfter) || (t >= S.dizzyFrom && t < S.dizzyUntil);
     if (S.reduced && swirl) return S.shakeActive ? "squint" : "big";
     if (S.phase === "grab") {
       if (swirl) return "swirl";
