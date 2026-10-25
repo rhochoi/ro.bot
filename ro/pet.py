@@ -1746,24 +1746,79 @@ PET_HTML = r"""<!DOCTYPE html>
       0 2px 5px rgba(15, 14, 13, 0.22);
   }
 
-  /* 유리(glass): 색 없는 투명 유리. 색상 모드와 상관없이 같다(뒤 배경이 그대로 비친다) */
-  body.material-glass .ro-bot { filter: drop-shadow(0 6px 12px rgba(15, 14, 13, 0.12)); }
+  /* 유리(glass): 투명한 판이 아니라 두께가 있는 유리 덩어리처럼 보이게 한다.
+     ① 바닥: 살짝 서리 낀 유리(뒤가 흐리게 비침 + 옅은 흰빛) ② 위쪽 반사광(넓은 광택 + 가는 하이라이트 줄)
+     ③ 아래쪽 굴절광(유리 두께로 모인 빛) ④ 가장자리 림: 빛 받는 위·왼쪽은 밝고 반대편은 은은하게
+     ⑤ 가장자리의 아주 옅은 분산(파랑·주황) ⑥ 떠 있는 그림자.
+     데스크톱 창에서는 뒤 화면을 흐릴 수 없으니(투명 창) 흐림이 없어도 유리로 보이도록 ①~⑥만으로 형태를 만든다.
+     어두운 색상 모드에서는 연기 낀 유리로 바뀌고 눈이 밝아진다(어두운 바탕에서도 눈이 보이게). */
+  body.material-glass .ro-bot { filter: drop-shadow(0 7px 14px rgba(10, 12, 20, 0.22)); }
   body.material-glass .pill {
+    --g-tint-top: rgba(255, 255, 255, 0.40);
+    --g-tint-bot: rgba(255, 255, 255, 0.18);
+    --g-sheen: rgba(255, 255, 255, 0.70);
+    --g-caustic: rgba(255, 255, 255, 0.45);
+    --g-rim: rgba(255, 255, 255, 0.95);
+    --g-rim-soft: rgba(255, 255, 255, 0.40);
+    --g-edge: rgba(20, 24, 36, 0.22);
     z-index: 1;
     overflow: hidden;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.04) 60%, rgba(255, 255, 255, 0.08) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.55);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    isolation: isolate;
+    border: none;
+    background:
+      radial-gradient(130% 95% at 28% -10%, var(--g-sheen) 0%, rgba(255, 255, 255, 0.10) 42%, rgba(255, 255, 255, 0) 62%),
+      radial-gradient(85% 130% at 72% 125%, var(--g-caustic) 0%, rgba(255, 255, 255, 0) 58%),
+      linear-gradient(180deg, var(--g-tint-top), var(--g-tint-bot));
+    backdrop-filter: blur(12px) saturate(180%) brightness(1.06);
+    -webkit-backdrop-filter: blur(12px) saturate(180%) brightness(1.06);
     box-shadow:
-      inset 0 1.5px 2px rgba(255, 255, 255, 0.7),
-      inset 0 -1.5px 3px rgba(0, 0, 0, 0.10),
-      0 0 0 0.5px rgba(0, 0, 0, 0.12);
+      inset 0 1px 0 var(--g-rim),                       /* 위 림 */
+      inset 0 -1px 0 var(--g-rim-soft),                 /* 아래 림 */
+      inset 0 -7px 10px -6px var(--g-caustic),          /* 두께로 모인 아래쪽 빛 */
+      inset 0 5px 8px -6px rgba(0, 0, 0, 0.10),         /* 위쪽 안쪽 그늘(곡면) */
+      inset 2px 0 3px -2px rgba(110, 170, 255, 0.35),   /* 왼쪽 가장자리 분산(파랑) */
+      inset -2px 0 3px -2px rgba(255, 170, 110, 0.30),  /* 오른쪽 가장자리 분산(주황) */
+      0 0 0 0.6px var(--g-edge);                        /* 윤곽 머리카락선 */
   }
-  body.material-glass { --bot-eye: #1A1917; }  /* 눈 색도 색상 모드를 따르지 않는다 */
-  body.material-glass .eyes { z-index: 2; }
-  body.material-glass .eye { background: #1A1917; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7); }
-  body.material-glass .resolved-arch { stroke: #1A1917; }
+  /* 가는 하이라이트 줄: 위쪽 곡면에 맺힌 반사 */
+  body.material-glass .pill::before {
+    content: ""; position: absolute; z-index: 0; pointer-events: none;
+    left: 12%; top: 10%; width: 48%; height: 26%; border-radius: 999px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 35%, rgba(255, 255, 255, 0.35) 75%, rgba(255, 255, 255, 0) 100%);
+    filter: blur(0.6px);
+  }
+  /* 림 라이트: 빛을 받는 위·왼쪽 가장자리는 밝게, 아래·오른쪽은 은은하게(1px 테두리만 남기는 마스크) */
+  body.material-glass .pill::after {
+    content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.15) 45%, rgba(255, 255, 255, 0.05) 60%, rgba(255, 255, 255, 0.55) 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  }
+  /* 어두운 색상 모드: 연기 낀 유리 */
+  body.theme-chalk.material-glass .pill {
+    --g-tint-top: rgba(40, 42, 52, 0.55);
+    --g-tint-bot: rgba(14, 15, 20, 0.62);
+    --g-sheen: rgba(255, 255, 255, 0.30);
+    --g-caustic: rgba(255, 255, 255, 0.22);
+    --g-rim: rgba(255, 255, 255, 0.55);
+    --g-rim-soft: rgba(255, 255, 255, 0.18);
+    --g-edge: rgba(0, 0, 0, 0.55);
+  }
+  body.theme-chalk.material-glass .pill::before { opacity: 0.45; }
+  body.theme-chalk.material-glass .pill::after { opacity: 0.6; }
+  /* 눈: 밝은 유리엔 진한 눈, 연기 유리엔 밝은 눈. 윤곽 광채는 상자 테두리(box-shadow)가 아니라
+     실제로 칠한 모양을 따라가는 drop-shadow로 준다 — > < ∩ ◍ 모양에서 상자(마름모·반원)가 보이지 않게 */
+  body.material-glass { --bot-eye: #15161A; }
+  body.theme-chalk.material-glass { --bot-eye: #F6F4EF; }
+  body.material-glass .eyes {  /* 웃는 눈(⌒)도 .eyes 안에 있어 같은 광채를 받는다 */
+    z-index: 2;
+    filter: drop-shadow(0 0 0.8px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 1.6px rgba(255, 255, 255, 0.6));
+  }
+  body.theme-chalk.material-glass .eyes {
+    filter: drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
+  }
 
   /* 눈 둘 */
   .eyes {
