@@ -28,14 +28,28 @@ enum NativeGlass {
     /// `defaults write ro.pet ro.glass blur` 로 굴절 유리 대신 흐림 유리를 강제할 수 있다(되돌리기: defaults delete ro.pet ro.glass)
     static var forceBlur = false
 
+    /// 창을 늘 활성 모습으로 그리게 했는지(forceActiveAppearance 성공 여부)
+    static var activeForced = false
+
     /// 웹 화면에 알려 줄 유리 종류: "liquid"(굴절) 또는 "blur"(흐림).
-    /// 굴절 유리는 창이 비활성이면 macOS가 지운다(펫 창은 다른 앱을 쓰는 동안 늘 비활성이다).
-    /// 그래서 비활성일 때는 항상 켜 둘 수 있는 흐림 유리(state = .active)로 바꿔, 유리가 사라지지 않게 한다.
+    /// 굴절 유리는 창이 비활성이면 뿌옇게 그려진다(펫 창은 다른 앱을 쓰는 동안 늘 비활성이다).
+    /// 창을 늘 활성 모습으로 그리게 했으면 항상 굴절 유리, 못 했으면 비활성일 때는 늘 켜 둘 수 있는 흐림 유리(state = .active)로 바꾼다.
     static func kind(active: Bool) -> String {
         #if compiler(>=6.2)
-        if #available(macOS 26.0, *), !forceBlur, active { return "liquid" }
+        if #available(macOS 26.0, *), !forceBlur, active || activeForced { return "liquid" }
         #endif
         return "blur"
+    }
+
+    /// 비활성 창의 굴절 유리를 활성 모습으로 그리게 하는 공개 API가 없다(NSGlassEffectView엔 state가 없음).
+    /// 그래서 AppKit의 비공개 `_setForceMainAppearance:`를 쓴다. 모양만 바꾸고 키 입력·활성 상태는 바꾸지 않는다.
+    /// 이 호출이 없어진 macOS에서는 응답하지 않으므로 건너뛰고, 위의 흐림 유리 대체가 그대로 동작한다.
+    static func forceActiveAppearance(_ window: NSWindow) {
+        let sel = NSSelectorFromString("_setForceMainAppearance:")
+        guard window.responds(to: sel), let m = class_getInstanceMethod(type(of: window), sel) else { return }
+        typealias SetBool = @convention(c) (AnyObject, Selector, Bool) -> Void
+        unsafeBitCast(method_getImplementation(m), to: SetBool.self)(window, sel, true)
+        activeForced = true
     }
 
     static func make(_ kind: String) -> NSView {
@@ -59,6 +73,7 @@ enum NativeGlass {
         v.alphaValue = alpha
         #if compiler(>=6.2)
         if #available(macOS 26.0, *), let g = v as? NSGlassEffectView {
+            g.style = .clear  // 뒤가 또렷이 비치고 가장자리에서 휘는 투명 유리(기본 .regular는 뿌옇다)
             g.cornerRadius = frame.height / 2
             g.tintColor = dark ? NSColor.black.withAlphaComponent(0.28) : nil
             return
@@ -1065,6 +1080,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
         // 시스템 유리는 웹 화면 아래에 깔리고, 마우스는 위의 웹 화면이 받는다
         NativeGlass.forceBlur = defaults.string(forKey: "ro.glass") == "blur"
+        if !NativeGlass.forceBlur { NativeGlass.forceActiveAppearance(panel) }
         let container = FlippedView(frame: NSRect(origin: .zero, size: compactSize))
         glassLayer = FlippedView(frame: container.bounds)
         glassLayer.autoresizingMask = [.width, .height]

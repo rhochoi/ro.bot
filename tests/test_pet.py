@@ -439,7 +439,11 @@ class PetTest(unittest.TestCase):
         self.assertIn("v.blendingMode = .behindWindow", src)
         self.assertIn("container.addSubview(glassLayer)\n        container.addSubview(webView)", src)  # 유리는 웹 화면 아래
         # 펫 창이 비활성이면 macOS가 굴절 유리를 지우므로 항상 켜 둘 수 있는 흐림 유리로 바꾼다(유리가 사라지지 않게)
-        self.assertIn("if #available(macOS 26.0, *), !forceBlur, active { return \"liquid\" }", src)
+        self.assertIn("if #available(macOS 26.0, *), !forceBlur, active || activeForced { return \"liquid\" }", src)
+        # 굴절 유리를 늘 활성 모습으로: 비공개 호출은 응답할 때만, 실패하면 흐림 유리 대체
+        self.assertIn('NSSelectorFromString("_setForceMainAppearance:")', src)
+        self.assertIn("guard window.responds(to: sel)", src)
+        self.assertIn("g.style = .clear", src)
         self.assertIn("NativeGlass.kind(active: panel.isKeyWindow)", src)
         self.assertIn("NSWindow.didResignKeyNotification", src)
         self.assertIn("v.state = .active", src)
