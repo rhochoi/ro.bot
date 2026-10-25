@@ -205,6 +205,20 @@ class PetLayoutTest(unittest.TestCase):
                 srv.shutdown()
                 srv.server_close()
 
+    def test_reopened_panel_stays_inside_after_dragging_pet(self):
+        page = self.open_page()
+        page.click("#closeBtn")
+        bb = page.locator(".ro-bot").bounding_box()
+        page.mouse.move(bb["x"] + 20, bb["y"] + 10)
+        page.mouse.down()
+        page.mouse.move(10, bb["y"] + 10, steps=15)  # 말풍선이 닫힌 채로 왼쪽 끝까지 옮긴다
+        page.mouse.up()
+        page.wait_for_timeout(600)
+        page.evaluate("setBubbleOpen(true)")
+        left, right = page.evaluate("(() => { const r = bubble.getBoundingClientRect(); return [r.left, r.right]; })()")
+        self.assertGreaterEqual(left, -0.5)
+        self.assertLessEqual(right, 360.5)
+
     def test_stats_toggle_stays_on_home(self):
         page = self.open_page()
         page.click("#filterStatsBtn")

@@ -90,7 +90,7 @@ SENSITIVE = re.compile(r"recovery|backup[-_ ]?codes?|mnemonic|복구\s*코드|�
 NAME_DATE = re.compile(r"(?<!\d)(20\d\d)[-._년 ]?\s?(\d{1,2})[-._월 ]?\s?(\d{1,2})일?(?!\d)")
 NAME_MONTH = re.compile(r"(?<!\d)(20\d\d)[-._년 ]\s?(0?[1-9]|1[0-2])월?(?![\d.])")  # invoice_2026_09
 VERSION_TAIL = re.compile(r"\s(?:v\d+(?:\.\d+)*|final|최종|\d+\.\d+(?:\.\d+)*)\b.*$", re.I)
-CAMERA = re.compile(r"^(?:img|dsc|dscn|pxl|mvimg|gopr|dji)[\s-]?\d{3,5}$", re.I)  # 카메라 번호는 그 자체가 이름
+CAMERA = re.compile(r"^(?:img|dsc|dscn|pxl|mvimg|gopr|dji)[\s-]?\d{1,5}$", re.I)  # 카메라 번호는 그 자체가 이름(IMG_9도)
 TEXT_DATE = re.compile(r"(?<!\d)(20\d\d)\s?(?:[-./]|년)\s?(\d{1,2})\s?(?:[-./]|월)\s?(\d{1,2})(?!\d)")
 
 
@@ -386,7 +386,8 @@ def _judge(root, files, items, now, stale, stale_days):
             if m == keep or it is None:
                 continue
             claimed.add(_k(m))
-            _mark(it, "quarantine", "duplicate", f"{keep} 와 내용 동일", keep, review=_important(it))
+            _mark(it, "quarantine", "duplicate", f"{Path(keep).name} 와 내용 동일", keep,  # 위치는 keep에 따로 둔다
+                  review=_important(it))
     for p, _ in files:
         it = by_key[_k(p)]
         if _k(p) in claimed or p.suffix.lower() != ".zip":
@@ -839,7 +840,7 @@ def show(plan, category=None, review=False, action=None, kind=None):
         for i in kept:
             lines.append(f"[{i['id']}]  {Path(i['path']).name}   ({i['reasons'][0]})")
     all_items = plan["items"]
-    n_move = sum(i.get("action", "move") == "move" for i in all_items)
+    n_move = sum(i.get("action", "move") == "move" and not i["review"] for i in all_items)  # 검토 필요는 따로 센다
     q = [i for i in all_items if i.get("action") == "quarantine"]
     n_review = sum(i["review"] for i in all_items if i.get("action", "move") == "move")
     lines.append(f"\n이동 {n_move}건 · 치울 후보 {len(q)}건({_mb(sum(i['size'] for i in q))}) · "

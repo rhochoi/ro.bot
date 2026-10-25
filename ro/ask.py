@@ -146,8 +146,9 @@ def build_context(projects, tools=None):
         git = dict(p.get("git") or {})
         if git and Path(p["path"]).is_dir():  # 지도가 오래됐어도 최근 커밋은 지금 값으로
             git["last_commit"] = mapper._git(p["path"], "log", "-1", "--format=%cs %s") or git.get("last_commit")
+        stack = list(dict.fromkeys([*(p.get("markers") or []), *(p.get("languages") or [])]))  # ro show와 같은 표기
         lines = [f"## {p['name']} ({p['path']})",
-                 f"언어: {', '.join(p['languages']) or '-'} / 브랜치: {git.get('branch') or '-'}"
+                 f"언어: {', '.join(stack) or '-'} / 브랜치: {git.get('branch') or '-'}"
                  f" / 최근 커밋: {git.get('last_commit') or '-'}"]
         sm = p.get("summary")
         if sm:

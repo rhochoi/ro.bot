@@ -168,6 +168,12 @@ def run(days=30, min_n=MIN_N, dry=False, home=HOME, events=None, routing=None):
     events = log.read_all() if events is None else events
     rows = collect(events, days)
     cands, notes = propose(rows, routing, min_n, bench_scores(home))
+    # routing.toml 기본값과 다르게 승인된 규칙이 실제로 보내는 엔진도 알려 준다(route.choose와 같은 규칙: 나중 승인이 우선)
+    for r in reversed(learn.load_rules(home)):
+        if r.get("kind") in ("route", "routing") and r.get("category"):
+            cat = r["category"]
+            if not any(n.startswith(f"{cat}: 지금은") for n in notes):
+                notes.append(f"{cat}: 지금은 승인된 규칙 {r['id']}에 따라 {r.get('engine')}로 보냄")
     new = cands if dry else learn.add_pending(cands, home)
     return new, notes, rows
 

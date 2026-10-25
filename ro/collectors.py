@@ -364,7 +364,7 @@ def main(argv=None):
         if args.cmd in ("allow", "deny"):
             cfg = set_allow(args.source, args.target, args.cmd == "allow")
             print(f"{args.cmd}: {args.source} {args.target or ''}".strip())
-            print(json.dumps(cfg, ensure_ascii=False))
+            print(render_status(cfg))  # 바뀐 뒤의 허용 상태를 사람이 읽는 형태로
         elif args.cmd == "status":
             cfg = load_config()
             print(json.dumps(cfg, ensure_ascii=False, indent=2) if args.json else render_status(cfg))

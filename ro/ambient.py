@@ -4,6 +4,7 @@
 로그에 기록만 하며, 엔진 실행이나 규칙 변경으로 자동 연결하지 않는다.
 """
 import re
+import shutil
 import subprocess
 import time
 from datetime import date, datetime, timedelta
@@ -93,5 +94,10 @@ def notify(title, text):
     """macOS 알림. 인자를 argv로 넘겨 스크립트 주입을 막는다."""
     script = ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
               "-e", "end run"]
+    if not shutil.which("osascript"):  # macOS가 아니면 오류 추적 대신 실패로 돌려준다
+        return False
     cmd = ["osascript", *script, sanitize(title, 60), sanitize(text, 160)]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=10).returncode == 0
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

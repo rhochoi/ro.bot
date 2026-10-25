@@ -66,7 +66,7 @@ def main(argv=None):
     sub.add_parser("tidy", add_help=False, help="(별칭) ro organize로 합쳐짐 — 곧 사라집니다")  # 목록 표시용
     sub.add_parser("organize", add_help=False,
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
-    sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")
+    sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 체크아웃은 git pull)")
     sub.add_parser("doctor", help="설치 상태·엔진 점검")
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
     q.add_argument("question")
@@ -89,7 +89,7 @@ def main(argv=None):
     ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
     ss.add_argument("--json", action="store_true")
     sr = ssub.add_parser("roots", help="스캔 폴더 관리")
-    sr.add_argument("action", choices=["list", "add", "remove"])
+    sr.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])  # 생략하면 목록
     sr.add_argument("paths", nargs="*")
     se = ssub.add_parser("engine", help="선호 엔진 지정(auto=자동 라우팅)")
     se.add_argument("name")
@@ -98,10 +98,10 @@ def main(argv=None):
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
     bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bg = bsub.add_parser("gen", help="현재 상태에서 정답을 뽑아 과제 파일 생성 (지도도 새로고침)")
-    bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 rog.bot만")
+    bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 이 저장소만")
     bg.add_argument("--out", default="~/.ro/bench.json")
     bg.add_argument("--set", choices=["repo", "fixtures", "all"], default="all",
-                    help="repo=rog.bot 실제 상태, fixtures=합성 프로젝트(정확도 변별용), 기본 all")
+                    help="repo=이 저장소의 실제 상태, fixtures=합성 프로젝트(정확도 변별용), 기본 all")
     br = bsub.add_parser("run", help="과제 × 조건 실행(엔진 호출 발생)")
     br.add_argument("--tasks", default="~/.ro/bench.json")
     br.add_argument("--engine", choices=route.ENGINES, default="codex")
@@ -157,7 +157,9 @@ def main(argv=None):
                 try:
                     tasks += bench.generate_tasks(mapdata, repo, extra)
                 except ValueError as e:
-                    raise SystemExit(str(e))
+                    if args.set == "repo":
+                        raise SystemExit(str(e))
+                    print(f"저장소 과제 건너뜀: {e}", file=sys.stderr)  # all이면 합성 과제만이라도 만든다
             if args.set in ("fixtures", "all"):
                 fixtures.build()
                 tasks += fixtures.tasks()
@@ -376,7 +378,10 @@ def main(argv=None):
             print(f"일정 {len(events)}건 기록")
         else:
             head = log.summarize(time.strftime("%Y-%m-%d")).splitlines()[0]
-            print("알림 전송됨" if ambient.notify("ro", head) else "알림 전송 실패")
+            if ambient.notify("ro", head):
+                print("알림 전송됨")
+            else:
+                raise SystemExit("알림을 보내지 못했습니다(macOS 알림만 지원 — osascript 필요).")
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)

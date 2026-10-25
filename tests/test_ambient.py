@@ -67,13 +67,18 @@ class AmbientTest(unittest.TestCase):
                          [("2026-10-22", "치과"), ("2026-10-23", "긴 회의이어짐")])
 
     def test_notify_passes_args_not_script(self):
-        with mock.patch("subprocess.run") as run:
+        with mock.patch("subprocess.run") as run, mock.patch("shutil.which", return_value="/usr/bin/osascript"):
             run.return_value.returncode = 0
             ambient.notify('t"; do shell script "x', 'body')
             cmd = run.call_args[0][0]
             self.assertEqual(cmd[0], "osascript")
             self.assertEqual(cmd[-1], "body")
             self.assertNotIn("do shell script", " ".join(cmd[:-2]))
+
+    def test_notify_without_osascript_fails_quietly(self):
+        with mock.patch("shutil.which", return_value=None), mock.patch("subprocess.run") as run:
+            self.assertFalse(ambient.notify("t", "body"))  # macOS가 아니면 오류 추적 없이 실패
+            run.assert_not_called()
 
     def test_secret_cut_at_truncation_boundary_is_masked(self):
         # 회귀: 자른 뒤 마스킹하면 경계에 걸린 키 앞부분(sk-ABCDEFGHIJK)이 기록됐다

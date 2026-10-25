@@ -2749,6 +2749,7 @@ function notifyHost(payload) {
 
 function setBubbleOpen(open) {
   bubble.classList.toggle("hidden", !open);
+  if (open && !isNativeHost) fitStage();  // 닫힌 채로 펫을 옮겼다면 다시 연 말풍선이 화면 밖으로 잘리지 않게
   notifyHost({ type: "bubble", open: !!open });
   if (window._poll !== undefined) setPollRate(open);
 }
@@ -3038,6 +3039,22 @@ function moveStageBy(dx, dy) {
   const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
   if (rects.some((r) => r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight)) {
     [stageX, stageY] = prev;
+    stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  }
+}
+
+/* 펫과 (열려 있으면) 말풍선이 모두 창 안에 들어오도록 무대를 당긴다 */
+function fitStage() {
+  const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
+  if (!rects.length) return;
+  const left = Math.min(...rects.map(r => r.left)), right = Math.max(...rects.map(r => r.right));
+  const top = Math.min(...rects.map(r => r.top)), bottom = Math.max(...rects.map(r => r.bottom));
+  let dx = 0, dy = 0;
+  if (left < 0) dx = -left; else if (right > window.innerWidth) dx = Math.max(-left, window.innerWidth - right);
+  if (top < 0) dy = -top; else if (bottom > window.innerHeight) dy = Math.max(-top, window.innerHeight - bottom);
+  if (dx || dy) {
+    stageX += dx;
+    stageY += dy;
     stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
   }
 }

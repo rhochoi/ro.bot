@@ -27,7 +27,7 @@ SKIP_KINDS = SYSTEM_KINDS
 KIND_LABELS = {
     "note": "기록", "activity": "활동", "ambient": "활동", "route": "질문", "feedback": "평가", "pet": "펫",
     "organize": "정리", "organize_scan": "정리안", "organize_edit": "정리 수정", "organize_purge": "보관함 비움",
-    "tidy": "정리", "write_gate": "승인", "map": "지도", "audit": "점검", "eval": "평가 실행", "bench": "벤치",
+    "tidy": "정리", "write_gate": "실행 취소",  # write_gate는 승인 카드에서 '취소'했을 때만 남는다 "map": "지도", "audit": "점검", "eval": "평가 실행", "bench": "벤치",
     "adapter_probe": "점검", "distill": "요약 전송", "collect": "수집", "learn_approve": "규칙 승인",
     "learn_reject": "규칙 거절",
 }
