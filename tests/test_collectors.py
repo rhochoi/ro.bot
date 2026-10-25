@@ -145,6 +145,30 @@ class GitTest(Base):
         # 지시처럼 보이는 문장도 데이터로만 기록된다(실행·엔진 입력과 연결 없음)
         self.assertTrue(any("ignore previous instructions" in e["summary"] for e in ev))
 
+    def test_incremental_run_collects_more_than_200_commits(self):
+        repo = self._repo()
+        git(repo, "config", "user.email", "me@example.com")
+        collectors.set_allow("git", str(repo))
+        collectors.run(["git"])                                   # 커서를 만든다
+        for i in range(205):
+            git(repo, "commit", "-q", "--allow-empty", "-m", f"c{i}")
+        self.assertEqual(collectors.run(["git"])["git"], 205)     # 200개에서 끊기지 않는다
+        self.assertEqual(collectors.run(["git"])["git"], 0)
+
+    def test_cursor_save_failure_does_not_duplicate_on_retry(self):
+        repo = self._repo()
+        collectors.set_allow("git", str(repo))
+        real = collectors._save
+        def flaky(name, data, home=collectors.HOME):
+            if name == "collect_state.json":
+                raise OSError(28, "No space")
+            return real(name, data, home)
+        with mock.patch.object(collectors, "_save", flaky), self.assertRaises(OSError):
+            collectors.run(["git"])
+        self.assertEqual(len(self.events()), 1)
+        self.assertEqual(collectors.run(["git"])["git"], 0)       # 커서가 없어도 같은 커밋을 다시 쓰지 않는다
+        self.assertEqual(len(self.events()), 1)
+
     def test_dry_run_writes_nothing(self):
         repo = self._repo()
         collectors.set_allow("git", str(repo))

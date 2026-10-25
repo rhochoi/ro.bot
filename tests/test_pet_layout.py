@@ -150,6 +150,89 @@ class PetLayoutTest(unittest.TestCase):
             page.wait_for_selector("#writeCard", state="hidden")
             self.assertTrue((self.org_root / "pic.png").exists())
 
+    def test_lost_connection_keeps_last_content_and_draft(self):
+        page = self.open_page()
+        page.route("**/api/state", lambda route: route.fulfill(status=403, body='{"ok":false}',
+                                                               content_type="application/json"))
+        page.evaluate("refreshState()")
+        page.wait_for_selector("#staleBanner", state="visible")
+        self.assertGreaterEqual(int(page.inner_text("#metricEvents")), 3)   # 0건 화면으로 바뀌지 않는다
+        page.route("**/api/capture", lambda route: route.abort())
+        page.fill("#askInput", "/기록 연결 오류 때 보존할 문장")
+        page.press("#askInput", "Enter")
+        page.wait_for_function("document.querySelector('#askInput').value.includes('보존할 문장')")
+
+    def test_empty_recall_has_no_null_text_and_time_words_do_not_hijack_questions(self):
+        page = self.open_page()
+        page.evaluate("runRecall('존재하지않는검색어 기록 찾아줘')")
+        page.wait_for_selector("#recallCard", state="visible")
+        self.assertNotIn("null", page.inner_text("#recallCard"))
+        paths = []
+        page.on("request", lambda r: paths.append(urlsplit(r.url).path))
+        page.fill("#askInput", "오늘 ro.bot 구조를 설명해줘")
+        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/ask/preview"):
+            page.press("#askInput", "Enter")
+        self.assertNotIn("/api/recall", paths)
+        page.wait_for_selector("#sendCard", state="visible")
+        page.click("#sendCard summary")
+        self.assertIn("[질문]", page.inner_text("#sendCard .send-ctx"))      # 보낼 프롬프트 전체가 보인다
+        page.click("#sendCancelBtn")
+
+    def test_failed_prefs_save_reverts_the_screen(self):
+        page = self.open_page()
+        before = page.evaluate("document.body.className")
+        page.route("**/api/prefs", lambda route: route.fulfill(status=200, body='{"ok":false}',
+                                                               content_type="application/json"))
+        page.click('[data-tab="settings"]')
+        page.click('[data-mat="glass"]')
+        page.wait_for_function("document.querySelector('#toast').innerText.includes('되돌렸어요')")
+        self.assertEqual(set(page.evaluate("document.body.className").split()), set(before.split()))
+
+    def test_setup_card_explains_next_step_without_map(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            srv = pet.start_server(rt)
+            try:
+                ctx = self.browser.new_context(viewport={"width": 360, "height": 530}, reduced_motion="reduce")
+                self.addCleanup(ctx.close)
+                page = ctx.new_page()
+                page.goto("http://127.0.0.1:%d/" % srv.server_address[1])
+                page.wait_for_selector("#stage")
+                page.evaluate("setBubbleOpen(true)")
+                page.wait_for_selector("#setupCard", state="visible")
+                self.assertIn("ro map", page.inner_text("#setupCard"))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_reopened_panel_stays_inside_after_dragging_pet(self):
+        page = self.open_page()
+        page.click("#closeBtn")
+        bb = page.locator(".ro-bot").bounding_box()
+        page.mouse.move(bb["x"] + 20, bb["y"] + 10)
+        page.mouse.down()
+        page.mouse.move(10, bb["y"] + 10, steps=15)  # 말풍선이 닫힌 채로 왼쪽 끝까지 옮긴다
+        page.mouse.up()
+        page.wait_for_timeout(600)
+        page.evaluate("setBubbleOpen(true)")
+        left, right = page.evaluate("(() => { const r = bubble.getBoundingClientRect(); return [r.left, r.right]; })()")
+        self.assertGreaterEqual(left, -0.5)
+        self.assertLessEqual(right, 360.5)
+
+    def test_glass_eyes_have_no_box_outline_and_stay_visible_in_dark_mode(self):
+        page = self.open_page()
+        page.evaluate("materialMode = 'glass'; updateMaterialUI(); themeMode = 'ink'; updateThemeUI();")
+        for shape in ("squint", "happy", "swirl"):  # 상자 테두리가 있으면 마름모·반원·원이 보였다
+            page.evaluate(f"document.getElementById('petWrap').dataset.eyes = '{shape}'")
+            self.assertEqual(page.evaluate("getComputedStyle(eyeL).boxShadow"), "none", shape)
+        lum = "(c => { const [r, g, b] = c.match(/\\d+/g).map(Number); return (0.2126*r + 0.7152*g + 0.0722*b) / 255; })"
+        dark_eye = page.evaluate(f"{lum}(getComputedStyle(document.body).getPropertyValue('--bot-eye').trim().replace('#','').match(/../g).map(h => parseInt(h,16)).join(','))")
+        page.evaluate("themeMode = 'chalk'; updateThemeUI();")
+        light_eye = page.evaluate(f"{lum}(getComputedStyle(document.body).getPropertyValue('--bot-eye').trim().replace('#','').match(/../g).map(h => parseInt(h,16)).join(','))")
+        self.assertLess(dark_eye, 0.2)    # 밝은 유리엔 진한 눈
+        self.assertGreater(light_eye, 0.8)  # 연기 유리(어두운 모드)엔 밝은 눈
+        page.evaluate("delete document.getElementById('petWrap').dataset.eyes; materialMode = 'clay'; updateMaterialUI(); themeMode = 'auto'; updateThemeUI();")
+
     def test_stats_toggle_stays_on_home(self):
         page = self.open_page()
         page.click("#filterStatsBtn")

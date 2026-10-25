@@ -109,14 +109,17 @@ def external_candidates(w, engine, home=HOME, runner=route.run, now=None, log_di
     if not (w["tool_days"] or w["proj_days"] or w["sessions"]):
         return [], "통계가 비어 있어 외부 호출 생략(먼저 `python -m ro.collectors allow ...` 후 `run`)"
     week = time.strftime("%G-W%V", time.localtime(now or time.time()))
-    p, st = _state(home)
-    if st.get("external_week") == week:
-        return [], f"이번 주({week})에 이미 외부 증류를 실행했습니다(주 1회 한도)"
     data = json.dumps(payload(w), ensure_ascii=False)
     if len(data.encode()) > MAX_PAYLOAD:
         return [], "페이로드가 4KB를 넘어 중단"
+    # 이번 주 실행권을 잠금 안에서 먼저 기록한 뒤 호출한다: 두 실행이 동시에 와도 한 번만 나간다.
+    # 호출이 실패하거나 응답을 잃어도 한도는 소모된다(비용 상한, 무조건 재시도하지 않음).
+    with fsutil.locked(Path(home).expanduser() / "distill_state.lock"):
+        p, st = _state(home)
+        if st.get("external_week") == week:
+            return [], f"이번 주({week})에 이미 외부 증류를 실행했습니다(주 1회 한도)"
+        fsutil.atomic_write(p, json.dumps({**st, "external_week": week}))
     res = runner(engine, PROMPT.format(n=MAX_CANDS, m=TEXT_MAX, data=data), write=False)
-    fsutil.atomic_write(p, json.dumps({**st, "external_week": week}))  # 실패해도 한도는 소모(비용 상한)
     log.append("distill", f"외부 엔진 요약 ({engine})", {"engine": engine, "ok": res["ok"], "bytes": len(data)}, engine=engine,
                log_dir=log_dir)
     if not res["ok"]:

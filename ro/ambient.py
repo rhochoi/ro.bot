@@ -4,6 +4,7 @@
 로그에 기록만 하며, 엔진 실행이나 규칙 변경으로 자동 연결하지 않는다.
 """
 import re
+import shutil
 import subprocess
 import time
 from datetime import date, datetime, timedelta
@@ -50,7 +51,8 @@ def pump(lines, source, max_per_min=MAX_PER_MIN, log_dir=log.LOG_DIR, now=time.t
 def serial_lines(port, baud):
     """시리얼 포트에서 줄을 읽는 제너레이터(Ctrl+C로 종료)."""
     import serial
-    from serial_link import find_port  # 저장소 루트에서 실행
+
+    from .serial_link import find_port  # 패키지 안에 있어 설치본에서도 불러올 수 있다
 
     port = port or find_port()
     if not port:
@@ -92,5 +94,10 @@ def notify(title, text):
     """macOS 알림. 인자를 argv로 넘겨 스크립트 주입을 막는다."""
     script = ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
               "-e", "end run"]
+    if not shutil.which("osascript"):  # macOS가 아니면 오류 추적 대신 실패로 돌려준다
+        return False
     cmd = ["osascript", *script, sanitize(title, 60), sanitize(text, 160)]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=10).returncode == 0
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False

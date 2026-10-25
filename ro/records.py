@@ -22,12 +22,12 @@ LINE_CAP = 120
 TEXT_CAP = 20000
 # ro가 스스로 남긴 이벤트(펫 시작·정리안 스캔·질문 등). "오늘 N건 기록"·회상·묶기에서는 사용자 기록이 아니다.
 SYSTEM_KINDS = {"feedback", "revoke", "route", "pet", "organize_scan", "organize_edit", "write_gate", "map", "audit",
-                "eval", "bench", "adapter_probe", "distill", "collect", "learn_approve", "learn_reject"}
+                "eval", "bench", "adapter_probe", "distill", "collect", "learn_approve", "learn_reject", "pet_error"}
 SKIP_KINDS = SYSTEM_KINDS
 KIND_LABELS = {
     "note": "기록", "activity": "활동", "ambient": "활동", "route": "질문", "feedback": "평가", "pet": "펫",
     "organize": "정리", "organize_scan": "정리안", "organize_edit": "정리 수정", "organize_purge": "보관함 비움",
-    "tidy": "정리", "write_gate": "승인", "map": "지도", "audit": "점검", "eval": "평가 실행", "bench": "벤치",
+    "tidy": "정리", "write_gate": "실행 취소",  # write_gate는 승인 카드에서 '취소'했을 때만 남는다 "map": "지도", "audit": "점검", "eval": "평가 실행", "bench": "벤치",
     "adapter_probe": "점검", "distill": "요약 전송", "collect": "수집", "learn_approve": "규칙 승인",
     "learn_reject": "규칙 거절",
 }
@@ -42,12 +42,22 @@ def is_user_record(event):
 
 
 def eid(event):
+    """기록 ID. 새 기록은 저장된 고유 id, 그 전 기록은 시각·종류·요약 해시(옛 revoke와 호환)."""
+    if event.get("id"):
+        return str(event["id"])
     return hashlib.sha1(f"{event.get('ts')}|{event.get('kind')}|{event.get('summary')}".encode()).hexdigest()[:10]
 
 
-def live(events):
-    """되돌린(revoke) 기록을 뺀 이벤트."""
-    revoked = {(e.get("data") or {}).get("target") for e in events if e.get("kind") == "revoke"}
+def revoked_ids(log_dir=log.LOG_DIR):
+    """로그 전체에서 되돌린 기록 ID. 다른 날 되돌린 기록도 빠지도록 날짜와 상관없이 모은다."""
+    return {(e.get("data") or {}).get("target") for e in log.read_all(log_dir) if e.get("kind") == "revoke"}
+
+
+def live(events, revoked=None):
+    """되돌린(revoke) 기록을 뺀 이벤트. 회상·통계·질문 문맥·증류가 모두 이 기준을 쓴다.
+    revoked를 주지 않으면 events 안의 revoke만 본다(전체 로그를 넘길 때)."""
+    if revoked is None:
+        revoked = {(e.get("data") or {}).get("target") for e in events if e.get("kind") == "revoke"}
     return [e for e in events if e.get("kind") != "revoke" and eid(e) not in revoked]
 
 
@@ -75,7 +85,8 @@ def candidates(text, projects):
 
 def _safe_url(url):
     sp = urlsplit(url)
-    return f"{sp.scheme}://{sp.netloc}{sp.path}" if sp.scheme in ("http", "https") and sp.netloc else ""
+    host = sp.netloc.rsplit("@", 1)[-1]  # user:pass@ 부분은 저장하지 않는다
+    return f"{sp.scheme}://{host}{sp.path}" if sp.scheme in ("http", "https") and host else ""
 
 
 def capture(kind, name, text, size, projects, log_dir=log.LOG_DIR):
@@ -155,7 +166,11 @@ def assignments(home=HOME):
 
 
 def project_of(event, assigned):
-    return assigned.get(eid(event)) or (event.get("data") or {}).get("project")
+    """사용자가 정한 분류가 우선이다. 빈 값("")으로 정했으면 '분류 없음'(자동 추정도 쓰지 않음)."""
+    i = eid(event)
+    if i in assigned:
+        return assigned[i] or None
+    return (event.get("data") or {}).get("project")
 
 
 def _event_text(e):

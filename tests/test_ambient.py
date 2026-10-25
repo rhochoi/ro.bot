@@ -27,6 +27,20 @@ END:VCALENDAR
 """
 
 
+class SerialPackagingTest(unittest.TestCase):
+    def test_serial_lines_uses_packaged_helper(self):
+        # 저장소 루트의 serial_link.py 없이(설치본처럼) 패키지 안 모듈만으로 포트를 찾는다
+        port = mock.Mock(device="/dev/tty.usbserial-1")
+        ser = mock.MagicMock()
+        ser.__enter__.return_value.readline.side_effect = [b"hello\n", KeyboardInterrupt()]
+        fake_serial = mock.Mock(Serial=mock.Mock(return_value=ser))
+        fake_tools = mock.Mock(list_ports=mock.Mock(comports=mock.Mock(return_value=[port])))
+        with mock.patch.dict("sys.modules", {"serial": fake_serial, "serial.tools": fake_tools,
+                                             "serial.tools.list_ports": fake_tools.list_ports, "serial_link": None}):
+            self.assertEqual(list(ambient.serial_lines(None, 115200)), ["hello\n"])
+        fake_serial.Serial.assert_called_once_with("/dev/tty.usbserial-1", 115200, timeout=1)
+
+
 class AmbientTest(unittest.TestCase):
     def test_sanitize(self):
         self.assertEqual(ambient.sanitize("a\x00b\x1b[0m\n"), "ab[0m")
@@ -53,13 +67,18 @@ class AmbientTest(unittest.TestCase):
                          [("2026-10-22", "치과"), ("2026-10-23", "긴 회의이어짐")])
 
     def test_notify_passes_args_not_script(self):
-        with mock.patch("subprocess.run") as run:
+        with mock.patch("subprocess.run") as run, mock.patch("shutil.which", return_value="/usr/bin/osascript"):
             run.return_value.returncode = 0
             ambient.notify('t"; do shell script "x', 'body')
             cmd = run.call_args[0][0]
             self.assertEqual(cmd[0], "osascript")
             self.assertEqual(cmd[-1], "body")
             self.assertNotIn("do shell script", " ".join(cmd[:-2]))
+
+    def test_notify_without_osascript_fails_quietly(self):
+        with mock.patch("shutil.which", return_value=None), mock.patch("subprocess.run") as run:
+            self.assertFalse(ambient.notify("t", "body"))  # macOS가 아니면 오류 추적 없이 실패
+            run.assert_not_called()
 
     def test_secret_cut_at_truncation_boundary_is_masked(self):
         # 회귀: 자른 뒤 마스킹하면 경계에 걸린 키 앞부분(sk-ABCDEFGHIJK)이 기록됐다

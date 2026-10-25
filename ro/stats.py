@@ -47,8 +47,10 @@ def latest_session_revs(log_dir=log.LOG_DIR):
     return latest
 
 
-def daily(day, log_dir=log.LOG_DIR, latest=None):
-    events = log.read(day, log_dir)
+def daily(day, log_dir=log.LOG_DIR, latest=None, revoked=None):
+    from . import records  # 되돌린 기록은 회상과 똑같이 통계에서도 뺀다
+    revoked = records.revoked_ids(log_dir) if revoked is None else revoked
+    events = records.live(log.read(day, log_dir), revoked)
     latest = latest_session_revs(log_dir) if latest is None else latest
     acts = [e for e in _dedupe(events)
             if (e["data"].get("type") != "session"
@@ -81,8 +83,8 @@ def daily(day, log_dir=log.LOG_DIR, latest=None):
     }
 
 
-def write(day, home=HOME, log_dir=log.LOG_DIR, latest=None):
-    stat = daily(day, log_dir, latest)
+def write(day, home=HOME, log_dir=log.LOG_DIR, latest=None, revoked=None):
+    stat = daily(day, log_dir, latest, revoked)
     fsutil.atomic_write(Path(home).expanduser() / "stats" / f"{day}.json",
                         json.dumps(stat, ensure_ascii=False, indent=2))
     return stat
@@ -110,9 +112,11 @@ def main(argv=None):
     ap.add_argument("--days", type=int, default=1, help="최근 N일 다시 집계")
     args = ap.parse_args(argv)
     days = [args.day] if args.day else last_days(args.days)
+    from . import records
     latest = latest_session_revs()  # 여러 날을 다시 집계할 때 로그를 한 번만 읽는다
+    revoked = records.revoked_ids()
     for day in days:
-        s = write(day, latest=latest)
+        s = write(day, latest=latest, revoked=revoked)
         print(f"{day}: 활동 {s['activity']}건, 세션 {s['sessions']['count']}, 라우팅 {s['routes']['count']}")
 
 

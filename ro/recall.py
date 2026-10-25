@@ -90,18 +90,23 @@ def answer(question, events, projects, home=records.HOME, now=None):
                 "followups": FOLLOWUPS[:2], "note": "기록에 없는 건 지어내지 않아요"}
 
     hits.sort(key=lambda e: e.get("ts", ""))
-    seen, items, evidence = set(), [], []
-    for e in hits:
+    seen, unique = set(), []
+    for e in hits:  # 같은 요약은 하나로 센다
         s = log.redact(str(e.get("summary", ""))).strip()
-        if s in seen:
-            continue
-        seen.add(s)
-        n = len(evidence) + 1
-        evidence.append({"n": n, "id": records.eid(e), "kind": e.get("kind", ""), "summary": s[:100],
+        if s not in seen:
+            seen.add(s)
+            unique.append((e, s))
+    total = len(unique)
+    shown = unique[-MAX_EVIDENCE:]  # 많으면 가장 최근 것부터(오래된 것만 보여 주고 최근 일을 빠뜨리지 않게)
+    evidence = []
+    for e, s in shown:
+        lines = [log.redact(x) for x in ((e.get("data") or {}).get("excerpt") or [])]
+        matched = [x for x in lines[1:] if any(t in x.lower() for t in toks)] if toks else []
+        evidence.append({"n": len(evidence) + 1, "id": records.eid(e), "kind": e.get("kind", ""), "summary": s[:100],
+                         "excerpt": (matched or lines[1:])[:2], "day": e["ts"][:10],
                          "ts": f"{e['ts'][5:7]}/{e['ts'][8:10]} {e['ts'][11:16]}"})
-        if len(evidence) >= MAX_EVIDENCE:
-            break
-    items = [{"n": ev["n"], "text": ev["summary"]} for ev in evidence[:MAX_ITEMS]]
-    headline = f"{topic(scope[0])} {len(evidence)}가지를 했어요." if scope else f"{len(evidence)}건을 찾았어요."
+    items = [{"n": ev["n"], "text": ev["summary"]} for ev in evidence[-MAX_ITEMS:]]
+    more = f" 최근 {len(evidence)}건만 근거로 보여 줘요." if total > len(evidence) else ""
+    headline = (f"{topic(scope[0])} {total}가지를 했어요." if scope else f"{total}건을 찾았어요.") + more
     return {"ok": True, "found": True, "headline": headline, "items": items, "evidence": evidence,
-            "followups": FOLLOWUPS[:2], "note": "기록에 없는 건 지어내지 않아요"}
+            "total": total, "followups": FOLLOWUPS[:2], "note": "기록에 없는 건 지어내지 않아요"}

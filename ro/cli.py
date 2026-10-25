@@ -66,7 +66,7 @@ def main(argv=None):
     sub.add_parser("tidy", add_help=False, help="(별칭) ro organize로 합쳐짐 — 곧 사라집니다")  # 목록 표시용
     sub.add_parser("organize", add_help=False,
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
-    sub.add_parser("update", help="최신 버전으로 업데이트(설치본=pipx, 체크아웃=git pull)")
+    sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 체크아웃은 git pull)")
     sub.add_parser("doctor", help="설치 상태·엔진 점검")
     q = sub.add_parser("ask", help="질문 → 컨텍스트 → 엔진(읽기 모드)")
     q.add_argument("question")
@@ -83,12 +83,13 @@ def main(argv=None):
     fb.add_argument("--engine", required=True, choices=route.ENGINES)
     fb.add_argument("--category", required=True)
     fb.add_argument("--projects", default="", help="쉼표로 구분")
+    fb.add_argument("--answer", default=None, help="답변 ID(ask --json의 feedback_args). 같은 답변은 한 번만 센다")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더, 선호 엔진")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
     ss.add_argument("--json", action="store_true")
     sr = ssub.add_parser("roots", help="스캔 폴더 관리")
-    sr.add_argument("action", choices=["list", "add", "remove"])
+    sr.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])  # 생략하면 목록
     sr.add_argument("paths", nargs="*")
     se = ssub.add_parser("engine", help="선호 엔진 지정(auto=자동 라우팅)")
     se.add_argument("name")
@@ -97,10 +98,10 @@ def main(argv=None):
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
     bsub = bn.add_subparsers(dest="bench_cmd", required=True)
     bg = bsub.add_parser("gen", help="현재 상태에서 정답을 뽑아 과제 파일 생성 (지도도 새로고침)")
-    bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 rog.bot만")
+    bg.add_argument("--projects", default="", help="추가할 프로젝트 이름(쉼표). 기본은 이 저장소만")
     bg.add_argument("--out", default="~/.ro/bench.json")
     bg.add_argument("--set", choices=["repo", "fixtures", "all"], default="all",
-                    help="repo=rog.bot 실제 상태, fixtures=합성 프로젝트(정확도 변별용), 기본 all")
+                    help="repo=이 저장소의 실제 상태, fixtures=합성 프로젝트(정확도 변별용), 기본 all")
     br = bsub.add_parser("run", help="과제 × 조건 실행(엔진 호출 발생)")
     br.add_argument("--tasks", default="~/.ro/bench.json")
     br.add_argument("--engine", choices=route.ENGINES, default="codex")
@@ -156,7 +157,9 @@ def main(argv=None):
                 try:
                     tasks += bench.generate_tasks(mapdata, repo, extra)
                 except ValueError as e:
-                    raise SystemExit(str(e))
+                    if args.set == "repo":
+                        raise SystemExit(str(e))
+                    print(f"저장소 과제 건너뜀: {e}", file=sys.stderr)  # all이면 합성 과제만이라도 만든다
             if args.set in ("fixtures", "all"):
                 fixtures.build()
                 tasks += fixtures.tasks()
@@ -236,7 +239,7 @@ def main(argv=None):
                       engine=args.engine or config.load().get("engine") or None, rules=learn.load_rules(), project=args.project,
                       model=args.model, history=ask.load_history() if args.cont else None)
         head = (f"엔진: {pl['engine']} / 모델: {pl['model'] or '엔진 기본'} ({pl['reason']}) / 프로젝트: {', '.join(pl['projects']) or '-'}"
-                f" / 컨텍스트 {len(pl['context'])}자")
+                f" / 컨텍스트 {len(pl['context'])}자" + (f" (승인된 기억 {pl['memories']}개 포함)" if pl["memories"] else ""))
         preview = {"event": "preview", "engine": pl["engine"], "category": pl["category"],
                    "projects": pl["projects"], "context_chars": len(pl["context"]), "prompt": pl["prompt"]}
         if args.dry_run or (args.json and not args.yes):
@@ -264,7 +267,7 @@ def main(argv=None):
         done = {"event": "done", "ok": res["ok"], "reason": res["reason"], "help": help_text,
                 "duration": res["duration"], "output": res["output"],
                 "feedback_args": {"engine": pl["engine"], "category": pl["category"],
-                                  "projects": pl["projects"]}}
+                                  "projects": pl["projects"], "answer": pl.get("answer_id")}}
         if args.json:
             print(json.dumps(done, ensure_ascii=False), flush=True)
         else:
@@ -295,7 +298,7 @@ def main(argv=None):
         except ValueError as e:
             raise SystemExit(str(e))
     elif args.cmd == "feedback":
-        ask.feedback({"engine": args.engine, "category": args.category,
+        ask.feedback({"engine": args.engine, "category": args.category, "answer_id": args.answer,
                       "projects": [x for x in args.projects.split(",") if x]}, args.verdict == "y")
         print("기록됨")
     elif args.cmd == "collect":
@@ -313,7 +316,7 @@ def main(argv=None):
             return
         if args.write and input("쓰기 모드로 실행합니다. 계속? [y/N] ").strip().lower() != "y":
             raise SystemExit("취소됨")
-        res = route.run(engine, args.task, args.write, args.cwd, model=model)
+        res = route.run(engine, log.redact(args.task), args.write, args.cwd, model=model)  # ask와 같은 마스킹
         log.append("route", args.task[:80], {
             "engine": engine, "model": model, "category": category, "mode": mode, "ok": res["ok"],
             "code": res["code"], "duration": res["duration"]}, engine=engine)
@@ -375,7 +378,10 @@ def main(argv=None):
             print(f"일정 {len(events)}건 기록")
         else:
             head = log.summarize(time.strftime("%Y-%m-%d")).splitlines()[0]
-            print("알림 전송됨" if ambient.notify("ro", head) else "알림 전송 실패")
+            if ambient.notify("ro", head):
+                print("알림 전송됨")
+            else:
+                raise SystemExit("알림을 보내지 못했습니다(macOS 알림만 지원 — osascript 필요).")
     elif args.cmd == "log":
         if args.log_cmd == "add":
             e = log.append(args.kind, args.summary, engine=args.engine)
@@ -386,7 +392,8 @@ def main(argv=None):
         elif args.log_cmd == "delete":
             if not args.yes:
                 raise SystemExit("기록을 삭제합니다(되돌릴 수 없음). 확인하려면 --yes를 붙이세요.")
-            print(f"기록 파일 {log.delete(args.before)}개 삭제")
+            print(f"기록 파일 {log.delete(args.before)}개 삭제 (같은 기간의 통계·승인 대기 후보도 지움. "
+                  "승인한 기억은 ~/.ro/ro-model.md에서 직접 지우세요)")
         else:
             print(log.summarize(getattr(args, "date", None) or time.strftime("%Y-%m-%d")))
     elif args.cmd == "pet":

@@ -132,6 +132,18 @@ class BenchTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench.generate_tasks(m, "/x", ["secret-project"])
 
+    def test_generate_finds_repo_by_path_not_old_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            repo = Path(d) / "ro.bot"
+            (repo / "ro").mkdir(parents=True)
+            (repo / "ro" / "ambient.py").write_text("MAX_PER_MIN = 42\n")
+            tasks = bench.generate_tasks({"projects": [{"name": "ro.bot", "path": str(repo)}]}, repo)
+            fact = next(t for t in tasks if t["id"] == "fact-rate-limit")
+            self.assertEqual(fact["project"], "ro.bot")
+            self.assertTrue(fact["question"].startswith("ro.bot의"))
+            with self.assertRaises(ValueError):  # 저장소가 지도에 없으면 이유를 알려 준다
+                bench.generate_tasks({"projects": []}, repo)
+
     def test_stale_tasks(self):
         old = {"id": "a", "kind": "live-git", "asof": "2020-01-01T00:00:00"}
         fresh = {"id": "b", "kind": "live-git", "asof": time.strftime("%Y-%m-%dT%H:%M:%S")}

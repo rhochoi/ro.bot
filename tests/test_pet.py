@@ -120,14 +120,14 @@ class PetTest(unittest.TestCase):
                 run.assert_not_called()
 
                 # 거절 시 실행하지 않음
-                rej = rt.resolve_write_approval(False)
+                rej = rt.resolve_write_approval(False, rt.write_pending["id"])
                 self.assertFalse(rej["approved"])
                 run.assert_not_called()
 
                 # 승인 시에만 write=True로 실행
                 rt.queue_write_approval("코드 수정")
                 run.return_value = {"ok": True, "code": 0, "duration": 0.1, "output": "완료"}
-                app = rt.resolve_write_approval(True)
+                app = rt.resolve_write_approval(True, rt.write_pending["id"])
                 self.assertTrue(app["approved"])
                 self.assertEqual(run.call_args.kwargs.get("write"), True)
 
@@ -177,12 +177,12 @@ class PetTest(unittest.TestCase):
             self.assertTrue(res["ok"])
             self.assertEqual(res["pending"]["qkind"], "extracted")
             self.assertIn("지우지 않고", res["pending"]["task"])
-            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertFalse(rt.resolve_write_approval(False, rt.write_pending["id"])["approved"])
             self.assertTrue(z.exists())  # 거절하면 그대로
 
             rt.queue_organize_apply(kind="extracted")
             with mock.patch("ro.route.run") as run:
-                out = rt.resolve_write_approval(True)
+                out = rt.resolve_write_approval(True, rt.write_pending["id"])
                 run.assert_not_called()
             self.assertTrue(out["ok"], out)
             self.assertIn("풀린 압축 1건 격리", out["output"])
@@ -217,20 +217,20 @@ class PetTest(unittest.TestCase):
             self.assertTrue(rt.queue_organize_apply("재무")["ok"])
             st = rt.snapshot()
             self.assertEqual((st["mood"], st["write_pending"]["kind"]), ("anxious", "organize_apply"))
-            self.assertFalse(rt.resolve_write_approval(False)["approved"])
+            self.assertFalse(rt.resolve_write_approval(False, rt.write_pending["id"])["approved"])
             self.assertTrue(f.exists())
 
             # 요청 뒤 정리안이 바뀌면 승인해도 옮기지 않는다
             rt.queue_organize_apply("재무")
             time.sleep(1.1)
             rt.organize_scan()
-            self.assertFalse(rt.resolve_write_approval(True)["ok"])
+            self.assertFalse(rt.resolve_write_approval(True, rt.write_pending["id"])["ok"])
             self.assertTrue(f.exists())
 
             # 승인해야 이동
             rt.queue_organize_apply("재무")
             with mock.patch("ro.route.run") as run:
-                res = rt.resolve_write_approval(True)
+                res = rt.resolve_write_approval(True, rt.write_pending["id"])
                 run.assert_not_called()  # 정리는 엔진을 부르지 않는다
             self.assertTrue(res["ok"], res)
             self.assertTrue(moved.exists())
@@ -243,7 +243,7 @@ class PetTest(unittest.TestCase):
             self.assertEqual(rt.snapshot()["organize"]["undo"]["count"], 1)
             rt.queue_organize_undo()
             self.assertTrue(moved.exists())
-            self.assertTrue(rt.resolve_write_approval(True)["ok"])
+            self.assertTrue(rt.resolve_write_approval(True, rt.write_pending["id"])["ok"])
             self.assertTrue(f.exists())
             self.assertIsNone(rt.snapshot()["organize"]["undo"])
             self.assertFalse(rt.queue_organize_undo()["ok"])
@@ -430,6 +430,32 @@ class PetTest(unittest.TestCase):
         self.assertIn("mainMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)", src)
         self.assertIn('if (isNativeHost) notifyHost({ type: "menu" });', pet.PET_HTML)
         self.assertIn("else cycleMoodPreview();", pet.PET_HTML)  # 브라우저는 기존 동작
+
+    def test_native_glass_under_body(self):
+        src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
+        # macOS 26 SDK가 없는 Xcode에서도 빌드되고, 26 미만 Mac은 시스템 흐림으로 내려간다
+        self.assertIn("#if compiler(>=6.2)", src)
+        self.assertIn("if #available(macOS 26.0, *), kind == \"liquid\" { return NSGlassEffectView() }", src)
+        self.assertIn("v.blendingMode = .behindWindow", src)
+        self.assertIn("container.addSubview(glassLayer)\n        container.addSubview(webView)", src)  # 유리는 웹 화면 아래
+        # 펫 창이 비활성이면 macOS가 굴절 유리를 지우므로 항상 켜 둘 수 있는 흐림 유리로 바꾼다(유리가 사라지지 않게)
+        self.assertIn("if #available(macOS 26.0, *), !forceBlur, active || activeForced { return \"liquid\" }", src)
+        # 굴절 유리를 늘 활성 모습으로: 비공개 호출은 응답할 때만, 실패하면 흐림 유리 대체
+        self.assertIn('NSSelectorFromString("_setForceMainAppearance:")', src)
+        self.assertIn("guard window.responds(to: sel)", src)
+        self.assertIn("g.style = .clear", src)
+        self.assertIn("NativeGlass.kind(active: panel.isKeyWindow)", src)
+        self.assertIn("NSWindow.didResignKeyNotification", src)
+        self.assertIn("v.state = .active", src)
+        self.assertNotIn("override var isKeyWindow", src)  # 창을 활성이라고 속이지 않는다
+        self.assertIn('defaults.string(forKey: "ro.glass") == "blur"', src)
+        self.assertIn('} else if type == "glass" {', src)
+        self.assertIn("window.setNativeGlass('\\(glassKind)')", src)
+        self.assertEqual(src.count("refreshGlass()"), 4)  # 정의 + 말풍선 열기/닫기 + 활성 상태 변화
+        self.assertIn("rects.allSatisfy({ $0.count == 6 })", src)  # 자리·기울기·불투명도
+        self.assertIn("v.frameCenterRotation = rotation", src)
+        self.assertNotIn("CGWindowListCreateImage", src)  # 화면을 캡처하지 않는다
+        self.assertIn('notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });', pet.PET_HTML)
 
     def test_drag_up_docks_into_menubar(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")

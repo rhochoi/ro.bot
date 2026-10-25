@@ -2,8 +2,10 @@
 
 기본은 읽기 모드(계획/read-only). 쓰기 모드는 호출자가 명시적으로 허용해야 한다.
 """
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -95,13 +97,22 @@ def valid_model(name):
 
 
 def choose(task, rules=(), routing=None):
-    """(engine, category, reason). 승인된 규칙이 있으면 우선, 없으면 routing.toml 키워드 규칙."""
+    """(engine, category, reason). 승인된 규칙이 있으면 우선, 없으면 routing.toml 키워드 규칙.
+    같은 카테고리에 승인이 여럿이면 가장 나중 것이 이긴다: 반복 기반 규칙(route)과 성과 기반 개정(routing)을
+    한 줄로 보고, 개정을 나중에 승인했다면 예전 route 규칙이 그것을 덮지 않는다."""
     routing = routing or load_routing()
     category = categorize(task, routing)
-    for r in rules:
-        if r.get("kind") == "route" and r.get("category") == category and r.get("engine") in ENGINES:
+    for r in reversed(list(rules)):
+        if r.get("kind") in ("route", "routing") and r.get("category") == category and r.get("engine") in ENGINES:
             return r["engine"], category, f"승인된 규칙 {r['id']}"
     return default_engine(category, routing), category, "routing.toml"
+
+
+def installed_fallback(engine):
+    """자동으로 고른 엔진이 없을 때 설치된 다른 엔진(없으면 None)."""
+    if shutil.which(engine):
+        return None
+    return next((e for e in ENGINES if e != engine and shutil.which(e)), None)
 
 
 def build_command(engine, task, write=False, cwd=None, skip_git_check=False, model=""):
@@ -149,17 +160,37 @@ def _pump(stream, buf, on_line):
             on_line(line)
 
 
+def _kill_tree(proc, grace=2.0):
+    """엔진 프로세스 그룹 전체에 TERM → grace초 뒤에도 남으면 KILL. 부모만 죽이면 자식이 계속 일한다."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    try:
+        proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)  # 부모가 끝나도 그룹에 남은 자식을 거둔다
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.wait()
+
+
 def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_line=None, timeout=None, cancel=None):
     """엔진 실행. on_line(줄)을 주면 stdout을 오는 대로 넘긴다(진행 표시용).
     반환: dict(ok, code, duration, output, reason). reason: ""|not_installed|auth_required|timeout|cancelled|failed.
     Ctrl+C(KeyboardInterrupt) 또는 cancel(threading.Event)이 켜지면 엔진 프로세스를 정리하고 reason=cancelled로 돌려준다."""
     if not shutil.which(engine):
         return {"ok": False, "code": None, "duration": 0.0, "output": f"{engine} 미설치", "reason": "not_installed"}
+    from . import log  # 모든 엔진 호출(ask·route·쓰기 승인)이 같은 마스킹을 거친다
+    task = log.redact(task)
     timeout = timeout or TIMEOUT
     start = time.time()
     proc = subprocess.Popen(build_command(engine, task, write, cwd, skip_git_check, model), text=True, cwd=cwd,
                             stdin=subprocess.DEVNULL,  # 엔진이 상속된 stdin을 기다리며 멈추지 않게
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=True)  # 취소·시간 초과 때 엔진이 띄운 자식까지 한 번에 끝낸다
     out, err = [], []
     threads = [threading.Thread(target=_pump, args=(proc.stdout, out, on_line), daemon=True),
                threading.Thread(target=_pump, args=(proc.stderr, err, None), daemon=True)]
@@ -178,12 +209,10 @@ def run(engine, task, write=False, cwd=None, skip_git_check=False, model="", on_
                 elif not cancel or time.time() >= deadline:
                     reason = "timeout"
                 if reason:
-                    proc.kill()
-                    proc.wait()
+                    _kill_tree(proc)
                     break
     except KeyboardInterrupt:
-        proc.kill()
-        proc.wait()
+        _kill_tree(proc)
         reason = "cancelled"
     for t in threads:
         t.join(timeout=2)

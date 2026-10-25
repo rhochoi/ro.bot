@@ -13,6 +13,7 @@ CONSTRUCTION (정밀 그리드 규격 — 1u 기준):
   6. 풀어냄(resolved): 웃는 호('⌒ ⌒') 눈과 함께 바닥이 길게 뻗는다
 """
 import atexit
+import hashlib
 import hmac
 import json
 import os
@@ -106,10 +107,8 @@ AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀�
 PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk"),
                 "focus": (True, False)}
 RECENT_MAX = 10
-FILES_SHOWN = 30
 TIMELINE_MAX = 60
 PREVIEW_TTL_SEC = 600.0  # 보내기 전 확인을 받은 계획이 이보다 오래되면 다시 확인받는다
-CONTEXT_PREVIEW_CHARS = 700
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
@@ -274,14 +273,15 @@ class PetRuntime:
 
     def capture_project(self, target_id, project):
         names = {p["name"] for p in self._projects()}
-        if project not in names:
+        project = project or ""  # 빈 값 = '분류 없음'으로 해제
+        if project and project not in names:
             return {"ok": False, "error": "알 수 없는 프로젝트예요."}
         events = log.read_all(self.log_dir)
         if str(target_id) not in {records.eid(e) for e in events}:
             return {"ok": False, "error": "해당 기록을 찾을 수 없어요."}
-        records._write({"batch": f"m{int(time.time())}", "ts": time.time(), "assign": {str(target_id): project}},
-                       self.home)
-        return {"ok": True}
+        records._write({"batch": f"m{int(time.time())}-{secrets.token_hex(3)}", "ts": time.time(),
+                        "assign": {str(target_id): project}}, self.home)
+        return {"ok": True, "project": project or None}
 
     def records_plan(self):
         return records.plan(records.live(log.read_all(self.log_dir)), self._projects(), home=self.home)
@@ -321,12 +321,16 @@ class PetRuntime:
             self.write_pending = item
         return item
 
-    def resolve_write_approval(self, approve_write):
+    def resolve_write_approval(self, approve_write, pending_id=None):
+        """pending_id가 지금 대기 중인 요청과 같을 때만 그 요청을 소비한다(다른 창에서 바뀐 요청을 실행하지 않는다)."""
         with self._lock:
             item = self.write_pending
+            if not item:
+                return {"ok": False, "output": "대기 중인 쓰기 요청이 없습니다."}
+            if pending_id != item["id"]:
+                return {"ok": False, "reason": "stale",
+                        "output": "확인 카드가 바뀌었어요. 지금 보이는 요청을 다시 확인해 주세요."}
             self.write_pending = None
-        if not item:
-            return {"ok": False, "output": "대기 중인 쓰기 요청이 없습니다."}
         if not approve_write:
             log.append("write_gate", f"쓰기 거절: {item['task']}", {"engine": item["engine"]},
                        engine=item["engine"], log_dir=self.log_dir)
@@ -351,12 +355,12 @@ class PetRuntime:
         except ValueError:
             return None
         moves = organize.pending(self.home, sources=("cleanup", "organize"))  # tidy 기록은 펫 되돌리기에 넣지 않는다
-        moved = {e["id"] for e in moves}  # 이미 옮긴·격리한(되돌리지 않은) 항목은 다시 세지 않는다
-        ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and i["id"] not in moved)
+        moved = self._moved_keys(moves)  # 이미 옮긴·격리한(되돌리지 않은) 그 파일은 다시 세지 않는다
+        ready = Counter(i["category"] for i in plan["items"] if organize.movable(i) and (i["id"], i["sha"]) not in moved)
         # 치울 후보: 검토 필요(재무·계약 중복)는 펫에서 승인할 수 없으니 묶음에서 뺀다
         q_n, q_bytes = Counter(), Counter()
         for i in plan["items"]:
-            if i.get("action") == "quarantine" and not i["review"] and i["id"] not in moved:
+            if i.get("action") == "quarantine" and not i["review"] and (i["id"], i["sha"]) not in moved:
                 q_n[i["kind"]] += 1
                 q_bytes[i["kind"]] += i["size"]
         _, trashed = organize.trash_size(self.home)
@@ -377,22 +381,36 @@ class PetRuntime:
                      "when": _batch_when(last)} if last else None,
         }
 
+    @staticmethod
+    def _fingerprint(items):
+        """승인한 항목 그대로인지 대조할 지문(id·원래 경로·새 경로·내용 해시·처리 방식)."""
+        rows = sorted((i["id"], i["path"], i.get("dest"), i["sha"], i.get("action", "move"), i.get("category"))
+                      for i in items)
+        return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _moved_keys(moves):
+        """옮긴 항목의 (id, 내용 해시). id는 원래 경로에서 나오므로, 같은 자리에 새로 생긴 다른 파일은 빼지 않는다."""
+        return {(e["id"], e.get("sha")) for e in moves}
+
+    def _picked(self, plan, category=None, kind=None):
+        moved = self._moved_keys(organize.pending(self.home, sources=("cleanup", "organize")))
+        if kind:
+            return [i for i in plan["items"] if i.get("action") == "quarantine" and i.get("kind") == kind
+                    and not i["review"] and (i["id"], i["sha"]) not in moved]
+        return [i for i in plan["items"] if organize.movable(i) and i["category"] == category
+                and (i["id"], i["sha"]) not in moved]
+
     def _plan_files(self, category=None, kind=None):
-        """승인 카드에 보여 줄 파일 이름(원래 이름 → 새 이름). 많으면 앞의 FILES_SHOWN개만."""
+        """승인 카드에 보여 줄 모든 파일(원래 이름 → 새 이름)과 승인 범위(id 목록·지문).
+        보여 준 것과 실행하는 것이 같아야 하므로 목록을 자르지 않는다."""
         try:
             plan = organize.load_plan(self.home)
         except ValueError:
-            return [], 0
-        moved = {e["id"] for e in organize.pending(self.home, sources=("cleanup", "organize"))}
-        if kind:
-            picked = [i for i in plan["items"] if i.get("action") == "quarantine" and i.get("kind") == kind
-                      and not i["review"] and i["id"] not in moved]
-        else:
-            picked = [i for i in plan["items"] if organize.movable(i) and i["category"] == category
-                      and i["id"] not in moved]
-        files = [{"from": Path(i["path"]).name, "to": None if kind else Path(i["dest"]).name}
-                 for i in picked[:FILES_SHOWN]]
-        return files, max(0, len(picked) - FILES_SHOWN)
+            return [], [], ""
+        picked = self._picked(plan, category, kind)
+        files = [{"from": Path(i["path"]).name, "to": None if kind else Path(i["dest"]).name} for i in picked]
+        return files, [i["id"] for i in picked], self._fingerprint(picked)
 
     def organize_scan(self):
         """읽기 전용 스캔으로 정리안을 새로 만든다. 파일은 옮기지 않는다."""
@@ -420,17 +438,19 @@ class PetRuntime:
             if not group:
                 return {"ok": False, "output": "이 종류의 치울 후보가 없습니다. 정리안을 먼저 만드세요."}
             _, label, n, size = group
-            files, more = self._plan_files(kind=kind)
-            return self._queue({"kind": "organize_apply", "category": None, "qkind": kind, "count": n,
-                                "plan_created": summary["created"], "files": files, "more": more,
+            files, ids, fp = self._plan_files(kind=kind)
+            return self._queue({"kind": "organize_apply", "category": None, "qkind": kind, "count": len(ids),
+                                "plan_created": summary["created"], "ids": ids, "fingerprint": fp,
+                                "files": files, "more": 0,
                                 "task": f"{label} {n}건({organize._mb(size)})을 보관함(~/.ro/cleanup/trash)으로 "
                                         "옮깁니다. 지우지 않고, 되돌릴 수 있어요."})
         n = dict(map(tuple, summary["counts"])).get(category, 0) if summary else 0
         if not n:
             return {"ok": False, "output": "이 카테고리에 옮길 항목이 없습니다. 정리안을 먼저 만드세요."}
-        files, more = self._plan_files(category=category)
-        return self._queue({"kind": "organize_apply", "category": category, "count": n,
-                            "plan_created": summary["created"], "files": files, "more": more,
+        files, ids, fp = self._plan_files(category=category)
+        return self._queue({"kind": "organize_apply", "category": category, "count": len(ids),
+                            "plan_created": summary["created"], "ids": ids, "fingerprint": fp,
+                            "files": files, "more": 0,
                             "task": f"파일 정리: {category} {n}건을 {summary['dest_root']}/{category}로 옮기고 "
                                     "이름을 바꿉니다."})
 
@@ -446,10 +466,12 @@ class PetRuntime:
         try:
             if item["kind"] == "organize_apply":
                 plan = organize.load_plan(self.home)
-                if plan["created"] != item["plan_created"]:
-                    raise ValueError("승인 요청 뒤에 정리안이 바뀌었습니다. 다시 요청하세요.")
-                batch, done, skipped = organize.apply(category=item.get("category"), kind=item.get("qkind"),
-                                                      home=self.home, log_dir=self.log_dir)
+                now = self._picked(plan, item.get("category"), item.get("qkind"))
+                if (plan["created"] != item["plan_created"] or sorted(i["id"] for i in now) != sorted(item["ids"])
+                        or self._fingerprint(now) != item["fingerprint"]):
+                    raise ValueError("승인 요청 뒤에 정리안이 바뀌었습니다(파일·이름·위치). 다시 요청하세요.")
+                # 카테고리 전체가 아니라 확인 카드에 보여 준 그 항목들만 처리한다
+                batch, done, skipped = organize.apply(ids=item["ids"], home=self.home, log_dir=self.log_dir)
                 if item.get("qkind"):
                     label = organize.KIND_LABELS.get(item["qkind"], item["qkind"])
                     output = f"{label} {len(done)}건 격리 (되돌리기 가능, 삭제 아님)"
@@ -460,11 +482,20 @@ class PetRuntime:
                 output = f"{len(done)}건을 원래 자리로 되돌림"
         except (OSError, ValueError) as e:
             return {"ok": False, "approved": True, "output": str(e)}
+        if item["kind"] == "organize_apply":
+            names = {i["id"]: Path(i["path"]).name for i in plan["items"]}
+        else:
+            names = {e["id"]: Path(e["src"]).name for e in organize.read_journal(self.home)
+                     if e.get("batch") == item.get("batch")}
+        skipped_rows = [{"name": names.get(cid, cid), "reason": why} for cid, why in skipped]
         if skipped:
             output += f", 건너뜀 {len(skipped)}건"
-        with self._lock:
-            self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
-        return {"ok": True, "approved": True, "batch": batch, "output": output}
+        status = "complete" if done and not skipped else "partial" if done else "skipped"
+        if done:  # 아무것도 처리하지 못했으면 '해결' 표정을 짓지 않는다
+            with self._lock:
+                self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
+        return {"ok": bool(done), "approved": True, "batch": batch, "output": output, "status": status,
+                "done": len(done), "skipped": skipped_rows}
 
     def _disk_signature(self):
         """로그·학습 파일의 (이름, 크기, mtime, ctime). 바뀌지 않았으면 다시 읽을 필요가 없다."""
@@ -551,10 +582,16 @@ class PetRuntime:
             mood = "idle"
             status_line = f"오늘 {len(user_today)}건 기록 · 프로젝트 {len(projects)}개"
 
+        assigned = records.assignments(self.home)
+
         def row(e):
-            return {"id": records.eid(e), "ts": e.get("ts", "")[11:19], "kind": e.get("kind", ""),
-                    "kind_label": records.kind_label(e.get("kind", "")),
-                    "summary": log.redact(str(e.get("summary", "")))}
+            out = {"id": records.eid(e), "ts": e.get("ts", "")[11:19], "kind": e.get("kind", ""),
+                   "kind_label": records.kind_label(e.get("kind", "")),
+                   "summary": log.redact(str(e.get("summary", "")))}
+            if e.get("kind") == "note":
+                out["project"] = records.project_of(e, assigned)
+                out["excerpt"] = log.redact(list((e.get("data") or {}).get("excerpt") or []))[:3]
+            return out
 
         recent_logs = [row(e) for e in user_today[-RECENT_MAX:]]
         timeline = [row(e) for e in today_events[-TIMELINE_MAX:]]
@@ -608,8 +645,39 @@ class PetRuntime:
             "prefs": self.prefs(),
             "stats": stats,
             "last_answer": safe_answer,
+            "busy": busy,  # 새로고침해도 '답을 기다리는 중'과 취소 버튼을 되살린다
+            "busy_question": log.redact(busy_task) if busy else "",
+            "setup": self._setup_state(mapdata),
+            "attention_items": self._attention_items(findings, last_route_failed),
             "colors": {"black": BLACK, "cream": CREAM},
         }
+
+    def _setup_state(self, mapdata):
+        """첫 질문에 필요한 준비(지도·엔진). 다 됐으면 None. 폴더를 훑지 않고 설정·파일만 본다."""
+        engines = [e for e in route.ENGINES if shutil.which(e)]
+        steps = []
+        if mapdata is None:
+            roots = mapper.default_roots(self.home)
+            steps.append({"what": "프로젝트 지도가 없어요", "do": "ro map",
+                          "why": f"스캔 폴더: {', '.join(roots) or '없음'} (바꾸기: ro setup roots add 폴더)"})
+        elif not mapdata.get("projects"):
+            steps.append({"what": "허용한 폴더에 프로젝트가 없어요", "do": "ro setup roots add ~/Developer",
+                          "why": "프로젝트가 모인 상위 폴더를 추가한 뒤 ro map을 다시 실행하세요"})
+        if not engines:
+            steps.append({"what": "질문을 보낼 엔진이 설치돼 있지 않아요", "do": "claude, codex, agy 중 하나 설치",
+                          "why": "설치 후 그 엔진에 로그인하면 됩니다"})
+        return {"steps": steps, "engines": engines} if steps else None
+
+    @staticmethod
+    def _attention_items(findings, last_route_failed):
+        """'확인할 일'의 실제 내용과 다음 행동. 펫이 고치지는 않는다(권한 자동 수정 없음)."""
+        items = []
+        for f in findings[:5]:
+            do = "ro audit --fix" if f.startswith("권한 과다") else "ro audit"
+            items.append({"what": log.redact(f).replace(str(Path.home()), "~"), "do": do})
+        if last_route_failed:
+            items.append({"what": "직전 질문이 실패했어요", "do": "답변 카드의 안내를 확인하고 다시 질문"})
+        return items
 
     def _plan(self, question, engine=None, project=None, cwd=None):
         mapdata = ask.load_map(self.map_path, self.home)
@@ -619,7 +687,8 @@ class PetRuntime:
         # 펫이 실행된 폴더(os.getcwd())는 사용자가 지금 보는 곳이 아니다: 질문이 가리키는 프로젝트만 붙인다
         pl = ask.plan(question, mapdata, cwd=cwd, use_context=True,
                       engine=engine or config.load(self.home).get("engine") or None,
-                      rules=learn.load_rules(self.home), project=project)
+                      rules=learn.load_rules(self.home), project=project, log_dir=self.log_dir,
+                      memory_path=Path(self.home).expanduser() / "ro-model.md")
         return pl, None
 
     def preview_question(self, question, engine=None, project=None):
@@ -634,10 +703,11 @@ class PetRuntime:
         with self._lock:
             self._preview = {"id": pid, "question": question, "plan": pl, "ts": time.time()}
         age = ask.map_age_days(ask.load_map(self.map_path, self.home)) if pl["projects"] else None
+        # 승인하는 것과 같은 것을 보여 준다: 엔진에 실제로 보낼 (마스킹된) 프롬프트 전체
         return {"ok": True, "id": pid, "engine": pl["engine"], "reason": pl["reason"], "projects": pl["projects"],
-                "context_chars": len(pl["context"]),
+                "context_chars": len(pl["context"]), "memories": pl.get("memories", 0),
                 "map_stale_days": age if age is not None and age >= ask.MAP_STALE_DAYS else None,
-                "context_preview": log.redact(pl["context"][:CONTEXT_PREVIEW_CHARS])}
+                "prompt": log.redact(pl["prompt"])}
 
     def cancel_ask(self):
         with self._lock:
@@ -667,6 +737,14 @@ class PetRuntime:
                     or time.time() - pv["ts"] > PREVIEW_TTL_SEC):
                 return {"ok": False, "reason": "needs_preview", "output": "보낼 내용을 다시 확인해 주세요."}
             pl = pv["plan"]
+            # 확인 뒤 허용 폴더·지도가 바뀌어 빠진 프로젝트가 있으면 예전 내용을 보내지 않는다
+            mapdata = ask.load_map(self.map_path, self.home)
+            allowed = {p["name"] for p in (mapdata or {}).get("projects", [])}
+            if pl["projects"] and not set(pl["projects"]) <= allowed:
+                with self._lock:
+                    self._preview = None
+                return {"ok": False, "reason": "needs_preview",
+                        "output": "확인 뒤에 허용 폴더가 바뀌었어요. 보낼 내용을 다시 확인해 주세요."}
         else:
             pl, err = self._plan(question, engine, project, cwd)
             if err:
@@ -698,6 +776,7 @@ class PetRuntime:
                 "plan": pl,
                 "ok": res["ok"],
                 "feedback_given": False,
+                "id": secrets.token_hex(6),  # 평가를 답변 하나에 한 번만 묶는다
                 "ts": time.time(),
             }
             with self._lock:
@@ -724,11 +803,14 @@ class PetRuntime:
                 return {"ok": False, "output": "평가할 직전 답변이 없습니다."}
             if not ans.get("ok", True):
                 return {"ok": False, "output": "실패한 답에는 평가를 남기지 않습니다."}
+            if ans.get("feedback_given"):  # 다시 눌러도(응답 유실 후 재전송 포함) 표본을 늘리지 않는다
+                return {"ok": True, "accepted": ans.get("accepted"), "already": True}
             ans["feedback_given"] = True
+            ans["accepted"] = bool(accepted)
             self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
         log.append("feedback", "수용" if accepted else "거절", {
             "engine": ans["engine"], "category": ans["plan"]["category"],
-            "accepted": bool(accepted), "projects": ans["projects"], "via": "pet",
+            "accepted": bool(accepted), "projects": ans["projects"], "via": "pet", "answer": ans.get("id"),
         }, engine=ans["engine"], log_dir=self.log_dir)
         return {"ok": True, "accepted": bool(accepted)}
 
@@ -1664,24 +1746,142 @@ PET_HTML = r"""<!DOCTYPE html>
       0 2px 5px rgba(15, 14, 13, 0.22);
   }
 
-  /* 유리(glass): 색 없는 투명 유리. 색상 모드와 상관없이 같다(뒤 배경이 그대로 비친다) */
-  body.material-glass .ro-bot { filter: drop-shadow(0 6px 12px rgba(15, 14, 13, 0.12)); }
+  /* 유리(glass): 투명한 판이 아니라 두께가 있는 유리 덩어리처럼 보이게 한다.
+     ① 바닥: 살짝 서리 낀 유리(뒤가 흐리게 비침 + 옅은 흰빛) ② 위쪽 반사광(넓은 광택 + 가는 하이라이트 줄)
+     ③ 아래쪽 굴절광(유리 두께로 모인 빛) ④ 가장자리 림: 빛 받는 위·왼쪽은 밝고 반대편은 은은하게
+     ⑤ 가장자리의 아주 옅은 분산(파랑·주황) ⑥ 떠 있는 그림자.
+     데스크톱 창에서는 뒤 화면을 흐릴 수 없으니(투명 창) 흐림이 없어도 유리로 보이도록 ①~⑥만으로 형태를 만든다.
+     어두운 색상 모드에서는 연기 낀 유리로 바뀌고 눈이 밝아진다(어두운 바탕에서도 눈이 보이게). */
+  body.material-glass .ro-bot { filter: drop-shadow(0 7px 14px rgba(10, 12, 20, 0.22)); }
   body.material-glass .pill {
+    --g-tint-top: rgba(255, 255, 255, 0.40);
+    --g-tint-bot: rgba(255, 255, 255, 0.18);
+    --g-sheen: rgba(255, 255, 255, 0.70);
+    --g-caustic: rgba(255, 255, 255, 0.45);
+    --g-rim: rgba(255, 255, 255, 0.95);
+    --g-rim-soft: rgba(255, 255, 255, 0.40);
+    --g-edge: rgba(20, 24, 36, 0.22);
     z-index: 1;
     overflow: hidden;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.04) 60%, rgba(255, 255, 255, 0.08) 100%);
-    border: 1px solid rgba(255, 255, 255, 0.55);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
+    isolation: isolate;
+    border: none;
+    background:
+      radial-gradient(130% 95% at 28% -10%, var(--g-sheen) 0%, rgba(255, 255, 255, 0.10) 42%, rgba(255, 255, 255, 0) 62%),
+      radial-gradient(85% 130% at 72% 125%, var(--g-caustic) 0%, rgba(255, 255, 255, 0) 58%),
+      linear-gradient(180deg, var(--g-tint-top), var(--g-tint-bot));
+    backdrop-filter: blur(12px) saturate(180%) brightness(1.06);
+    -webkit-backdrop-filter: blur(12px) saturate(180%) brightness(1.06);
     box-shadow:
-      inset 0 1.5px 2px rgba(255, 255, 255, 0.7),
-      inset 0 -1.5px 3px rgba(0, 0, 0, 0.10),
-      0 0 0 0.5px rgba(0, 0, 0, 0.12);
+      inset 0 1px 0 var(--g-rim),                       /* 위 림 */
+      inset 0 -1px 0 var(--g-rim-soft),                 /* 아래 림 */
+      inset 0 -7px 10px -6px var(--g-caustic),          /* 두께로 모인 아래쪽 빛 */
+      inset 0 5px 8px -6px rgba(0, 0, 0, 0.10),         /* 위쪽 안쪽 그늘(곡면) */
+      inset 2px 0 3px -2px rgba(110, 170, 255, 0.35),   /* 왼쪽 가장자리 분산(파랑) */
+      inset -2px 0 3px -2px rgba(255, 170, 110, 0.30),  /* 오른쪽 가장자리 분산(주황) */
+      0 0 0 0.6px var(--g-edge);                        /* 윤곽 머리카락선 */
   }
-  body.material-glass { --bot-eye: #1A1917; }  /* 눈 색도 색상 모드를 따르지 않는다 */
-  body.material-glass .eyes { z-index: 2; }
-  body.material-glass .eye { background: #1A1917; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7); }
-  body.material-glass .resolved-arch { stroke: #1A1917; }
+  /* 가는 하이라이트 줄: 위쪽 곡면에 맺힌 반사 */
+  body.material-glass .pill::before {
+    content: ""; position: absolute; z-index: 0; pointer-events: none;
+    left: 12%; top: 10%; width: 48%; height: 26%; border-radius: 999px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 35%, rgba(255, 255, 255, 0.35) 75%, rgba(255, 255, 255, 0) 100%);
+    filter: blur(0.6px);
+  }
+  /* 림 라이트: 빛을 받는 위·왼쪽 가장자리는 밝게, 아래·오른쪽은 은은하게(1px 테두리만 남기는 마스크) */
+  body.material-glass .pill::after {
+    content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.15) 45%, rgba(255, 255, 255, 0.05) 60%, rgba(255, 255, 255, 0.55) 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  }
+  /* 굴절: 창 뒤 화면은 웹 화면이 볼 수 없으니, 유리 안에 가상의 주변 풍경(밝은 위·지평선·어두운 바닥·빛 창)을 두고
+     렌즈처럼 휘게 그린다. 가운데는 풍경이 바로 서서 크게 보이고(확대), 가장자리 고리에서는 뒤집혀 눌려 보인다(두꺼운 렌즈).
+     움직이면 가운데와 가장자리 풍경이 서로 반대로 밀려(--gx, --gy) 유리 속 상이 출렁인다. 유리 재질에서만 보인다. */
+  .g-env { display: none; }
+  body.material-glass .g-env {
+    --env-sky: rgba(255, 255, 255, 0.55);
+    --env-haze: rgba(214, 228, 255, 0.22);
+    --env-horizon: rgba(52, 60, 86, 0.20);
+    --env-floor: rgba(26, 30, 44, 0.06);
+    --env-light: rgba(255, 255, 255, 0.85);
+    --env-warm: rgba(255, 214, 170, 0.55);
+    --env-scene:
+      radial-gradient(9% 16% at 24% 30%, var(--env-light), rgba(255, 255, 255, 0) 100%),
+      radial-gradient(7% 12% at 71% 26%, var(--env-warm), rgba(255, 214, 170, 0) 100%),
+      linear-gradient(180deg, var(--env-sky) 0%, var(--env-haze) 40%, var(--env-horizon) 50%, var(--env-floor) 64%, rgba(255, 255, 255, 0.08) 100%);
+    display: block; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+    border-radius: inherit; overflow: hidden; opacity: 0.75;
+    background: var(--env-scene);
+    background-size: 150% 230%;
+    background-position: calc(50% + var(--gx, 0px)) calc(46% + var(--gy, 0px));
+    transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
+  }
+  /* 가장자리 고리: 같은 풍경을 위아래로 뒤집고 눌러 담는다. 움직임은 가운데와 반대 방향, 더 크게 */
+  body.material-glass .pill .g-env::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit;
+    background: var(--env-scene);
+    background-size: 90% 140%;
+    background-position: calc(50% - 1.6 * var(--gx, 0px)) calc(52% - 1.6 * var(--gy, 0px));
+    transform: scaleY(-1);
+    mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
+    -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
+    transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
+  }
+  body.theme-chalk.material-glass .g-env {
+    --env-sky: rgba(190, 200, 225, 0.30);
+    --env-haze: rgba(120, 132, 165, 0.20);
+    --env-horizon: rgba(0, 0, 0, 0.30);
+    --env-floor: rgba(0, 0, 0, 0.10);
+    --env-light: rgba(255, 255, 255, 0.55);
+    --env-warm: rgba(255, 196, 140, 0.38);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    body.material-glass .g-env, body.material-glass .pill .g-env::before { transition: none; }
+  }
+  /* Mac 앱이 몸통 아래에 시스템 유리를 깔았을 때(native-glass-*). 들거나 흔드는 동안에도 시스템 유리가 층을 따라온다.
+     liquid(macOS 26): 굴절·흐림은 시스템 유리가 맡고, CSS는 옅은 광택·윤곽·눈만 남긴다.
+     blur(그보다 낮은 macOS): 뒤 화면은 시스템이 실제로 흐리고, 휘어진 풍경(굴절 흉내)은 그대로 얹되 덧칠 색만 줄인다. */
+  body.material-glass.native-glass-liquid .pill {
+    background: radial-gradient(130% 95% at 28% -10%, rgba(255, 255, 255, 0.20) 0%, rgba(255, 255, 255, 0) 55%);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+    box-shadow: 0 0 0 0.6px var(--g-edge);
+  }
+  body.material-glass.native-glass-liquid .pill::after { opacity: 0.5; }
+  body.material-glass.native-glass-liquid .g-env { display: none; }
+  body.material-glass.native-glass-blur .pill {
+    --g-tint-top: rgba(255, 255, 255, 0.16);
+    --g-tint-bot: rgba(255, 255, 255, 0.04);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  body.theme-chalk.material-glass.native-glass-blur .pill {
+    --g-tint-top: rgba(40, 42, 52, 0.25);
+    --g-tint-bot: rgba(14, 15, 20, 0.30);
+  }
+  /* 어두운 색상 모드: 연기 낀 유리 */
+  body.theme-chalk.material-glass .pill {
+    --g-tint-top: rgba(40, 42, 52, 0.55);
+    --g-tint-bot: rgba(14, 15, 20, 0.62);
+    --g-sheen: rgba(255, 255, 255, 0.30);
+    --g-caustic: rgba(255, 255, 255, 0.22);
+    --g-rim: rgba(255, 255, 255, 0.55);
+    --g-rim-soft: rgba(255, 255, 255, 0.18);
+    --g-edge: rgba(0, 0, 0, 0.55);
+  }
+  body.theme-chalk.material-glass .pill::before { opacity: 0.45; }
+  body.theme-chalk.material-glass .pill::after { opacity: 0.6; }
+  /* 눈: 밝은 유리엔 진한 눈, 연기 유리엔 밝은 눈. 윤곽 광채는 상자 테두리(box-shadow)가 아니라
+     실제로 칠한 모양을 따라가는 drop-shadow로 준다 — > < ∩ ◍ 모양에서 상자(마름모·반원)가 보이지 않게 */
+  body.material-glass { --bot-eye: #15161A; }
+  body.theme-chalk.material-glass { --bot-eye: #F6F4EF; }
+  body.material-glass .eyes {  /* 웃는 눈(⌒)도 .eyes 안에 있어 같은 광채를 받는다 */
+    z-index: 2;
+    filter: drop-shadow(0 0 0.8px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 1.6px rgba(255, 255, 255, 0.6));
+  }
+  body.theme-chalk.material-glass .eyes {
+    filter: drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
+  }
 
   /* 눈 둘 */
   .eyes {
@@ -1955,6 +2155,12 @@ PET_HTML = r"""<!DOCTYPE html>
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-cats:empty, .org-msg:empty { display: none; }
   .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+  .org-msg { white-space: pre-line; }  /* 건너뛴 파일과 이유를 한 줄씩 */
+  .stale-banner { flex-shrink: 0; font-size: 10.5px; line-height: 1.4; padding: 6px 9px; border-radius: 10px;
+    background: var(--panel-soft); border: 1px solid var(--panel-border); color: var(--panel-fg); }
+  .stale-banner[hidden] { display: none; }
+  #setupText, #attentionText { white-space: pre-line; }
+  #setupText code, #attentionText code { font: inherit; font-weight: 700; user-select: all; }
   .org-summary code, .org-msg code { white-space: nowrap; font: inherit; font-weight: 700; }
   .block-sub { font-size: 10px; color: var(--muted); line-height: 1.4; }
   .preview-block > summary { cursor: pointer; list-style: revert; }
@@ -2127,20 +2333,32 @@ PET_HTML = r"""<!DOCTYPE html>
         <span class="brand-tag">ro</span>
       </div>
       <div class="nav-tabs">
-        <button id="tabBtnHome" class="nav-tab active" data-tab="home">홈</button>
+        <button id="tabBtnHome" class="nav-tab active" data-tab="home" aria-current="page">홈</button>
         <button id="tabBtnTimeline" class="nav-tab" data-tab="timeline">타임라인</button>
         <button id="tabBtnOrganize" class="nav-tab" data-tab="organize">정리</button>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
-        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변/알림 닫기">초기화</button>
+        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">닫기</button>
         <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
     </div>
+    <!-- 상태를 못 받았을 때: 마지막으로 받은 내용을 유지하고 이 줄만 띄운다 -->
+    <div id="staleBanner" class="stale-banner" role="status" hidden></div>
 
     <!-- 1. 기본 (Home) 탭 -->
     <div id="paneHome" class="tab-pane active">
+      <!-- 준비가 덜 됐을 때(지도·엔진 없음): 무엇을 하면 되는지 계속 보여 준다 -->
+      <div id="setupCard" class="gate-box" style="display:none;" role="region" aria-label="시작 준비">
+        <div class="gate-head">질문하려면 준비가 필요해요</div>
+        <div id="setupText" class="gate-body"></div>
+      </div>
+      <!-- 확인할 일: 무엇이 문제이고 다음에 무엇을 하면 되는지 -->
+      <div id="attentionCard" class="gate-box" style="display:none;" role="region" aria-label="확인할 일">
+        <div class="gate-head">확인할 일</div>
+        <div id="attentionText" class="gate-body"></div>
+      </div>
       <!-- 브리핑 & 필터 -->
       <div class="greeting-section">
         <div id="greetingTitle" class="greeting-title">오늘 새로 시작했어요.</div>
@@ -2163,7 +2381,7 @@ PET_HTML = r"""<!DOCTYPE html>
           <div class="metric-label">프로젝트</div>
         </div>
         <div class="metric-sep"></div>
-        <div class="metric-item">
+        <div class="metric-item" id="metricAttentionItem" title="눌러서 확인할 일 보기">
           <div id="metricAttention" class="metric-value">0</div>
           <div class="metric-label">확인할 일</div>
         </div>
@@ -2190,7 +2408,7 @@ PET_HTML = r"""<!DOCTYPE html>
             <div class="mini-b"></div>
             <div class="mini-l"></div>
           </div>
-          <div id="roMainBubble" class="ro-pill">기록하고, 풀어낸다.</div>
+          <div id="roMainBubble" class="ro-pill" aria-live="polite">기록하고, 풀어낸다.</div>
         </div>
         <div class="ro-sub-row">
           <span id="subStatusText"></span>
@@ -2332,7 +2550,7 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="writeCard" class="gate-box" style="display:none;" role="region" aria-label="실행 전 확인">
       <div class="gate-head">실행 전 확인</div>
       <div id="writeText" class="gate-body"></div>
-      <ul id="writeFiles" class="gate-files" style="display:none;"></ul>
+      <ul id="writeFiles" class="gate-files" style="display:none;" tabindex="0" aria-label="처리할 파일 전체 목록(스크롤)"></ul>
       <div class="gate-actions">
         <button id="writeApproveBtn" class="action-btn primary">승인하고 실행</button>
         <button id="writeRejectBtn" class="action-btn ghost">취소</button>
@@ -2389,6 +2607,7 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="roBot" class="ro-bot">
       <span id="streak" class="streak" aria-hidden="true"></span>
       <div id="layerHead" class="pill pill-head">
+        <i class="g-env" aria-hidden="true"></i>
         <span id="attnDot" class="attn-dot" aria-hidden="true" hidden></span>
         <span id="muteBadge" class="mute-badge" hidden><svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1H3z"/><line x1="2" y1="2" x2="14" y2="14"/></svg><span>0</span></span>
         <div id="eyesWrap" class="eyes">
@@ -2399,8 +2618,8 @@ PET_HTML = r"""<!DOCTYPE html>
           </svg>
         </div>
       </div>
-      <div id="layerBody" class="pill pill-body"></div>
-      <div id="layerBase" class="pill pill-base"></div>
+      <div id="layerBody" class="pill pill-body"><i class="g-env" aria-hidden="true"></i></div>
+      <div id="layerBase" class="pill pill-base"><i class="g-env" aria-hidden="true"></i></div>
     </div>
     <div id="petCaption" class="pet-label">기본</div>
   </div>
@@ -2462,6 +2681,16 @@ const askCancelBtn = document.getElementById("askCancelBtn");
 
 const greetingTitle = document.getElementById("greetingTitle");
 const greetingSub = document.getElementById("greetingSub");
+const staleBanner = document.getElementById("staleBanner");
+const setupCard = document.getElementById("setupCard");
+const setupText = document.getElementById("setupText");
+const attentionCard = document.getElementById("attentionCard");
+const attentionText = document.getElementById("attentionText");
+document.getElementById("metricAttentionItem").addEventListener("click", (e) => {  // 숫자에서 바로 내용으로
+  e.stopPropagation();
+  const target = [attentionCard, writeCard, document.getElementById("ruleCard")].find(c => c && c.style.display !== "none");
+  if (target) target.scrollIntoView({ block: "nearest" });
+});
 const filterSummaryBtn = document.getElementById("filterSummaryBtn");
 const filterStatsBtn = document.getElementById("filterStatsBtn");
 
@@ -2492,6 +2721,7 @@ const RECENT_SHOWN = 4;
 let lastTlKey = "";
 let orgKey = "";
 let pendingKind = null;
+let pendingId = null;
 
 const writeCard = document.getElementById("writeCard");
 const writeText = document.getElementById("writeText");
@@ -2532,6 +2762,7 @@ let systemDark = !!(window.matchMedia && window.matchMedia("(prefers-color-schem
 function switchTab(tabName) {
   document.querySelectorAll(".nav-tab").forEach(t => {
     t.classList.toggle("active", t.dataset.tab === tabName);
+    t.setAttribute("aria-current", t.dataset.tab === tabName ? "page" : "false");  // 화면 읽기 프로그램에 선택 탭을 알린다
   });
   paneHome.classList.toggle("active", tabName === "home");
   paneTimeline.classList.toggle("active", tabName === "timeline");
@@ -2571,6 +2802,7 @@ function updateMaterialUI() {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
     btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
+  kickNativeGlass();
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
@@ -2586,7 +2818,18 @@ function updateThemeUI() {
 }
 
 /* 재질·색상은 ~/.ro/config.json에 저장하고, 페이지를 만들 때 미리 넣어 깜빡이지 않게 한다 */
-function savePrefs(changes) { apiPost("/api/prefs", changes).catch(() => {}); }
+/* 저장이 확인되기 전에는 화면만 바뀐 상태다: 실패하면 마지막으로 저장된 값으로 되돌리고 알린다 */
+const savedPrefs = { material: materialMode, theme: themeMode };
+async function savePrefs(changes) {
+  let r = null;
+  try { r = await apiPost("/api/prefs", changes); } catch (err) {}
+  if (r && r.ok) { Object.assign(savedPrefs, changes); return; }
+  if ("material" in changes) { materialMode = savedPrefs.material; updateMaterialUI(); }
+  if ("theme" in changes) { themeMode = savedPrefs.theme; updateThemeUI(); }
+  const why = r ? (r.error || r.output || "") : "서버에 연결하지 못했어요";
+  showToast([h("div", { class: "toast-head", text: "설정을 저장하지 못해 원래대로 되돌렸어요. 다시 시도해 주세요." }),
+    why ? h("div", { class: "block-sub", text: why }) : null], 5000);
+}
 
 window.setThemeModeFromHost = function(mode) {
   if (!THEME_CHOICES.includes(mode)) return;
@@ -2626,6 +2869,7 @@ function notifyHost(payload) {
 
 function setBubbleOpen(open) {
   bubble.classList.toggle("hidden", !open);
+  if (open && !isNativeHost) fitStage();  // 닫힌 채로 펫을 옮겼다면 다시 연 말풍선이 화면 밖으로 잘리지 않게
   notifyHost({ type: "bubble", open: !!open });
   if (window._poll !== undefined) setPollRate(open);
 }
@@ -2897,6 +3141,73 @@ setInterval(() => {
 
 /* 드래그 */
 const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.roHost);
+/* 네이티브 유리(Mac 앱): 몸통 세 층 아래에 층마다 시스템 유리를 하나씩 깐다. macOS 26 이상은 굴절하는 유리("liquid"),
+   그보다 낮으면 뒤 화면을 실제로 흐리는 유리("blur") — 어느 쪽인지는 Mac 앱이 setNativeGlass로 알려 준다.
+   웹 화면은 층마다 자리·기울기·불투명도를 알려 주고, Mac 앱은 유리를 그대로 옮기고 돌린다.
+   들거나 흔드는 동안에도 같은 유리가 따라오도록 움직이는 중에는 매 프레임, 가만히 있을 때는 초당 30번(바뀔 때만) 보낸다.
+   updateMaterialUI가 이 선언보다 먼저 불리므로 var로 둔다(let이면 선언 전 접근 오류). */
+var nativeGlassKind = "";
+var nativeGlassSent = "";
+var nativeGlassLoop = false;
+var nativeGlassTick = 0;
+window.setNativeGlass = function(kind) {
+  nativeGlassKind = (kind === "liquid" || kind === "blur") ? kind : "";
+  nativeGlassSent = "";
+  kickNativeGlass();
+};
+function kickNativeGlass() {
+  if (nativeGlassLoop) return;
+  nativeGlassLoop = true;
+  requestAnimationFrame(syncNativeGlass);
+}
+/* 층 하나의 [x, y, 너비, 높이, 기울기(도, 시계 방향), 불투명도]. x·y·너비·높이는 돌리기 전 상자.
+   돌린 사각형의 테두리 상자 중심은 원래 중심과 같으므로 중심은 getBoundingClientRect에서, 크기는 레이아웃 크기 × 배율로 구한다.
+   층 자신과 조상의 transform(숨쉬기·두리번 등 CSS 애니메이션)과 rotate·scale(모션 엔진)을 모두 합친다. */
+function glassPose(el) {
+  let rot = 0, sx = 1, sy = 1, op = 1;
+  for (let n = el; n && n !== document.body; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    if (cs.transform && cs.transform !== "none") {
+      const m = new DOMMatrixReadOnly(cs.transform);
+      rot += Math.atan2(m.b, m.a) * 180 / Math.PI;
+      sx *= Math.hypot(m.a, m.b);
+      sy *= Math.hypot(m.c, m.d);
+    }
+    if (cs.rotate && cs.rotate !== "none") rot += parseFloat(cs.rotate) || 0;
+    if (cs.scale && cs.scale !== "none") {
+      const [a, b = a] = cs.scale.split(" ").map(parseFloat);
+      sx *= a || 1; sy *= b || 1;
+    }
+    op *= parseFloat(cs.opacity);
+  }
+  const r = el.getBoundingClientRect();
+  const w = el.offsetWidth * sx, h = el.offsetHeight * sy;
+  const q = (v, k) => Math.round(v * k) / k;
+  return [q(r.left + r.width / 2 - w / 2, 4), q(r.top + r.height / 2 - h / 2, 4), q(w, 4), q(h, 4), q(rot, 10), q(op, 50)];
+}
+function setNativeGlassClass(on) {
+  for (const k of ["liquid", "blur"]) document.body.classList.toggle(`native-glass-${k}`, on && nativeGlassKind === k);
+}
+function syncNativeGlass() {
+  if (!nativeGlassKind || materialMode !== "glass") {
+    nativeGlassLoop = false;
+    setNativeGlassClass(false);
+    if (nativeGlassSent !== "off") { nativeGlassSent = "off"; notifyHost({ type: "glass", on: false }); }
+    return;
+  }
+  requestAnimationFrame(syncNativeGlass);
+  const moving = typeof RoMotion !== "undefined" && RoMotion.busy();
+  nativeGlassTick = (nativeGlassTick + 1) % 2;
+  if (nativeGlassTick && !moving) return;
+  let rects = [layerHead, layerBody, layerBase].map(glassPose);
+  if (!rects.every(r => r[2] >= 1 && r[3] >= 1 && r[5] > 0.02)) rects = null;  // 숨은 펫
+  setNativeGlassClass(!!rects);
+  const dark = document.body.classList.contains("theme-chalk");
+  const key = rects ? JSON.stringify(rects) + dark : "off";
+  if (key === nativeGlassSent) return;
+  nativeGlassSent = key;
+  notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });
+}
 let webDragStart = null;
 let webDidDrag = false;
 let webLastX = 0;
@@ -2915,6 +3226,22 @@ function moveStageBy(dx, dy) {
   const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
   if (rects.some((r) => r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight)) {
     [stageX, stageY] = prev;
+    stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
+  }
+}
+
+/* 펫과 (열려 있으면) 말풍선이 모두 창 안에 들어오도록 무대를 당긴다 */
+function fitStage() {
+  const rects = [petWrap, bubble].filter((el) => !el.classList.contains("hidden")).map((el) => el.getBoundingClientRect());
+  if (!rects.length) return;
+  const left = Math.min(...rects.map(r => r.left)), right = Math.max(...rects.map(r => r.right));
+  const top = Math.min(...rects.map(r => r.top)), bottom = Math.max(...rects.map(r => r.bottom));
+  let dx = 0, dy = 0;
+  if (left < 0) dx = -left; else if (right > window.innerWidth) dx = Math.max(-left, window.innerWidth - right);
+  if (top < 0) dy = -top; else if (bottom > window.innerHeight) dy = Math.max(-top, window.innerHeight - bottom);
+  if (dx || dy) {
+    stageX += dx;
+    stageY += dy;
     stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
   }
 }
@@ -2969,13 +3296,21 @@ window.onPetClickFromHost = function() {
   setBubbleOpen(bubble.classList.contains("hidden"));
 };
 
+/* 403(토큰 만료·서버 재시작)은 결과가 아니라 연결 문제다: 빈 결과로 그리지 않도록 예외로 올린다 */
 async function apiPost(path, body) {
   const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Ro-Token": TOKEN },
     body: JSON.stringify(body || {}),
   });
-  return await res.json();
+  if (res.status === 401 || res.status === 403) {
+    markStale("펫을 다시 열어 주세요(서버가 다시 시작됐을 수 있어요).");
+    throw new Error("auth");
+  }
+  let data;
+  try { data = await res.json(); } catch (e) { data = { ok: false, error: `응답을 읽지 못했어요 (${res.status})` }; }
+  if (!res.ok && data.ok === undefined) data.ok = false;
+  return data;
 }
 
 /* 입력 필드 상태에 따른 '+' 아이콘 / 전송 아이콘 전환 */
@@ -3048,8 +3383,34 @@ function applyState(st) {
   metricProjects.textContent = counts.projects || 0;
   metricAttention.textContent = attention;
 
-  // 3. 답변 카드: 진행 중·실패 직후 알림 > 직전 답변
-  if (Date.now() < askNoticeUntil) {
+  // 준비 안내·확인할 일: 무엇이 문제이고 무엇을 하면 되는지(같은 내용이면 다시 그리지 않음)
+  const setupKey = JSON.stringify(st.setup || null);
+  if (setupCard.dataset.key !== setupKey) {
+    setupCard.dataset.key = setupKey;
+    setupCard.style.display = st.setup ? "flex" : "none";
+    if (st.setup) setupText.replaceChildren(...st.setup.steps.map(s => h("div", {},
+      h("div", { text: `· ${s.what}` }), h("div", { class: "block-sub" }, "터미널: ", h("code", { text: s.do })),
+      s.why ? h("div", { class: "block-sub", text: s.why }) : null)));
+  }
+  const attKey = JSON.stringify(st.attention_items || []);
+  if (attentionCard.dataset.key !== attKey) {
+    attentionCard.dataset.key = attKey;
+    const items = st.attention_items || [];
+    attentionCard.style.display = items.length ? "flex" : "none";
+    attentionText.replaceChildren(...items.map(a => h("div", {},
+      h("div", { text: `· ${a.what}` }), h("div", { class: "block-sub" }, "다음: ", h("code", { text: a.do })))));
+  }
+
+  // 3. 답변 카드: 진행 중·실패 직후 알림 > 서버가 처리 중(새로고침 뒤) > 직전 답변
+  if (st.busy && Date.now() >= askNoticeUntil) {
+    answerCard.style.display = "flex";
+    userMsgRow.style.display = "flex";
+    userQuestionPill.textContent = st.busy_question || "";
+    roMainBubble.textContent = "생각하는 중...";
+    subStatusText.textContent = "답을 기다리는 중";
+    feedbackBtns.style.display = "none";
+    askCancelBtn.style.display = "inline-block";
+  } else if (Date.now() < askNoticeUntil) {
     answerCard.style.display = "flex";
     userMsgRow.style.display = "flex";
     userQuestionPill.textContent = askNotice.q;
@@ -3063,8 +3424,9 @@ function applyState(st) {
     roMainBubble.textContent = ans.output;
     askCancelBtn.style.display = "none";
     const projs = (ans.projects || []).join(", ");
-    subStatusText.textContent = ans.ok === false ? `${ans.engine} · 답을 받지 못했어요`
-      : (projs ? `${ans.engine} · ${projs}` : ans.engine);
+    // 답변은 펫을 다시 열면 사라진다(이번 실행 동안만 보관 — 기록에는 질문 요약만 남는다)
+    subStatusText.textContent = (ans.ok === false ? `${ans.engine} · 답을 받지 못했어요`
+      : (projs ? `${ans.engine} · ${projs}` : ans.engine)) + " · 이번 실행 동안만 보관";
     feedbackBtns.style.display = (ans.ok === false || ans.feedback_given) ? "none" : "inline-flex";
     fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
   } else {
@@ -3074,6 +3436,7 @@ function applyState(st) {
   renderOrganize(st.organize);
   const wasPending = pendingKind;
   pendingKind = st.write_pending ? (st.write_pending.kind || "write") : null;
+  pendingId = st.write_pending ? st.write_pending.id : null;  // 승인은 지금 보이는 이 요청에만 적용된다
 
   if (st.write_pending) {
     const wp = st.write_pending;
@@ -3156,7 +3519,13 @@ function applyState(st) {
             h("div", { class: "timeline-meta" },
               h("span", { class: "timeline-tag", text: item.kind_label }),
               h("span", { class: "timeline-time", text: (item.ts || "").slice(0, 5) })),
-            h("div", { class: "timeline-text", text: item.summary })));
+            h("div", { class: "timeline-text", text: item.summary }),
+            // 첫 줄 밖에 적힌 내용(결정·날짜 등)도 볼 수 있게 저장된 앞부분 요약을 함께 보여 준다
+            (item.excerpt || []).length > 1 ? h("div", { class: "block-sub", text: item.excerpt.slice(1).join(" / ") }) : null,
+            // 지나간 기록도 분류를 다시 고칠 수 있다(토스트가 닫힌 뒤에도)
+            item.kind === "note" ? h("button", { class: "mini-btn", type: "button", text: `분류: ${item.project || "없음"}`,
+              "aria-label": "이 기록의 분류 바꾸기", onclick: () => showCaptured({ ok: true, id: item.id, summary: item.summary,
+                project: item.project, reopen: true }) }) : null));
         timelineList.appendChild(row);
       });
     }
@@ -3175,12 +3544,29 @@ function setPollRate(fast) {
   if (fast) refreshState();
 }
 
+/* 상태를 못 받으면 마지막으로 받은 내용을 그대로 두고 '업데이트 실패'만 표시한다(0건 화면으로 바꾸지 않음) */
+let lastStateOk = 0;
+function markStale(why) {
+  const at = lastStateOk ? new Date(lastStateOk).toTimeString().slice(0, 5) : "--:--";
+  staleBanner.textContent = `업데이트하지 못했어요 · ${at} 기준 내용이에요. ${why || "잠시 뒤 다시 시도합니다."}`;
+  staleBanner.hidden = false;
+}
 async function refreshState() {
+  let st;
   try {
     const res = await fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } });
-    const st = await res.json();
-    applyState(st);
-  } catch (err) {}
+    if (!res.ok) {
+      markStale(res.status === 403 ? "펫을 다시 열어 주세요(서버가 다시 시작됐을 수 있어요)." : `서버 오류 ${res.status}`);
+      return;
+    }
+    st = await res.json();
+  } catch (err) {
+    markStale("로컬 서버에 연결하지 못했어요.");
+    return;
+  }
+  lastStateOk = Date.now();
+  staleBanner.hidden = true;
+  applyState(st);
 }
 
 /* 입력창: 기록 회상은 로컬에서, 그 밖의 질문은 보내기 전 확인을 거쳐 엔진으로. '/기록 …'은 바로 기록 */
@@ -3195,9 +3581,15 @@ function hideSendCard() {
   pendingSend = null;
 }
 async function submitInput(q) {
-  const rec = q.match(/^\/기록\s+(.+)$/s);
-  if (rec) { await capture("text", "직접 기록", rec[1].trim(), rec[1].length); return; }
-  if (RECALL_INTENT.test(q)) { await runRecall(q); return; }
+  const p = parsePalette(q);
+  const cmd = p.slash ? COMMANDS.find(c => c.label.slice(1) === p.name) : null;
+  if (cmd) {
+    if (cmd.arg && !p.arg) { askInput.value = cmd.label + " "; askInput.focus(); return; }  // 내용을 마저 쓰게
+    const ok = await runCommand(cmd, p.arg);
+    if (ok === false && !askInput.value) { askInput.value = q; askInput.dispatchEvent(new Event("input")); }
+    return;
+  }
+  if (!p.slash && RECALL_INTENT.test(q)) { await runRecall(q); return; }
   await previewAsk(q);
 }
 async function previewAsk(q) {
@@ -3205,7 +3597,8 @@ async function previewAsk(q) {
   let pv = null;
   try { pv = await apiPost("/api/ask/preview", { question: q }); } catch (err) {}
   if (!pv || !pv.ok) {
-    if (!askInput.value) askInput.value = q;
+    if (!askInput.value) { askInput.value = q; askInput.dispatchEvent(new Event("input")); }
+    switchTab("home");
     askNotice = { q, msg: pv ? (pv.output || pv.error || "보낼 준비를 하지 못했어요.") : "서버에 연결하지 못했어요." };
     askNoticeUntil = Date.now() + 8000;
     await refreshState();
@@ -3214,11 +3607,14 @@ async function previewAsk(q) {
   pendingSend = { q, id: pv.id };
   let where = pv.projects.length ? `프로젝트 ${pv.projects.join(", ")} 정보 ${pv.context_chars}자를 함께 보냅니다.`
                                  : "프로젝트 정보 없이 질문만 보냅니다.";
+  if (pv.memories) where += ` 승인한 기억 ${pv.memories}개도 함께 보냅니다.`;
   if (pv.map_stale_days) where += ` 프로젝트 지도가 ${pv.map_stale_days}일 전 것이라 설명이 낡았을 수 있어요(터미널: ro map).`;
+  if (pv.projects.length) where += " 다른 프로젝트였다면 취소하고 질문에 프로젝트 이름을 넣어 다시 보내세요.";
   sendHead.textContent = `${pv.engine}(으)로 보낼까요?`;
-  sendText.replaceChildren(h("div", { text: `“${q}”` }), h("div", { class: "block-sub", text: where }),
-    pv.context_preview ? h("details", { class: "rc-ev" }, h("summary", { text: "보낼 내용 보기" }),
-      h("div", { class: "send-ctx", text: pv.context_preview + (pv.context_chars > pv.context_preview.length ? " …" : "") })) : null);
+  // 승인하는 내용 그대로(마스킹된 프롬프트 전체)를 펼쳐 볼 수 있다
+  fill(sendText, h("div", { text: `“${q}”` }), h("div", { class: "block-sub", text: where }),
+    pv.prompt ? h("details", { class: "rc-ev" }, h("summary", { text: `보낼 내용 전체 보기 (${pv.prompt.length}자)` }),
+      h("div", { class: "send-ctx", tabindex: "0", text: pv.prompt })) : null);
   hideToast();
   sendCard.style.display = "flex";
   sendCard.scrollIntoView({ block: "nearest" });
@@ -3228,6 +3624,7 @@ async function sendAsk() {
   if (!pendingSend) return;
   const { q, id } = pendingSend;
   hideSendCard();
+  switchTab("home");  // 진행·취소·답은 홈의 답변 카드에 나온다: 다른 탭에서 보내도 보이게
   recallShown = false;
   recallCard.style.display = "none";
   recOrgCard.style.display = "none";
@@ -3302,18 +3699,23 @@ document.getElementById("ruleRejectBtn").addEventListener("click", async () => {
   await apiPost("/api/learn", { action: "reject", id: currentRuleId });
   await refreshState();
 });
-document.getElementById("writeApproveBtn").addEventListener("click", async () => {
+/* 건너뛴 파일과 이유는 사용자가 닫을 때까지(다음 작업 전까지) 남겨 둔다 */
+function writeResultText(r) {
+  const rows = (r.skipped || []).map(s => `· ${s.name}: ${s.reason}`);
+  return [r.output || r.error || "", ...rows].filter(Boolean).join("\n");
+}
+async function resolveWrite(approve) {
   const kind = pendingKind;
-  const r = await apiPost("/api/write_gate", { approve: true });
-  if (kind && kind.startsWith("organize")) setOrgMsg(r.output || "");
+  let r;
+  try { r = await apiPost("/api/write_gate", { approve, id: pendingId }); }
+  catch (err) { r = { ok: false, output: "서버에 연결하지 못했어요. 실행 여부를 확인한 뒤 다시 시도해 주세요." }; }
+  const text = writeResultText(r);
+  if (kind && kind.startsWith("organize")) setOrgMsg(text, (r.skipped && r.skipped.length) || !r.ok ? 0 : 6000);
+  else if (text) showToast([h("div", { class: "toast-head", text })], 4000);
   await refreshState();
-});
-document.getElementById("writeRejectBtn").addEventListener("click", async () => {
-  const kind = pendingKind;
-  const r = await apiPost("/api/write_gate", { approve: false });
-  if (kind && kind.startsWith("organize")) setOrgMsg(r.output || "");
-  await refreshState();
-});
+}
+document.getElementById("writeApproveBtn").addEventListener("click", () => resolveWrite(true));
+document.getElementById("writeRejectBtn").addEventListener("click", () => resolveWrite(false));
 /* 파일 정리 카드: 버튼은 바뀔 때만 다시 그린다(폴링 중 클릭이 사라지지 않게) */
 function fmtBytes(n) {
   return n >= 1048576 ? `${(n / 1048576).toFixed(1)}MB` : `${Math.max(1, Math.round(n / 1024))}KB`;
@@ -3385,13 +3787,17 @@ orgScanBtn.addEventListener("click", async () => {
   try {
     const r = await apiPost("/api/organize/scan", {});
     setOrgMsg(r.ok ? "정리안을 새로 만들었습니다." : (r.output || "정리안을 만들지 못했어요."));
+  } catch (err) {  // 처리 중 문구가 남아 있지 않게 실패를 알린다
+    setOrgMsg("서버에 연결하지 못해 정리안을 만들지 못했어요. 다시 시도해 주세요.", 0);
   } finally {
     orgScanBtn.disabled = false;
     await refreshState();
   }
 });
 orgUndoBtn.addEventListener("click", async () => {
-  const r = await apiPost("/api/organize/undo", {});
+  let r;
+  try { r = await apiPost("/api/organize/undo", {}); }
+  catch (err) { r = { ok: false, output: "서버에 연결하지 못했어요. 다시 시도해 주세요." }; }
   setOrgMsg(r.ok ? "아래 확인 카드에서 승인하면 되돌립니다." : (r.output || ""), r.ok ? 0 : 6000);
   await refreshState();
 });
@@ -3770,6 +4176,9 @@ const RoMotion = (() => {
       el.style.translate = `${tx.toFixed(2)}px ${ty.toFixed(2)}px`;
       el.style.rotate = `${l.rot.toFixed(2)}deg`;
       el.style.scale = `${l.sx.toFixed(4)} ${l.sy.toFixed(4)}`;
+      // 유리 속 풍경은 몸이 가는 반대쪽으로 밀리고, 기울면 옆으로, 눌리면 위아래로 출렁인다
+      el.style.setProperty("--gx", `${clamp(-0.6 * tx - 1.2 * l.rot, -10, 10).toFixed(2)}px`);
+      el.style.setProperty("--gy", `${clamp(-0.6 * ty + 30 * (1 - l.sy), -8, 8).toFixed(2)}px`);
     });
     bot.style.opacity = P.op === 1 ? "" : String(P.op);
     const st = document.getElementById("streak");
@@ -3786,7 +4195,10 @@ const RoMotion = (() => {
   }
 
   function clearStyles() {
-    [layerHead, layerBody, layerBase].forEach(el => { el.style.translate = ""; el.style.rotate = ""; el.style.scale = ""; });
+    [layerHead, layerBody, layerBase].forEach(el => {
+      el.style.translate = ""; el.style.rotate = ""; el.style.scale = "";
+      el.style.removeProperty("--gx"); el.style.removeProperty("--gy");
+    });
     const bot = document.getElementById("roBot");
     if (bot) bot.style.opacity = "";
     const st = document.getElementById("streak");
@@ -3863,6 +4275,11 @@ function h(tag, props, ...kids) {
   kids.flat().forEach(c => c != null && el.append(c));
   return el;
 }
+/* replaceChildren은 null을 "null" 글자로 그린다: 빈 자리는 걸러서 넣는다 */
+function fill(el, ...kids) {
+  el.replaceChildren(...kids.flat().filter(c => c != null && c !== false));
+  return el;
+}
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -3898,12 +4315,26 @@ function hideToast() {
   toastEl.style.display = "none";
   toastEl.replaceChildren();
 }
+let toastMs = 0;
 function showToast(nodes, ms) {
   clearTimeout(toastTimer);
-  toastEl.replaceChildren(...nodes);
+  fill(toastEl, nodes);
   toastEl.style.display = "flex";
+  toastMs = ms || 0;
   if (ms) toastTimer = setTimeout(hideToast, ms);
 }
+/* 읽거나 고르는 동안(마우스·키보드 포커스)에는 닫지 않는다. 벗어나면 다시 센다 */
+function holdToast() { clearTimeout(toastTimer); }
+function resumeToast() {
+  if (toastMs && !toastEl.matches(":hover") && !toastEl.contains(document.activeElement)) {
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, toastMs);
+  }
+}
+toastEl.addEventListener("mouseenter", holdToast);
+toastEl.addEventListener("focusin", holdToast);
+toastEl.addEventListener("mouseleave", resumeToast);
+toastEl.addEventListener("focusout", () => setTimeout(resumeToast, 0));
 function showCaptured(res) {
   if (!res.ok) {
     showToast([h("div", { class: "toast-head", text: res.error || "기록하지 못했어요" })], 4000);
@@ -3913,28 +4344,39 @@ function showCaptured(res) {
     h("option", { value: "", text: "분류 없음" }),
     projectNames.map(n => h("option", { value: n, text: n })));
   sel.value = res.project || "";
-  sel.addEventListener("change", async () => {
-    if (sel.value) await apiPost("/api/capture_project", { id: res.id, project: sel.value });
+  sel.addEventListener("change", async () => {  // '분류 없음'도 실제로 저장한다
+    let r;
+    try { r = await apiPost("/api/capture_project", { id: res.id, project: sel.value }); }
+    catch (err) { r = { ok: false }; }
+    note.textContent = r.ok ? (sel.value ? `${sel.value}(으)로 저장했어요` : "분류 없음으로 저장했어요")
+                            : "저장하지 못했어요 — 다시 골라 주세요";
   });
+  const note = h("span", { text: res.project ? "내용을 보고 Ro가 골랐어요" : "분류를 골라주세요" });
   const undo = h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: async () => {
     const r = await apiPost("/api/capture_undo", { id: res.id });
     showToast([h("div", { class: "toast-head", text: r.ok ? "되돌렸어요" : (r.error || "되돌리지 못했어요") })], 2200);
     await refreshState();
   } });
   showToast([
-    h("div", { class: "toast-head" }, h("span", { text: "기록했어요" }), undo),
+    h("div", { class: "toast-head" }, h("span", { text: res.reopen ? "분류 바꾸기" : "기록했어요" }), undo),
     h("div", { class: "toast-file", text: res.summary }),
-    h("div", { class: "toast-row" }, h("span", { text: "분류" }), sel,
-      h("span", { text: res.project ? "내용을 보고 Ro가 골랐어요" : "분류를 골라주세요" })),
+    h("div", { class: "toast-row" }, h("span", { text: "분류" }), sel, note),
     h("div", { class: "toast-bar", "aria-hidden": "true" }),
   ], 6000);
 }
 async function capture(kind, name, text, size) {
-  const res = await apiPost("/api/capture", { kind, name, text: String(text || "").slice(0, 4000), size });
+  let res;
+  try {
+    res = await apiPost("/api/capture", { kind, name, text: String(text || "").slice(0, 4000), size });
+  } catch (err) {  // 저장됐는지 알 수 없으면 입력을 돌려주고 그렇게 알린다(호출한 쪽이 입력창에 복원)
+    showToast([h("div", { class: "toast-head", text: "기록하지 못했어요(서버 연결 실패). 입력은 그대로 남겨 두었어요." })], 6000);
+    return false;
+  }
   setBubbleOpen(true);
   switchTab("home");
   showCaptured(res);
   await refreshState();
+  return !!(res && res.ok);
 }
 const TEXT_EXT = /\.(md|txt|csv|json|py|js|ts|tsx|log|ya?ml|toml|html|css|swift|sh|rs|go)$/i;
 async function handleDrop(dt) {
@@ -3966,14 +4408,17 @@ window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) setDropActiv
 window.addEventListener("drop", (e) => { e.preventDefault(); setDropActive(false); handleDrop(e.dataTransfer); });
 
 /* C · 근거 붙은 답 */
-function openRecord(id) {
-  switchTab("timeline");
+function openRecord(id, day) {
   const row = timelineList.querySelector(`[data-id="${CSS.escape(id)}"]`);
-  if (row) {
-    row.scrollIntoView({ block: "center" });
-    row.classList.add("flash");
-    setTimeout(() => row.classList.remove("flash"), 1600);
+  if (!row) {  // 타임라인은 오늘 것만 보여 준다: 엉뚱한 탭으로 옮기지 말고 이유와 찾는 방법을 알린다
+    showToast([h("div", { class: "toast-head", text: `${day || "다른 날"} 기록이라 오늘 타임라인에는 없어요.` }),
+      h("div", { class: "block-sub", text: `근거 줄에 저장된 내용이 모두 보여요. 그날 요약: 터미널에서 ro log summary --date ${day || "YYYY-MM-DD"}` })], 6000);
+    return;
   }
+  switchTab("timeline");
+  row.scrollIntoView({ block: "center" });
+  row.classList.add("flash");
+  setTimeout(() => row.classList.remove("flash"), 1600);
 }
 async function runRecall(q) {
   pushRecent(q);
@@ -3985,19 +4430,22 @@ async function runRecall(q) {
   const ev = (r.evidence || []).length ? h("details", { class: "rc-ev" },
     h("summary", { text: `근거 · 기록 ${r.evidence.length}건` }),
     r.evidence.map(e => h("div", { class: "rc-row" },
-      h("span", { class: "rc-n", text: e.n }), h("span", { class: "t", text: e.summary }),
+      h("span", { class: "rc-n", text: e.n }),
+      h("span", { class: "t" }, h("span", { text: e.summary }),
+        (e.excerpt || []).length ? h("span", { class: "block-sub", text: ` — ${e.excerpt.join(" / ")}` }) : null),
       h("span", { class: "d", text: e.ts }),
-      h("button", { class: "mini-btn", type: "button", "aria-label": `기록 ${e.n} 열기`, text: "↗", onclick: () => openRecord(e.id) })))) : null;
+      h("button", { class: "mini-btn", type: "button", "aria-label": `기록 ${e.n} 열기`, text: "↗",
+        onclick: () => openRecord(e.id, e.day) })))) : null;
   const chips = h("div", { class: "chip-row" },
     (r.followups || []).filter(f => f !== q).map(f => h("button", { class: "mini-btn", type: "button", text: f,
       onclick: () => runRecall(f) })),
     r.found ? h("button", { class: "mini-btn", type: "button", text: "메모로 저장", onclick: () =>
       capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null,
     r.found ? null : h("button", { class: "mini-btn", type: "button", text: "엔진에 물어보기", onclick: () => previewAsk(q) }));
-  recallCard.replaceChildren(
+  fill(recallCard,
     h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: r.headline }),
     items.length ? h("ul", { class: "rc-list" }, items) : null, ev, chips,
-    h("div", { class: "rc-foot", text: r.note || "" }));
+    r.note ? h("div", { class: "rc-foot", text: r.note }) : null);
   recallCard.style.display = "flex";
   answerCard.style.display = "none";
   recallShown = true;
@@ -4031,7 +4479,7 @@ async function showRecordOrganize() {
       h("div", { class: "rc-foot", text: "적용해도 24시간 안에 한 번에 되돌릴 수 있어요" }));
   } });
   const cancel = h("button", { class: "mini-btn", type: "button", text: "취소", onclick: () => { recOrgCard.style.display = "none"; } });
-  recOrgCard.replaceChildren(
+  fill(recOrgCard,
     h("div", { class: "rc-head", text: "이렇게 묶을게요" }),
     h("div", { class: "rc-foot", text: `기록 ${p.total}건 → 프로젝트 ${p.groups.length}개. 아직 아무것도 바뀌지 않았어요.` }),
     ...p.groups.map(g => h("div", { class: "rec-org-row" },
@@ -4046,12 +4494,13 @@ async function showRecordOrganize() {
 /* B · ⌥R 팔레트 */
 const COMMANDS = [
   { id: "record", label: "/기록", desc: "지금 한 일 한 줄로 남기기", arg: true },
-  { id: "organize", label: "/정리", desc: "흩어진 기록을 프로젝트별로" },
+  { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)" },
   { id: "today", label: "/오늘", desc: "오늘 요약 보기" },
   { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true },
   { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기" },
 ];
-const RECALL_INTENT = /(뭐\s*했|무엇을\s*했|했[어지니]|기록|오늘|어제|그제|이번\s*주|지난\s*주|찾)/;
+// 내 기록을 묻는 말만 로컬 회상으로 보낸다. '오늘'·'어제'만 붙은 일반 요청("오늘 alpha 구조 설명해줘")은 질문이다
+const RECALL_INTENT = /(뭐\s*했|무엇을\s*했|했[어지니나]\s*\??$|한\s*일|기록(에서|을|\s*찾|\s*보)|찾아\s*줘|찾기)/;
 let palIndex = 0, palRows = [], lastFocus = null;
 function recentList() {
   try { return JSON.parse(localStorage.getItem("ro.recent") || "[]"); } catch (e) { return []; }
@@ -4106,6 +4555,15 @@ function closePalette() {
   if (lastFocus && lastFocus.focus) lastFocus.focus();
 }
 window.openPaletteFromHost = function() { setBubbleOpen(true); openPalette(); };
+/* 팔레트와 하단 입력창이 같은 명령 해석·실행을 쓴다. 반환: 처리 성공 여부 */
+async function runCommand(c, arg) {
+  if (c.id === "record") return capture("text", "직접 기록", arg, arg.length);
+  if (c.id === "organize") await showRecordOrganize();
+  else if (c.id === "today") await runRecall("오늘 뭐 했지?");
+  else if (c.id === "find") await runRecall(`${arg} 기록 찾아줘`);
+  else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+  return true;
+}
 async function runPalette() {
   const r = palRows[palIndex];
   if (!r) return;
@@ -4113,11 +4571,7 @@ async function runPalette() {
     const c = r.cmd;
     if (c.arg && !r.arg) { palInput.value = c.label + " "; renderPalette(); return; }
     closePalette();
-    if (c.id === "record") await capture("text", "직접 기록", r.arg, r.arg.length);
-    else if (c.id === "organize") await showRecordOrganize();
-    else if (c.id === "today") await runRecall("오늘 뭐 했지?");
-    else if (c.id === "find") await runRecall(`${r.arg} 기록 찾아줘`);
-    else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+    await runCommand(c, r.arg);
     return;
   }
   closePalette();
@@ -4192,6 +4646,11 @@ def make_handler(runtime):
             try:
                 fn()
             except Exception as e:
+                try:  # 나중에 원인을 찾을 수 있게 경로·예외 종류만 남긴다(요청 본문·메시지는 남기지 않음)
+                    log.append("pet_error", f"{urlparse(self.path).path} {type(e).__name__}",
+                               {"path": urlparse(self.path).path, "error": type(e).__name__}, log_dir=runtime.log_dir)
+                except OSError:
+                    pass
                 try:
                     self._send_json(500, {"ok": False, "error": f"server error: {type(e).__name__}"})
                 except OSError:
@@ -4231,6 +4690,9 @@ def make_handler(runtime):
             except json.JSONDecodeError:
                 self._send_json(400, {"ok": False, "error": "invalid json"})
                 return
+            if not isinstance(data, dict):  # 배열·숫자 본문은 500이 아니라 잘못된 요청이다
+                self._send_json(400, {"ok": False, "error": "JSON object가 필요합니다."})
+                return
 
             parsed = urlparse(self.path)
             if parsed.path == "/api/ask/preview":
@@ -4247,7 +4709,10 @@ def make_handler(runtime):
             elif parsed.path == "/api/learn":
                 self._send_json(200, runtime.decide_rule(data.get("action"), data.get("id")))
             elif parsed.path == "/api/write_gate":
-                self._send_json(200, runtime.resolve_write_approval(bool(data.get("approve"))))
+                if not isinstance(data.get("approve"), bool):  # "false" 같은 문자열을 승인으로 읽지 않는다
+                    self._send_json(400, {"ok": False, "error": "approve는 true/false여야 합니다."})
+                else:
+                    self._send_json(200, runtime.resolve_write_approval(data["approve"], data.get("id")))
             elif parsed.path == "/api/recall":
                 self._send_json(200, runtime.recall_question(data.get("question", "")))
             elif parsed.path == "/api/capture":

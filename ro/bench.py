@@ -32,11 +32,11 @@ def _percent(raw):
 
 # 코드에 박힌 상수에서 정답을 뽑는 과제: (id, 질문, 파일, 정규식, expect 변환). 정답은 생성 시점 코드에서 읽는다.
 CODE_FACTS = [
-    ("fact-rate-limit", "rog.bot의 ambient 입력은 분당 최대 몇 건까지 기록해?", "ro/ambient.py",
+    ("fact-rate-limit", "{name}의 ambient 입력은 분당 최대 몇 건까지 기록해?", "ro/ambient.py",
      r"MAX_PER_MIN = (\d+)", lambda v: [v]),
-    ("fact-context-cap", "rog.bot의 ask 컨텍스트는 최대 몇 글자로 자르게 돼 있어?", "ro/ask.py",
+    ("fact-context-cap", "{name}의 ask 컨텍스트는 최대 몇 글자로 자르게 돼 있어?", "ro/ask.py",
      r"CONTEXT_CAP = (\d+)", lambda v: [v]),
-    ("fact-min-rate", "rog.bot의 Learn은 성공률이 몇 퍼센트 이상일 때 라우팅 규칙 후보를 제안해?",
+    ("fact-min-rate", "{name}의 Learn은 성공률이 몇 퍼센트 이상일 때 라우팅 규칙 후보를 제안해?",
      "ro/learn.py", r"MIN_RATE = (0\.\d+)", _percent),
 ]
 STALE_SECONDS = 3600
@@ -70,7 +70,7 @@ def project_facts_tasks(project, now=None):
     return tasks
 
 
-def code_fact_tasks(repo_path, project="rog.bot", now=None):
+def code_fact_tasks(repo_path, project="ro.bot", now=None):
     asof = now or time.strftime("%Y-%m-%dT%H:%M:%S")
     tasks = []
     for tid, question, rel, pattern, to_expect in CODE_FACTS:
@@ -78,21 +78,36 @@ def code_fact_tasks(repo_path, project="rog.bot", now=None):
         m = re.search(pattern, f.read_text(encoding="utf-8")) if f.is_file() else None
         if m:
             tasks.append({"id": tid, "kind": "code-fact", "project": project, "asof": asof,
-                          "question": question, "expect": to_expect(m.group(1))})
+                          "question": question.format(name=project), "expect": to_expect(m.group(1))})
     return tasks
 
 
+def repo_project(mapdata, repo_path):
+    """지도에서 이 저장소(ro 체크아웃)에 해당하는 프로젝트 이름. 저장소 이름이 바뀌어도(rog.bot → ro.bot) 경로로 찾는다."""
+    want = Path(repo_path).resolve()
+    for p in mapdata["projects"]:
+        try:
+            if Path(p["path"]).resolve() == want:
+                return p["name"]
+        except OSError:
+            continue
+    return None
+
+
 def generate_tasks(mapdata, repo_path, extra_projects=()):
-    """기본은 rog.bot만. 다른 프로젝트는 사용자가 이름을 명시했을 때만 포함한다."""
+    """기본은 이 저장소만. 다른 프로젝트는 사용자가 이름을 명시했을 때만 포함한다."""
     by_name = {p["name"]: p for p in mapdata["projects"]}
-    names = ["rog.bot", *extra_projects]
+    own = repo_project(mapdata, repo_path)
+    if own is None:
+        raise ValueError(f"ro 저장소({repo_path})가 지도에 없습니다. 상위 폴더를 `ro setup roots add`로 추가하세요.")
+    names = [own, *extra_projects]
     missing = [n for n in names if n not in by_name]
     if missing:
         raise ValueError(f"지도에 없는 프로젝트: {missing}")
     tasks = []
     for n in names:
         tasks += project_facts_tasks(by_name[n])
-    return tasks + code_fact_tasks(repo_path)
+    return tasks + code_fact_tasks(repo_path, own)
 
 
 def stale_tasks(tasks, now=None):
@@ -132,7 +147,8 @@ def plan_arm(task, arm, mapdata, engine, neutral_dir):
     """한 조건의 실행 계획: {prompt, cwd}. 실행하지 않는다."""
     q = task["question"]
     if arm == "ctx":
-        pl = ask.plan(q, mapdata, use_context=True, engine=engine, project=task.get("project"))
+        pl = ask.plan(q, mapdata, use_context=True, engine=engine, project=task.get("project"),
+                      memory_path=False)  # 비교 실험이 개인 기억에 따라 달라지지 않게
         return {"prompt": pl["prompt"], "cwd": neutral_dir, "context_chars": len(pl["context"])}
     if arm == "none":
         return {"prompt": q, "cwd": neutral_dir, "context_chars": 0}

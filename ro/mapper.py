@@ -23,8 +23,9 @@ DEFAULT_ROOTS = ["~/Developer", "~/Projects"]
 
 
 def default_roots(home="~/.ro"):
+    """스캔 폴더. 직접 정한 적이 없으면 기본값, 직접 정했으면 그대로(마지막 폴더까지 지웠다면 빈 목록 = 아무 데도 훑지 않음)."""
     roots = config.load(home).get("roots")
-    return [str(r) for r in roots] if isinstance(roots, list) and roots else list(DEFAULT_ROOTS)
+    return [str(r) for r in roots] if isinstance(roots, list) else list(DEFAULT_ROOTS)
 MAX_DEPTH = 3
 
 SKIP_DIRS = {

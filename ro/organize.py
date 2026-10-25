@@ -21,10 +21,12 @@
 """
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -88,7 +90,7 @@ SENSITIVE = re.compile(r"recovery|backup[-_ ]?codes?|mnemonic|복구\s*코드|�
 NAME_DATE = re.compile(r"(?<!\d)(20\d\d)[-._년 ]?\s?(\d{1,2})[-._월 ]?\s?(\d{1,2})일?(?!\d)")
 NAME_MONTH = re.compile(r"(?<!\d)(20\d\d)[-._년 ]\s?(0?[1-9]|1[0-2])월?(?![\d.])")  # invoice_2026_09
 VERSION_TAIL = re.compile(r"\s(?:v\d+(?:\.\d+)*|final|최종|\d+\.\d+(?:\.\d+)*)\b.*$", re.I)
-CAMERA = re.compile(r"^(?:img|dsc|dscn|pxl|mvimg|gopr|dji)[\s-]?\d{3,5}$", re.I)  # 카메라 번호는 그 자체가 이름
+CAMERA = re.compile(r"^(?:img|dsc|dscn|pxl|mvimg|gopr|dji)[\s-]?\d{1,5}$", re.I)  # 카메라 번호는 그 자체가 이름(IMG_9도)
 TEXT_DATE = re.compile(r"(?<!\d)(20\d\d)\s?(?:[-./]|년)\s?(\d{1,2})\s?(?:[-./]|월)\s?(\d{1,2})(?!\d)")
 
 
@@ -384,7 +386,8 @@ def _judge(root, files, items, now, stale, stale_days):
             if m == keep or it is None:
                 continue
             claimed.add(_k(m))
-            _mark(it, "quarantine", "duplicate", f"{keep} 와 내용 동일", keep, review=_important(it))
+            _mark(it, "quarantine", "duplicate", f"{Path(keep).name} 와 내용 동일", keep,  # 위치는 keep에 따로 둔다
+                  review=_important(it))
     for p, _ in files:
         it = by_key[_k(p)]
         if _k(p) in claimed or p.suffix.lower() != ".zip":
@@ -510,11 +513,51 @@ def read_journal(home=HOME):
 
 
 def pending(home=HOME, sources=("cleanup", "organize", "tidy")):
-    """되돌리지 않은 이동·격리 기록."""
+    """되돌리지 않은 이동·격리 기록.
+    옮기기 전에 남긴 의도(intent)만 있고 완료 기록이 없으면(완료 기록 저장 실패·중단) 파일 상태로 판단한다:
+    출발지가 비고 목적지에 파일이 있으면 옮겨진 것으로 보고 되돌릴 수 있게 한다."""
     entries = [e for e in read_journal(home) if e["source"] in sources]
-    closed = {(e["source"], e["batch"], e["id"]) for e in entries if e["op"] in ("restore", "purge")}
-    return [e for e in entries if e["op"] in ("move", "quarantine")
-            and (e["source"], e["batch"], e["id"]) not in closed]  # 비운(purge) 항목은 되돌릴 수 없다
+    key = lambda e: (e["source"], e["batch"], e["id"])
+    closed = {key(e) for e in entries if e["op"] in ("restore", "purge")}
+    finished = {key(e) for e in entries if e["op"] in ("move", "quarantine", "abort")}
+    out = []
+    for e in entries:
+        if key(e) in closed:  # 비운(purge) 항목은 되돌릴 수 없다
+            continue
+        if e["op"] in ("move", "quarantine"):
+            out.append(e)
+        elif e["op"] == "intent" and key(e) not in finished:
+            if not Path(e["src"]).exists() and Path(e["dst"]).is_file():
+                out.append({**e, "op": e["planned"], "recovered": True})
+    return out
+
+
+def _reserve(dst, unique=True):
+    """목적지를 배타적으로 만들어 둔다(빈 자리 표시 파일). 확인과 이동 사이에 생긴 다른 파일을 덮어쓰지 않게 한다."""
+    stem, ext, n = dst.stem, dst.suffix, 2
+    while True:
+        try:
+            os.close(os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            return dst
+        except FileExistsError:
+            if not unique:
+                raise ValueError("목적지가 이미 있음")
+            dst = dst.with_name(f"{stem}_{n}{ext}")
+            n += 1
+
+
+def _move_into(src, dst):
+    """src를 미리 예약한 dst 자리로 옮긴다. 같은 볼륨은 rename(자리 표시 파일만 바뀐다), 다른 볼륨은 복사→검증→원본 삭제."""
+    try:
+        os.replace(src, dst)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    shutil.copy2(src, dst)
+    if os.path.getsize(src) != os.path.getsize(dst):
+        raise OSError("복사 크기가 다름")
+    os.unlink(src)
 
 
 def _append(entry, home, source="cleanup"):
@@ -542,7 +585,7 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
         raise ValueError("적용할 id나 --category·--kind를 지정하세요")
     # 남길 쪽(중복 원본·최신 버전·풀린 파일)이 같은 배치의 이동으로 먼저 사라지지 않게 격리를 앞에 둔다
     ids = sorted(dict.fromkeys(ids), key=lambda c: (by_id.get(c) or {}).get("action") != "quarantine")
-    batch = time.strftime("%Y%m%d-%H%M%S")
+    batch = f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"  # 같은 초에 다시 적용해도 다른 배치
     trash_root = _cleanup_dir(home) / "trash"
     done, skipped = [], []
     for cid in ids:
@@ -568,26 +611,45 @@ def apply(ids=(), category=None, kind=None, home=HOME, log_dir=log.LOG_DIR):
             if action == "quarantine":
                 if not detect.kept_ok(it, src, root):
                     raise ValueError("남겨 둔 쪽이 사라지거나 바뀜 — 다시 scan 하세요")
-                dst = fsutil.ensure_dir(trash_root / batch) / f"{cid}-{src.name}"
-                if dst.exists():
-                    raise ValueError("격리 위치가 이미 있음")
+                dst = _reserve(fsutil.ensure_dir(trash_root / batch) / f"{cid}-{src.name}", unique=False)
                 mode = stat.S_IMODE(st.st_mode)  # 격리본은 비공개로 두되 복원 때 원래 권한을 되돌린다
-                shutil.move(str(src), str(dst))
-                os.chmod(dst, 0o600)
                 entry = {"op": "quarantine", "kind": it["kind"], "mode": mode, "trash": str(trash_root)}
             else:
                 dst = Path(it["dest"])
                 if dest_root.resolve() not in dst.resolve().parents:
                     raise ValueError("정리 폴더 밖으로 가는 경로")
-                dst = _unique(dst, set())
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dst))
+                dst = _reserve(dst)
                 entry = {"op": "move", "dest_root": str(dest_root)}
         except (OSError, ValueError) as e:
             skipped.append((cid, str(e)))
             continue
-        _append({**entry, "batch": batch, "id": cid, "src": str(src), "dst": str(dst), "sha": it["sha"],
-                 "root": str(root), "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, home)
+        base = {"batch": batch, "id": cid, "src": str(src), "dst": str(dst), "sha": it["sha"], "root": str(root)}
+        stamp = lambda: time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        try:  # 옮기기 전에 의도를 먼저 남긴다: 이후 어디서 끊겨도 되돌릴 근거가 남는다
+            _append({**entry, **base, "op": "intent", "planned": entry["op"], "ts": stamp()}, home)
+        except OSError as e:
+            dst.unlink(missing_ok=True)
+            skipped.append((cid, f"기록을 남기지 못해 옮기지 않음: {e}"))
+            continue
+        try:
+            _move_into(src, dst)
+            if entry["op"] == "quarantine":
+                os.chmod(dst, 0o600)
+        except OSError as e:
+            if src.exists():  # 옮기지 못했으면 자리 표시 파일을 치우고 취소를 남긴다
+                if dst.is_file() and dst.stat().st_size == 0:
+                    dst.unlink(missing_ok=True)
+                try:
+                    _append({**base, "op": "abort", "ts": stamp()}, home)
+                except OSError:
+                    pass  # 기록이 없어도 출발지에 파일이 있으므로 pending이 옮겨진 것으로 보지 않는다
+                skipped.append((cid, str(e)))
+                continue
+        try:
+            _append({**entry, **base, "ts": stamp()}, home)
+        except OSError:
+            pass  # 완료 기록이 없어도 의도 기록과 파일 상태로 되돌릴 수 있다(pending 참고)
         done.append({**it, "dest": str(dst)})
     if done:
         cats = Counter(i["category"] for i in done if i.get("action", "move") == "move")
@@ -718,7 +780,13 @@ def undo(batch=None, home=HOME, log_dir=log.LOG_DIR):
         try:
             src, dst, stop = _check_restorable(e, home)
             src.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(dst), str(src))
+            _reserve(src, unique=False)  # 확인 뒤 원위치에 생긴 파일을 덮어쓰지 않는다
+            try:
+                _move_into(dst, src)
+            except OSError:
+                if src.is_file() and src.stat().st_size == 0:
+                    src.unlink(missing_ok=True)
+                raise
             if "mode" in e:
                 os.chmod(src, e["mode"])
             for d in dst.parents:  # 비게 된 카테고리·배치 폴더만 지운다(정리 루트·격리 루트 자체는 남김)
@@ -772,7 +840,7 @@ def show(plan, category=None, review=False, action=None, kind=None):
         for i in kept:
             lines.append(f"[{i['id']}]  {Path(i['path']).name}   ({i['reasons'][0]})")
     all_items = plan["items"]
-    n_move = sum(i.get("action", "move") == "move" for i in all_items)
+    n_move = sum(i.get("action", "move") == "move" and not i["review"] for i in all_items)  # 검토 필요는 따로 센다
     q = [i for i in all_items if i.get("action") == "quarantine"]
     n_review = sum(i["review"] for i in all_items if i.get("action", "move") == "move")
     lines.append(f"\n이동 {n_move}건 · 치울 후보 {len(q)}건({_mb(sum(i['size'] for i in q))}) · "

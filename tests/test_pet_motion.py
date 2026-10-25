@@ -109,6 +109,46 @@ class PressTest(MotionBase):
         self.assertGreater(wide, rest[1] * 0)  # 납작하게 퍼진다
         pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
 
+    def test_glass_scene_sloshes_with_motion_and_resets(self):
+        pg = self.page()
+        pg.evaluate("materialMode = 'glass'; updateMaterialUI();")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "block")
+        pg.evaluate("RoMotion.down(1000); RoMotion.apply(RoMotion.pose(1080))")  # 눌리면 풍경이 위아래로 밀린다
+        gy = pg.evaluate("parseFloat(layerHead.style.getPropertyValue('--gy'))")
+        self.assertNotEqual(gy, 0)
+        self.assertLessEqual(abs(gy), 8)
+        pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
+        self.assertEqual(pg.evaluate("layerHead.style.getPropertyValue('--gy')"), "")
+        pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
+
+    def test_native_glass_follows_every_layer_even_while_moving(self):
+        pg = self.page()
+        pg.evaluate("materialMode = 'glass'; updateMaterialUI(); window.setNativeGlass('liquid')")
+        pg.wait_for_function("document.body.classList.contains('native-glass-liquid')")
+        sent = lambda: pg.evaluate("JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))")
+        rest = sent()
+        self.assertEqual([len(r) for r in rest], [6, 6, 6])  # 머리·몸·받침: x, y, 너비, 높이, 기울기, 불투명도
+        head = pg.evaluate("[layerHead.offsetWidth, layerHead.getBoundingClientRect().left]")
+        self.assertAlmostEqual(rest[0][2], head[0], delta=0.5)
+        self.assertAlmostEqual(rest[0][0], head[1], delta=0.5)
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "none")
+        # 기울고 눌린 층: 유리를 걷지 않고 같은 기울기·크기로 따라간다(예전엔 여기서 웹 유리로 바뀌어 유리가 계속 바뀌었다)
+        pg.evaluate("RoMotion.down(1000); layerHead.style.rotate = '-4deg'; layerHead.style.scale = '1.1 0.9'")
+        pg.wait_for_function("nativeGlassSent.startsWith('[[') && JSON.parse(nativeGlassSent.replace(/(true|false)$/, ''))[0][4] === -4")
+        self.assertTrue(pg.evaluate("document.body.classList.contains('native-glass-liquid')"))
+        moved = sent()[0]
+        self.assertAlmostEqual(moved[2], rest[0][2] * 1.1, delta=0.5)
+        self.assertAlmostEqual(moved[3], rest[0][3] * 0.9, delta=0.5)
+        self.assertAlmostEqual(moved[0] + moved[2] / 2, rest[0][0] + rest[0][2] / 2, delta=0.5)  # 중심 기준
+        pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
+        pg.evaluate("window.setNativeGlass('blur')")  # 흐림만 되는 Mac: 휘어진 풍경은 남긴다
+        pg.wait_for_function("document.body.classList.contains('native-glass-blur')")
+        self.assertEqual(pg.evaluate("getComputedStyle(layerBody.querySelector('.g-env')).display"), "block")
+        pg.evaluate("materialMode = 'clay'; updateMaterialUI();")
+        pg.wait_for_function("!document.body.classList.contains('native-glass-blur') && nativeGlassSent === 'off'")
+        pg.evaluate("window.setNativeGlass('')")
+
     def test_eyes_squint_then_open_then_happy_600ms(self):
         pg = self.page()
         eyes = lambda t: pg.evaluate("(t) => RoMotion.pose(t).eyes.shape", t)
