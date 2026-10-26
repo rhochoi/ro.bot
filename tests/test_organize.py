@@ -47,6 +47,15 @@ class OrganizeTest(unittest.TestCase):
         organize.save_plan(plan, self.ro)
         return {Path(i["path"]).name: i for i in plan["items"]}
 
+    def test_item_ids_never_collide(self):
+        # sha1 앞 8자가 실제로 겹치는 두 경로(64,855개 중 처음 발견한 충돌)도 서로 다른 ID를 받는다
+        used = set()
+        a = organize._item_id("/Users/u/Downloads/file7213.pdf", used)
+        b = organize._item_id("/Users/u/Downloads/file64855.pdf", used)
+        self.assertEqual(a, "4b5a698f")
+        self.assertNotEqual(a, b)
+        self.assertTrue(b.startswith(a))
+
     def test_classify_rules_and_keywords(self):
         c = organize.classify
         self.assertEqual(c(Path("스크린샷 2026-10-01 오후 3.10.22.png"))[0], "이미지/스크린샷")

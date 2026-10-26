@@ -1128,6 +1128,15 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
     }
 
+    /// 펫 화면은 ro 로컬 서버 한 곳만 띄운다. 다른 주소로의 이동(링크·리디렉션)은 막는다
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let home = URL(string: urlString)
+        let target = navigationAction.request.url
+        let sameOrigin = target?.scheme == home?.scheme && target?.host == home?.host && target?.port == home?.port
+        decisionHandler(sameOrigin || target?.absoluteString == "about:blank" ? .allow : .cancel)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         webView.evaluateJavaScript("window.setWanderState && window.setWanderState(\(wanderEnabled));", completionHandler: nil)
         webView.evaluateJavaScript("window.setNativeGlass && window.setNativeGlass('\(glassKind)');", completionHandler: nil)

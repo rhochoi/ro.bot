@@ -121,6 +121,15 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("ro doctor", log)
         self.assertFalse(any(x.startswith("curl") for x in log))
 
+    def test_global_config_changes_need_confirmation(self):
+        # 확인할 터미널이 없고 RO_YES도 없으면 전역 git 설정·셸 설정 파일을 바꾸지 않는다
+        self.stub("gh", GH)
+        self.stub("uv", UV)
+        r, log = self.run_script(RO_YES="")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("gh auth setup-git", log)
+        self.assertNotIn("uv tool update-shell", log)
+
     def test_public_repo_needs_no_gh(self):
         self.stub("uv", UV)  # gh 스텁 없음: 공개 저장소면 gh 없이 끝나야 한다
         r, log = self.run_script(GIT_PUBLIC="1")

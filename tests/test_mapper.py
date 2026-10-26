@@ -83,3 +83,44 @@ class DefaultRootsTest(unittest.TestCase):
             self.assertEqual(mapper.default_roots(d), ["~/Work"])
             (Path(d) / "config.json").write_text("깨짐")
             self.assertEqual(mapper.default_roots(d), mapper.DEFAULT_ROOTS)
+
+
+class HostileRepoTest(unittest.TestCase):
+    """남의 저장소 설정(.git/config)이 ro의 읽기 명령에 프로그램을 끼워 넣지 못한다."""
+
+    def test_repo_config_cannot_run_programs(self):
+        import os
+        import subprocess
+        import sys
+        from ro import ask, bench, collectors
+        with tempfile.TemporaryDirectory() as d:
+            repo, marker = Path(d) / "evil", Path(d) / "ran"
+            repo.mkdir()
+            env = {**os.environ, "GIT_AUTHOR_NAME": "a", "GIT_AUTHOR_EMAIL": "a@b", "GIT_COMMITTER_NAME": "a",
+                   "GIT_COMMITTER_EMAIL": "a@b"}
+            git = lambda *a, **k: subprocess.run(["git", "-C", str(repo), *a], check=True, env=env,  # noqa: E731
+                                                 capture_output=True, **k).stdout
+            git("init", "-q")
+            git("commit", "-q", "--allow-empty", "-m", "init")
+            body = git("cat-file", "commit", "HEAD").decode()
+            head, rest = body.split("\n\n", 1)
+            signed = head + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n x\n -----END PGP SIGNATURE-----\n\n" + rest
+            sha = git("hash-object", "-t", "commit", "-w", "--stdin", input=signed.encode()).decode().strip()
+            git("update-ref", "HEAD", sha)
+            payload = Path(d) / "payload"
+            payload.write_text(f"#!{sys.executable}\nopen({str(marker)!r}, 'a').write('x')\nraise SystemExit(1)\n")
+            payload.chmod(0o700)
+            git("config", "log.showSignature", "true")
+            git("config", "gpg.program", str(payload))
+            git("config", "core.fsmonitor", str(payload))
+            # 설정이 실제로 위험한지(픽스처가 유효한지) 먼저 확인한다
+            subprocess.run(["git", "-C", str(repo), "log", "-1"], capture_output=True)
+            self.assertTrue(marker.exists())
+            marker.unlink()
+
+            self.assertEqual(mapper._git(repo, "log", "-1", "--format=%s"), "init")
+            mapper.describe_project(repo)
+            ask.build_context([{"name": "evil", "path": str(repo), "git": {"branch": "main"}}])
+            bench._git(repo, "log", "-1", "--format=%s")
+            collectors._git(str(repo), "log", "-1")
+            self.assertFalse(marker.exists())

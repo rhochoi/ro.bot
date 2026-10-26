@@ -237,7 +237,7 @@ def main(argv=None):
                 elif find._safe_path(path) is None or not path.is_file():
                     raise ValueError("열 파일이 바뀌었습니다. 다시 검색하세요.")
                 else:
-                    subprocess.run(["open", str(path)], check=True, capture_output=True)
+                    subprocess.run(["open", str(path)], check=True, capture_output=True, timeout=10)
         except ValueError as exc:
             # int() 오류에는 입력 원문이 포함되므로 고정 메시지로 바꾼다.
             print("선택 불가: " + ("결과 번호 또는 none을 입력하세요." if str(exc).startswith("invalid literal") else str(exc)))

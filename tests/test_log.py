@@ -51,6 +51,16 @@ class LogTest(unittest.TestCase):
         for plain in ("비밀번호는 어떻게 바꿔?", "암호화는 뭐야", "password 재설정 방법", "tokens: 5 used"):
             self.assertEqual(r(plain), plain)
 
+    def test_redact_env_style_secret_names(self):
+        # 환경변수·설정 파일 형식(접두어_비밀이름=값)도 값만 가린다
+        r = log.redact
+        for name in ("DB_PASSWORD", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY", "aws_secret_access_key",
+                     "PGPASSWORD", "GITHUB_TOKEN", "STRIPE_SECRET", "client_secret", "x-api-key"):
+            self.assertEqual(r(f"export {name}=canary-7f3a"), f"export {name}={log.MASK}", name)
+        self.assertEqual(r("키 sk_live_abcdefghijklmnop12"), f"키 {log.MASK}")
+        for plain in ("token_count=5", "tokens: 120", "bypass=1", "compass: north"):
+            self.assertEqual(r(plain), plain)
+
     def test_redact_whole_pem_block_and_url_credentials(self):
         pem = "앞\n-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKBODYMARKER\nabc==\n-----END RSA PRIVATE KEY-----\n뒤"
         out = log.redact(pem)

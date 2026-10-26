@@ -236,7 +236,7 @@ def test_cli_open_and_eval_require_explicit_query(env, monkeypatch, capsys):
     opener = Mock()
     monkeypatch.setattr(cli.subprocess, "run", opener)
     assert cli.main(["find-pick", "1", "--open", "--save-eval"]) == 0
-    opener.assert_called_once_with(["open", str(result[0]["path"])], check=True, capture_output=True)
+    opener.assert_called_once_with(["open", str(result[0]["path"])], check=True, capture_output=True, timeout=10)
     assert "--query" in capsys.readouterr().out
     assert not (home / "search-eval").exists()
     assert cli.main(["find-pick", "1", "--save-eval", "--query", "직접 작성한 질문"]) == 0

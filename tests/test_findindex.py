@@ -222,3 +222,19 @@ def test_casefold_offsets_match_reference_without_unneeded_list(setup, monkeypat
     assert hit['locations'] == expected_locations
     assert hit['phrases'] == phrases
     assert enumeration.call_count == int(expanding)
+
+
+def test_old_redaction_rules_trigger_reindex(tmp_path):
+    import sqlite3
+    home = tmp_path / 'home'
+    with findindex.Index(home, []) as index:
+        index.db.execute("INSERT INTO files(path, text) VALUES ('/x', 'DB_PASSWORD=canary-7f3a')")
+        index.db.execute("INSERT INTO body(text) VALUES ('db_password=canary-7f3a')")
+        index.db.execute('PRAGMA user_version=1')
+        index.db.commit()
+    with findindex.Index(home, []):
+        pass
+    db = sqlite3.connect(home / 'search-index' / 'index.db')
+    assert db.execute('SELECT count(*) FROM files').fetchone()[0] == 0
+    assert db.execute('SELECT count(*) FROM body').fetchone()[0] == 0
+    assert db.execute('PRAGMA user_version').fetchone()[0] == findindex.REDACT_VERSION

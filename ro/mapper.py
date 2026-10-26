@@ -56,9 +56,19 @@ def is_secret(name):
     return SECRET_NAMES.match(os.path.normcase(name.lower())) is not None
 
 
+# 남의 저장소(.git/config)가 읽기 명령에 프로그램을 끼워 넣지 못하게 한다: 서명 확인(gpg.program),
+# fsmonitor, 훅. 명령행 -c가 저장소 설정보다 우선한다. 저장소를 읽는 git 호출은 모두 이 argv를 쓴다.
+GIT_SAFE = ("git", "-c", "log.showSignature=false", "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null", "-c", "core.pager=cat")
+
+
+def git_argv(path, *args):
+    return [*GIT_SAFE, "-C", str(path), *args]
+
+
 def _git(path, *args):
     try:
-        r = subprocess.run(["git", "-C", str(path), *args], capture_output=True,
+        r = subprocess.run(git_argv(path, *args), capture_output=True,
                            text=True, timeout=5)
         return r.stdout.strip() if r.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
