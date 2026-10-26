@@ -4,11 +4,12 @@ import importlib.metadata
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-from . import (config, fixtures, fsutil, ambient, ask, bench, find, findeval, harden, learn, log, mapper, organize, pet, route,
+from . import (config, fixtures, fsutil, ambient, ask, bench, find, findeval, findsignals, harden, learn, log, mapper, organize, pet, route,
                selfupdate, setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
@@ -68,6 +69,15 @@ def main(argv=None):
     fn.add_argument("--n", type=int, default=10)
     fn.add_argument("--no-spotlight", action="store_true")
     fn.add_argument("--root", nargs="+", action="extend")
+    signals = sub.add_parser("find-signals", help="검색 사용 신호 관리(기본 꺼짐)")
+    signals.add_argument("action", choices=["on", "off", "status", "show", "summary", "clear"])
+    signals.add_argument("--n", type=int, default=20)
+    pick = sub.add_parser("find-pick", help="직전 검색 결과 선택 또는 못 찾음 기록")
+    pick.add_argument("rank", help="결과 번호 또는 none")
+    pick.add_argument("--answer")
+    pick.add_argument("--open", action="store_true")
+    pick.add_argument("--save-eval", action="store_true")
+    pick.add_argument("--query")
     fe = sub.add_parser("find-eval", help="파일명·본문 검색 평가")
     fes = fe.add_subparsers(dest="find_eval_cmd", required=True)
     fg = fes.add_parser("gen", help="자동 평가 질문 생성(기존 세트 교체)")
@@ -181,25 +191,98 @@ def main(argv=None):
             print(f"색인 관리 불가: {type(error).__name__}")
             return 1
         return 0
+    if args.cmd == "find-signals":
+        try:
+            if args.action in ("on", "off"):
+                findsignals.set_enabled(config.HOME, args.action == "on")
+                print("검색 신호: " + ("켜짐" if args.action == "on" else "꺼짐"))
+            elif args.action == "clear":
+                findsignals.clear(config.HOME)
+                print("검색 신호와 직전 검색 캐시를 삭제했습니다.")
+            elif args.action == "show":
+                print(findsignals.show(config.HOME, args.n))
+            elif args.action == "summary":
+                print(json.dumps(findsignals.summary(config.HOME), ensure_ascii=False, indent=2))
+                print("MRR: 응답한 검색만 분모, 직접 알려준 정답의 표시 순위 포함. 미표시·못 찾음은 0. 재선택은 최신 응답만 반영.")
+            else:
+                print("검색 신호: " + ("켜짐" if findsignals.enabled(config.HOME) else "꺼짐"))
+                print(f"이벤트 {len(findsignals._events(config.HOME))}건 · 보존 90일 / 최대 5,000건(쓰기 때 정리) · 선택 캐시 30분")
+        except (ValueError, OSError):
+            print("검색 신호 관리 불가: 저장 경로·권한·파일 형식을 확인하세요.")
+            return 1
+        return 0
+    if args.cmd == "find-pick":
+        try:
+            rank = None if args.rank == "none" else int(args.rank)
+            if args.query is not None and not args.save_eval:
+                raise ValueError("--query는 --save-eval과 함께 사용하세요.")
+            if args.open and rank is None and args.answer is None:
+                raise ValueError("열 파일의 결과 번호 또는 --answer가 필요합니다.")
+            if args.save_eval and args.query is not None and (not args.query.strip() or log.redact(args.query) != args.query):
+                raise ValueError("평가 질문은 비밀값 없는 문장이어야 합니다.")
+            event, path = findsignals._record_pick(rank, args.answer, config.HOME)
+            print("선택을 기록했습니다." if rank is not None else "못 찾음을 기록했습니다.")
+            if args.save_eval:
+                if path is None:
+                    print("평가 등록에는 결과 번호 또는 --answer가 필요합니다.")
+                elif args.query is None:
+                    print('real 평가 세트에 등록하려면 --save-eval --query "직접 작성한 질문"을 함께 주세요.')
+                else:
+                    findeval.add(args.query, path, "real", home=config.HOME, set_name="real")
+                    print("real 평가 세트에 등록했습니다.")
+            if args.open:
+                selected = event["answer"] or event["selected"]
+                if selected["dataless"] or getattr(path.stat(), "st_flags", 0) & 0x40000000:
+                    print("내려받기 필요: 파일을 열지 않았습니다.")
+                elif find._safe_path(path) is None or not path.is_file():
+                    raise ValueError("열 파일이 바뀌었습니다. 다시 검색하세요.")
+                else:
+                    subprocess.run(["open", str(path)], check=True, capture_output=True)
+        except ValueError as exc:
+            # int() 오류에는 입력 원문이 포함되므로 고정 메시지로 바꾼다.
+            print("선택 불가: " + ("결과 번호 또는 none을 입력하세요." if str(exc).startswith("invalid literal") else str(exc)))
+            return 1
+        except (OSError, subprocess.SubprocessError):
+            print("선택 후 작업을 완료하지 못했습니다. 파일·저장 권한을 확인하세요.")
+            return 1
+        return 0
     if args.cmd == "find":
         try:
+            started = time.perf_counter()
             result = find.search(args.query, roots=args.root, limit=args.n, spotlight=not args.no_spotlight, body=args.body, budget=args.budget, home=config.HOME)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
         except (OSError, sqlite3.Error):
             raise SystemExit("검색 범위 또는 본문 색인을 확인하지 못했습니다.") from None
+        elapsed = (time.perf_counter() - started) * 1000
+        try:
+            recording = findsignals.enabled(config.HOME)
+        except (OSError, ValueError):
+            recording = False
+        shown = []
         def show(rows):
-            for number, row in enumerate(rows, 1):
+            for number, row in enumerate(rows, len(shown) + 1 if recording else 1):
                 details = " · ".join(row["reasons"] + row["flags"])
                 print(f"{number}. {findeval.display_path(row['path'])} — {details}")
                 if row.get("snippet"):
                     print(f"   {row['snippet']}")
+            shown.extend(rows)
         show(result["results"])
         for note in result["notes"]:
             print(note)
         for relaxed in result["relaxed"]:
             print(relaxed["message"])
             show(relaxed["results"])
+        if recording:
+            try:
+                event_id = findsignals.record_search(result["parsed"], shown,
+                    {"ms": elapsed, "roots": args.root, "n_results": len(result["results"]),
+                     "phrases": (find.parse_query(args.query)["phrases"] if args.body is False else result["parsed"]["phrases"]),
+                     "relaxed": bool(result["relaxed"]), "period_labels": findsignals.period_labels(args.query)}, config.HOME)
+                if event_id:
+                    print("고르려면: ro find-pick 번호  /  못 찾음: ro find-pick none")
+            except (ValueError, OSError):
+                print("검색 신호를 저장하지 못했습니다. 저장 경로·권한을 확인하세요.")
     elif args.cmd == "find-eval":
         try:
             roots = findeval.default_roots()
