@@ -190,6 +190,14 @@ def record_search(parsed, results, meta, home=HOME):
         return event["id"]
 
 
+def record_query(query, result, shown, elapsed_ms, roots, body, home=HOME):
+    """CLI와 펫이 같은 방식으로 검색 직후 신호를 남긴다. 켜져 있지 않으면 None."""
+    meta = {"ms": elapsed_ms, "roots": roots, "n_results": len(result["results"]),
+            "phrases": find.parse_query(query)["phrases"] if body is False else result["parsed"]["phrases"],
+            "relaxed": bool(result["relaxed"]), "period_labels": period_labels(query)}
+    return record_search(result["parsed"], shown, meta, home)
+
+
 def _answer(path, roots):
     answer = Path(path).expanduser().absolute()
     if any(p.is_symlink() for p in (answer, *answer.parents)) or ".." in answer.parts:

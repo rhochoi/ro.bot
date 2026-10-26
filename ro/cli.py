@@ -277,10 +277,7 @@ def main(argv=None):
             show(relaxed["results"])
         if recording:
             try:
-                event_id = findsignals.record_search(result["parsed"], shown,
-                    {"ms": elapsed, "roots": args.root, "n_results": len(result["results"]),
-                     "phrases": (find.parse_query(args.query)["phrases"] if args.body is False else result["parsed"]["phrases"]),
-                     "relaxed": bool(result["relaxed"]), "period_labels": findsignals.period_labels(args.query)}, config.HOME)
+                event_id = findsignals.record_query(args.query, result, shown, elapsed, args.root, args.body, config.HOME)
                 if event_id:
                     print("고르려면: ro find-pick 번호  /  못 찾음: ro find-pick none")
             except (ValueError, OSError):
