@@ -19,12 +19,14 @@ LAST_TTL = 30 * 60
 def _check(path, directory=False):
     if any(p.is_symlink() for p in (path, *path.parents)):
         raise ValueError("검색 신호 저장 경로에 심볼릭 링크를 사용할 수 없습니다.")
-    if path.exists():
+    try:  # 존재 확인과 stat 사이에 다른 스레드가 파일을 지울 수 있어 한 번에 읽는다
         st = path.stat()
-        if directory and not stat.S_ISDIR(st.st_mode):
-            raise ValueError("검색 신호 저장 위치는 디렉터리여야 합니다.")
-        if not directory and (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1):
-            raise ValueError("검색 신호는 일반 파일에만 저장할 수 있습니다.")
+    except FileNotFoundError:
+        return
+    if directory and not stat.S_ISDIR(st.st_mode):
+        raise ValueError("검색 신호 저장 위치는 디렉터리여야 합니다.")
+    if not directory and (not stat.S_ISREG(st.st_mode) or st.st_nlink != 1):
+        raise ValueError("검색 신호는 일반 파일에만 저장할 수 있습니다.")
 
 
 def _directory(home, create=False):
