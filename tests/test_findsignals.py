@@ -346,3 +346,38 @@ def test_open_answer_dataless_stat_and_disabled_pick(env, monkeypatch, capsys):
     signals.set_enabled(home, False)
     with pytest.raises(ValueError):
         signals.record_pick(None, home=home)
+
+
+def test_automatic_phrases_and_aliases_are_not_recorded(env, monkeypatch):
+    from ro import log
+    home, root = start(env)
+    (root / "alpha.txt").write_text("MTA 은하수")
+    append = Mock()
+    monkeypatch.setattr(log, "append", append)
+    cli.main(["find", "엠티에이 은하수", "--no-spotlight"])
+    event = events(home)[0]
+    assert event["body"] is True
+    assert event["phrase_count"] == 2
+    assert event["terms"] == []
+    assert event["shown"][0]["reasons"] == ["본문 일치"]
+    for path in (home / "find-signals").glob("*.json"):
+        text = path.read_text()
+        assert all(word not in text for word in ("엠티에이", "MTA", "mta", "은하수"))
+    append.assert_not_called()
+
+
+def test_siblings_displayed_but_only_representatives_recorded(env, capsys):
+    home, root = start(env)
+    original = root / "sample.txt"
+    newest = root / "sample_1.txt"
+    original.touch()
+    newest.touch()
+    os.utime(original, (1, 1))
+    cli.main(["find", "sample", "--no-spotlight"])
+    output = capsys.readouterr().out
+    assert "   ↳ 비슷한 파일: ~/Documents/sample.txt — 수정 " in output
+    event = events(home)[0]
+    assert len(event["shown"]) == 1
+    assert event["shown"][0]["rel"] == newest.name
+    last = json.loads((home / "find-signals/last.json").read_text())
+    assert last["paths"] == [str(newest)]

@@ -264,6 +264,8 @@ def main(argv=None):
             for number, row in enumerate(rows, len(shown) + 1 if recording else 1):
                 details = " · ".join(row["reasons"] + row["flags"])
                 print(f"{number}. {findeval.display_path(row['path'])} — {details}")
+                for sibling in row.get("siblings", []):
+                    print(f"   ↳ 비슷한 파일: {findeval.display_path(sibling['path'])} — 수정 {sibling['modified']}")
                 if row.get("snippet"):
                     print(f"   {row['snippet']}")
             shown.extend(rows)

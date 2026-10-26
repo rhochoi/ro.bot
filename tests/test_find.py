@@ -6,6 +6,7 @@ import unicodedata
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,6 +22,13 @@ class FindTest(unittest.TestCase):
         self.base = Path(self.tmp.name).resolve()
         self.root = self.base / "Documents"
         self.root.mkdir()
+        from ro import ocr
+        search = patch.object(find, "search", partial(find.search, home=self.base / "state"))
+        search.start()
+        self.addCleanup(search.stop)
+        no_ocr = patch.object(ocr, "available", return_value=False)
+        no_ocr.start()
+        self.addCleanup(no_ocr.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -73,7 +81,7 @@ class FindTest(unittest.TestCase):
         self.assertEqual(parsed, {"terms": ["계약서", "영수증"], "kinds": ["PDF"],
                                   "since": None, "until": None,
                                   "exclude": ["초안", "사본", "백업"], "raw_ok": True,
-                                  "phrases": [], "body": False, "no_extension": False})
+                                  "phrases": [], "body": False, "no_extension": False, "aliases": {}})
         self.assertEqual(find.parse_query("계약서인데 초안 말고", NOW)["terms"], ["계약서"])
         self.assertEqual(find.parse_query("invoice 2024", NOW)["terms"], ["invoice", "2024"])
 
@@ -220,7 +228,7 @@ class FindTest(unittest.TestCase):
                 patch("builtins.open", side_effect=AssertionError("content read")):
             result = self.search("계약서")
             self.assertEqual(result["results"][0]["flags"], ["내려받기 필요"])
-            zero = self.search("완전히없는이름")
+            zero = self.search("완전히없는이름", body=False)
             self.assertIn("범위 내 조건에 맞는 파일 없음", zero["notes"])
             self.assertIn("내려받기 필요 파일 존재", zero["notes"])
 
@@ -384,6 +392,152 @@ class FindBodyTest(unittest.TestCase):
         for budget in (-1, float('inf'), float('nan')):
             with self.assertRaises(ValueError):
                 self.search('검색', body=True, budget=budget)
+
+
+class FindExpansionTest(unittest.TestCase):
+    setUp = FindTest.setUp
+    tearDown = FindTest.tearDown
+    file = FindTest.file
+    paths = FindTest.paths
+    search = FindBodyTest.search
+
+    def test_acronyms_and_original_tokens(self):
+        for token, alias in (("엠티에이", "MTA"), ("케이씨씨", "KCC"), ("에이아이", "AI")):
+            with self.subTest(token=token):
+                parsed = find.parse_query(token)
+                self.assertEqual(parsed["terms"], [token])
+                self.assertEqual(parsed["aliases"], {token: alias})
+                path = self.file(alias + '.txt')
+                native = self.file(token + '.txt')
+                result = self.search(token)
+                self.assertEqual(set(self.paths(result)), {path, native})
+                row = next(r for r in result['results'] if r['path'] == path)
+                self.assertIn(f"'{token}' → {alias}", row['reasons'])
+        for token in ('이유', '지금', '아이스', '씨씨티비', '에이', 'MTA'):
+            self.assertEqual(find.parse_query(token)['aliases'], {})
+        self.assertEqual(len(find.LETTER_READINGS), 26)
+        for reading, letter in find.LETTER_READINGS.items():
+            self.assertEqual(find._acronym('에이' + reading), 'A' + letter)
+
+    def test_auto_body_zero_weak_and_all_before_partial(self):
+        full = self.file('alpha.txt')
+        full.write_text('외계어 은하수')
+        partial = self.file('beta.txt')
+        partial.write_text('외계어')
+        weak = self.file('외개어.txt')
+        weak.write_text('다른 내용')
+        result = self.search('외계어 은하수 사본 관련 문서 파일 그거 혹시')
+        self.assertEqual(self.paths(result), [full, partial, weak])
+        self.assertEqual(result['parsed']['phrases'], ['외계어', '은하수'])
+        self.assertIn('이름에 없어 본문까지 확인', result['results'][0]['reasons'])
+        self.assertTrue(any('후보 3개 중 3개 본문 확인' in n for n in result['notes']))
+        result = self.search('은하수')
+        self.assertEqual(self.paths(result), [full])
+
+    def test_no_expansion_for_strong_names_explicit_off_or_filters(self):
+        from ro import findindex
+        self.file('외계어.txt').write_text('은하수')
+        with patch.object(findindex.Index, 'ensure', side_effect=AssertionError('body read')):
+            for query, options in (('외계어', {}), ('계어', {}), ('은하수', {'body': False}),
+                                   ('"은하수"', {'body': False}), ('텍스트', {}), ('올해', {}),
+                                   ('올해 텍스트', {}), ('달', {}), ('사본 그거', {})):
+                self.search(query, **options)
+        result = self.search('외계어', body=True)
+        self.assertFalse(result['results'])
+
+    def test_extension_only_and_spotlight_confirmation_are_weak(self):
+        self.file('sample.skill').write_text('다른 내용')
+        hit = self.file('alpha.txt')
+        hit.write_text('skill')
+        result = self.search('skill')
+        self.assertEqual(self.paths(result)[0], hit)
+        weak = self.file('외개어.txt')
+        hit.write_text('외계어')
+        def runner(args, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=str(weak) + '\0' if args[0] == 'mdfind' else '')
+        result = find.search('외계어', roots=[self.root], runner=runner, home=self.base / 'state')
+        self.assertEqual(self.paths(result)[0], hit)
+        self.assertIn('Spotlight 확인', result['results'][1]['reasons'])
+
+    def test_failure_and_budget_keep_names_without_exception_text(self):
+        from ro import findindex
+        weak = self.file('외개어.txt')
+        self.file('alpha.txt').write_text('외계어')
+        with patch.object(findindex.Index, 'ensure', side_effect=OSError('private error')):
+            result = self.search('외계어')
+        self.assertEqual(self.paths(result), [weak])
+        self.assertTrue(any('실패' in n and '이름 검색 결과 유지' in n for n in result['notes']))
+        self.assertNotIn('private error', str(result))
+        result = self.search('외계어', budget=0)
+        self.assertEqual(self.paths(result), [weak])
+        self.assertTrue(any('시간 예산 초과' in n for n in result['notes']))
+        self.assertTrue(any('본문 확인' in n for n in result['notes']))
+        with patch.object(findindex.Index, 'search', side_effect=TimeoutError()):
+            self.assertEqual(self.paths(self.search('외계어')), [weak])
+
+    def test_automatic_hard_filters_and_safe_scope(self):
+        from ro import findindex
+        good = self.file('alpha.txt')
+        good.write_text('외계어')
+        self.file('secret/alpha.txt').write_text('외계어')
+        self.file('초안.txt').write_text('외계어')
+        self.file('beta.csv').write_text('외계어')
+        old = self.file('old.txt')
+        old.write_text('외계어')
+        os.utime(old, (0, 0))
+        outside = self.base / 'outside.txt'
+        outside.write_text('외계어')
+        (self.root / 'link.txt').symlink_to(outside)
+        original = findindex.Index.ensure
+        seen = []
+        def ensure(index, paths, **kwargs):
+            seen.extend(paths)
+            return original(index, paths, **kwargs)
+        with patch.object(findindex.Index, 'ensure', ensure):
+            result = self.search('외계어 올해 텍스트 초안 제외')
+        self.assertEqual(seen, [good])
+        self.assertEqual(self.paths(result), [good])
+
+    def test_alias_body_and_no_double_counting(self):
+        both = self.file('alpha.txt')
+        both.write_text('MTA 엠티에이')
+        complete = self.file('beta.txt')
+        complete.write_text('MTA 은하수')
+        result = self.search('엠티에이 은하수')
+        self.assertEqual(self.paths(result), [complete, both])
+        self.assertIn("'엠티에이' → MTA", result['results'][0]['reasons'])
+        self.assertEqual(self.paths(self.search('엠티에이', body=True)), [both, complete])
+        self.assertEqual(self.paths(self.search('"엠티에이 은하수"')), [complete])
+
+    def test_body_hit_in_weak_family_is_not_duplicated_or_hidden(self):
+        old = self.file('외개어.txt')
+        old.write_text('외계어')
+        newer = self.file('외개어_1.txt', '2026-10-26T12:00:00')
+        result = self.search('외계어')
+        self.assertEqual(self.paths(result), [old])
+        self.assertEqual([s['path'] for s in result['results'][0]['siblings']], [newer])
+        self.assertIn('다른 버전 1개', result['results'][0]['flags'])
+
+    def test_siblings_cli_and_adapter_order(self):
+        siblings = [self.file('sample' + suffix + '.txt', f'2026-10-{day:02d}T12:00:00')
+                    for day, suffix in enumerate(('', '_final', '_최종', '_2', ' (1)'), 20)]
+        self.file('secret/sample.txt')
+        outside = self.base / 'sample.txt'
+        outside.touch()
+        (self.root / 'sample_3.txt').symlink_to(outside)
+        result = self.search('sample')
+        row = result['results'][0]
+        self.assertEqual(row['path'], siblings[-1])
+        self.assertEqual([s['path'] for s in row['siblings']], list(reversed(siblings[1:-1])))
+        self.assertIn('다른 버전 4개', row['flags'])
+        with patch.object(find, 'search', return_value=result), patch.object(Path, 'home', return_value=self.base):
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.main(['find', 'sample', '--no-spotlight'])
+            lines = out.getvalue().splitlines()
+            self.assertTrue(lines[1].startswith('   ↳ 비슷한 파일: ~/Documents/'))
+            self.assertTrue(lines[1].endswith(' — 수정 2026-10-23'))
+            self.assertEqual(find.searcher([self.root])('sample'), [siblings[-1], *reversed(siblings[1:-1])])
 
 
 if __name__ == "__main__":
