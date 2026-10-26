@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import ask, config, fsutil, harden, learn, log, mapper, organize, recall, records, route
+from . import ask, config, findui, fsutil, harden, learn, log, mapper, organize, recall, records, route
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -215,6 +215,7 @@ class PetRuntime:
         self._focus_base = 0
         self._preview = None
         self._cancel = threading.Event()
+        self.finder = findui.FindSession(self.home)  # 파일 찾기: 결과 경로는 서버만 쥐고 화면에는 번호만 준다
         self.focus_on = bool(self.prefs().get("focus"))  # 재시작해도 집중 모드를 이어 간다
 
     def trigger_action(self, action, duration=4.0):
@@ -2248,6 +2249,41 @@ PET_HTML = r"""<!DOCTYPE html>
   .rec-org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
   .rec-org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
   .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
+  /* F · 파일 찾기 (Pencil 08 · 파일 찾기 시안) */
+  .fd-list { display: flex; flex-direction: column; gap: 2px; }
+  .fd-row {
+    display: flex; gap: 8px; align-items: flex-start; width: 100%; padding: 7px 8px; border-radius: 10px;
+    border: 1px solid transparent; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
+  }
+  .fd-row:hover { background: var(--panel-bg); }
+  .fd-row.sel { background: var(--panel-bg); border-color: var(--panel-border); }
+  .fd-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .fd-glyph {
+    flex: none; width: 30px; height: 30px; border-radius: 9px; background: var(--divider); display: grid; place-items: center;
+    font: 700 8.5px ui-monospace, Menlo, monospace; letter-spacing: 0.2px;
+  }
+  .fd-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .fd-name { font-size: 12.5px; font-weight: 800; overflow-wrap: anywhere; line-height: 1.3; }
+  .fd-where { font: 10px ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .fd-why { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
+  .fd-flag { align-self: flex-start; font-size: 9.5px; font-weight: 800; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
+  .fd-snip { font-size: 10.5px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 7px; line-height: 1.45; overflow-wrap: anywhere; }
+  .fd-sib { font-size: 10px; color: var(--muted); padding: 0 8px 4px 46px; overflow-wrap: anywhere; }
+  .fd-n { flex: none; font: 10px ui-monospace, Menlo, monospace; color: var(--muted); padding-top: 2px; }
+  .fd-note { display: flex; gap: 6px; align-items: flex-start; background: var(--panel-bg); border-radius: 9px; padding: 5px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; }
+  .fd-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .fd-actions .mini-btn { padding: 5px 12px; font-size: 11px; }
+  .mini-btn[disabled] { opacity: 0.5; cursor: default; }
+  .fd-sub { font-size: 10.5px; font-weight: 800; color: var(--muted); }
+  .fd-consent { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .fd-consent ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; }
+  .fd-consent li::before { content: "✓"; color: var(--accent-text); font-weight: 800; margin-right: 6px; }
+  .fd-input-row { display: flex; gap: 6px; }
+  .fd-input {
+    flex: 1; min-width: 0; border: 1px solid var(--panel-border); background: var(--panel-bg); color: inherit; border-radius: 10px;
+    padding: 6px 8px; font: inherit; font-size: 11px; user-select: text; -webkit-user-select: text;
+  }
+  .fd-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* B · ⌥R 명령 팔레트 */
   .palette {
     position: absolute; inset: 0; z-index: 6; border-radius: 20px; padding: 10px;
@@ -2423,6 +2459,8 @@ PET_HTML = r"""<!DOCTYPE html>
 
       <!-- C · 근거 붙은 답 -->
       <div id="recallCard" class="rc-card" style="display:none;" aria-live="polite"></div>
+      <!-- F · 파일 찾기 -->
+      <div id="findCard" class="rc-card fd-card" style="display:none;" aria-live="polite"></div>
       <!-- D · 미리 보고 되돌리는 정리 -->
       <div id="recOrgCard" class="rec-org-card" style="display:none;" aria-live="polite"></div>
 
@@ -2564,6 +2602,7 @@ PET_HTML = r"""<!DOCTYPE html>
       <div class="gate-actions">
         <button id="sendApproveBtn" class="action-btn primary">보내기</button>
         <button id="sendRecordBtn" class="action-btn ghost">기록으로만 남기기</button>
+        <button id="sendFindBtn" class="action-btn ghost" title="엔진에 보내지 않고 내 파일에서 찾아요">내 파일에서 찾기</button>
         <button id="sendCancelBtn" class="action-btn ghost">취소</button>
       </div>
     </div>
@@ -2675,6 +2714,7 @@ const activityMoreBtn = document.getElementById("activityMoreBtn");
 const timelineMore = document.getElementById("timelineMore");
 const writeFiles = document.getElementById("writeFiles");
 const sendCard = document.getElementById("sendCard");
+const findCard = document.getElementById("findCard");
 const sendHead = document.getElementById("sendHead");
 const sendText = document.getElementById("sendText");
 const askCancelBtn = document.getElementById("askCancelBtn");
@@ -3589,6 +3629,7 @@ async function submitInput(q) {
     if (ok === false && !askInput.value) { askInput.value = q; askInput.dispatchEvent(new Event("input")); }
     return;
   }
+  if (!p.slash && FIND_VERB.test(q) && FIND_NOUN.test(q) && !NOT_FILE.test(q)) { await runFind(q); return; }
   if (!p.slash && RECALL_INTENT.test(q)) { await runRecall(q); return; }
   await previewAsk(q);
 }
@@ -3627,6 +3668,7 @@ async function sendAsk() {
   switchTab("home");  // 진행·취소·답은 홈의 답변 카드에 나온다: 다른 탭에서 보내도 보이게
   recallShown = false;
   recallCard.style.display = "none";
+  findCard.style.display = "none";
   recOrgCard.style.display = "none";
   askInput.disabled = true;
   askSubmit.disabled = true;
@@ -4426,6 +4468,7 @@ async function runRecall(q) {
   setBubbleOpen(true);
   switchTab("home");
   recOrgCard.style.display = "none";
+  findCard.style.display = "none";
   const items = (r.items || []).map(i => h("li", {}, h("span", { text: i.text }), h("sup", { class: "rc-n", text: i.n })));
   const ev = (r.evidence || []).length ? h("details", { class: "rc-ev" },
     h("summary", { text: `근거 · 기록 ${r.evidence.length}건` }),
@@ -4451,6 +4494,160 @@ async function runRecall(q) {
   recallShown = true;
   hideSendCard();
 }
+
+/* F · 파일 찾기: 결과 경로는 서버만 쥐고 화면에는 번호만 오간다 */
+let findRes = null, findSel = 1, findMissing = false, findBusy = false, findAll = false;
+const FIND_FOLD = 5;  // 처음엔 5개만: 나머지는 눌러서 펼친다
+function fdRow(it) {
+  const sel = it.rank === findSel;
+  const why = [...(it.reasons || []), ...(it.flags || []).filter(f => f !== "내려받기 필요")].join(" · ");
+  return h("div", { class: "fd-item" },
+    h("button", { class: "fd-row" + (sel ? " sel" : ""), type: "button", role: "option", "aria-selected": sel ? "true" : "false",
+        "data-rank": it.rank, onclick: () => { findSel = it.rank; renderFind(); },
+        ondblclick: () => findOpen(it.rank, it.dataless) },
+      h("span", { class: "fd-glyph", "aria-hidden": "true", text: it.ext }),
+      h("span", { class: "fd-copy" },
+        h("span", { class: "fd-name", text: it.name }),
+        h("span", { class: "fd-where", text: it.where }),
+        why ? h("span", { class: "fd-why", text: why }) : null,
+        it.dataless ? h("span", { class: "fd-flag", text: "내려받기 필요" }) : null,
+        it.snippet ? h("span", { class: "fd-snip", text: it.snippet }) : null),
+      h("span", { class: "fd-n", text: it.rank })),
+    (it.siblings || []).map(s => h("div", { class: "fd-sib", text: `↳ 비슷한 파일 · ${s.name}${s.modified ? " · 수정 " + s.modified : ""}` })),
+    sel ? h("div", { class: "fd-actions fd-row-actions" },
+      it.dataless
+        ? h("button", { class: "mini-btn primary", type: "button", text: "Finder에서 보기", onclick: () => findOpen(it.rank, true) })
+        : [h("button", { class: "mini-btn primary", type: "button", text: "열기  ↵", onclick: () => findOpen(it.rank, false) }),
+           h("button", { class: "mini-btn", type: "button", text: "Finder에서 보기", onclick: () => findOpen(it.rank, true) })]) : null);
+}
+async function runFind(q, body) {
+  q = String(q || "").trim();
+  if (!q) { askInput.value = "/파일 "; askInput.focus(); return; }
+  pushRecent(q);
+  setBubbleOpen(true);
+  switchTab("home");
+  recallCard.style.display = "none";
+  recOrgCard.style.display = "none";
+  answerCard.style.display = "none";
+  recallShown = false;
+  hideSendCard();
+  findRes = null; findSel = 1; findMissing = false; findBusy = true; findAll = false;
+  fill(findCard, h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: "찾는 중…" }),
+    h("div", { class: "block-sub", text: "이름·종류·기간을 먼저 보고, 없으면 내용까지 봐요." }));
+  findCard.style.display = "flex";
+  findCard.scrollIntoView({ block: "start" });  // 홈 위쪽 통계 대신 결과가 먼저 보이게
+  let r = null;
+  try { r = await apiPost("/api/find", body === undefined ? { question: q } : { question: q, body }); } catch (err) { r = null; }
+  findBusy = false;
+  findRes = r || { ok: false, error: "서버에 연결하지 못했어요." };
+  if (findRes.ok && findRes.items.length) findSel = findRes.items[0].rank;
+  else if (findRes.ok && findRes.relaxed.length) findSel = findRes.relaxed[0].items[0].rank;
+  findMissing = !!(findRes.ok && !findRes.items.length);
+  renderFind();
+  findCard.scrollIntoView({ block: "start" });  // 결과가 길어도 맨 위(제목·첫 결과)부터
+}
+function renderFind() {
+  const r = findRes;
+  if (!r) return;
+  if (!r.ok) {
+    fill(findCard, h("div", { class: "rc-head", text: "찾지 못했어요" }), h("div", { class: "block-sub", text: r.error || "다시 시도해 주세요." }));
+    return;
+  }
+  const groups = r.relaxed || [];
+  const all = [...r.items, ...groups.flatMap(g => g.items)];
+  const sel = all.find(i => i.rank === findSel) || null;
+  const head = r.items.length
+    ? (r.body ? "내용까지 보고 찾았어요" : `후보 ${r.n}개를 찾았어요`)
+    : (r.body ? "이름도 내용도 못 찾았어요" : "못 찾았어요");
+  const shown = findAll ? r.items : r.items.filter(i => i.rank <= FIND_FOLD || i.rank === findSel);
+  const hidden = r.items.length - shown.length;
+  const moreBtn = !r.body
+    ? h("button", { class: "mini-btn", type: "button", text: "내용까지 보기", onclick: () => runFind(r.query, true) }) : null;
+  fill(findCard,
+    h("div", { class: "rc-q", text: r.query }),
+    h("div", { class: "rc-head", text: head }),
+    (r.notes || []).slice(0, 3).map(n => h("div", { class: "fd-note" }, h("span", { "aria-hidden": "true", text: "ⓘ" }), h("span", { text: n }))),
+    r.items.length ? h("div", { class: "fd-list", role: "listbox", "aria-label": "찾은 파일" }, shown.map(fdRow)) : null,
+    hidden > 0 ? h("button", { class: "link-btn", type: "button", text: `나머지 ${hidden}개 보기`, onclick: () => { findAll = true; renderFind(); } }) : null,
+    groups.map(g => h("div", { class: "fd-list" },
+      h("div", { class: "fd-sub", text: g.message }), h("div", { role: "listbox", "aria-label": g.message }, g.items.map(fdRow)))),
+    moreBtn ? h("div", { class: "fd-actions" }, moreBtn) : null,
+    findMissing || !all.length ? findMissingBlock(r) : h("button", { class: "link-btn", type: "button", text: "원하는 파일이 없어요",
+      onclick: () => { findMissing = true; renderFind(); } }),
+    r.consent && all.length ? findConsentCard() : null,
+    h("div", { class: "rc-foot", text: `${r.ms}ms · Downloads · Documents · Desktop · iCloud Drive 안에서만 찾아요. 비밀 파일은 보지 않아요.` }));
+  findCard.style.display = "flex";
+}
+function findMissingBlock(r) {
+  const box = h("div", { class: "fd-consent" });
+  box.append(h("div", { class: "fd-sub", text: "원하는 파일이 없었나요?" }));
+  if (r.recording) {
+    const input = h("input", { class: "fd-input", type: "text", "aria-label": "찾던 파일 경로", autocomplete: "off",
+      placeholder: "찾던 파일 경로 (Finder에서 선택 후 ⌥⌘C로 복사)" });
+    const send = h("button", { class: "mini-btn primary", type: "button", text: "알려 주기", onclick: async () => {
+      const path = input.value.trim();
+      if (!path) { input.focus(); return; }
+      let res = null;
+      try { res = await apiPost("/api/find/pick", { rank: null, answer: path }); } catch (err) { res = null; }
+      const msg = !res ? "서버에 연결하지 못했어요." : !res.ok ? res.error
+        : res.found_rank ? `목록 ${res.found_rank}번에 있었어요. 기억했어요.` : "목록에 없던 파일이에요. 기억했어요.";
+      showToast([h("div", { class: "toast-head", text: msg })], 4500);
+      if (res && res.ok) { input.value = ""; findMissing = false; renderFind(); }
+    } });
+    box.append(h("div", { class: "block-sub", text: "알려 주시면 다음부터 더 잘 찾아요. 기록은 이 컴퓨터에만 남아요." }),
+      h("div", { class: "fd-input-row" }, input, send));
+  } else {
+    box.append(h("div", { class: "block-sub", text: "고른 걸 기억하면 찾던 파일을 알려 줄 수 있어요. (지금은 꺼져 있어요)" }),
+      h("div", { class: "fd-actions" }, h("button", { class: "mini-btn primary", type: "button", text: "기억하기 켜기", onclick: () => findSignals(true) })));
+  }
+  box.append(h("div", { class: "fd-actions" }, h("button", { class: "mini-btn", type: "button", text: "엔진에 물어보기", onclick: () => previewAsk(r.query) })));
+  return box;
+}
+function findConsentCard() {
+  return h("div", { class: "fd-consent", role: "region", "aria-label": "고른 걸 기억할까요?" },
+    h("div", { class: "rc-head", text: "고른 걸 기억할까요?" }),
+    h("div", { class: "block-sub", text: "찾은 뒤 어떤 결과를 열었는지만 기록해서, 자주 쓰는 폴더나 내가 부르는 말을 배워요." }),
+    h("ul", {}, h("li", { text: "질문 원문과 파일 내용은 저장하지 않아요" }), h("li", { text: "이 컴퓨터 밖으로 나가지 않아요" }),
+      h("li", { text: "언제든 끄고 지울 수 있어요 (ro find-signals off · clear)" })),
+    h("div", { class: "fd-actions" },
+      h("button", { class: "mini-btn primary", type: "button", text: "기억하기 켜기", onclick: () => findSignals(true) }),
+      h("button", { class: "mini-btn", type: "button", text: "나중에", onclick: () => findSignals(null) })),
+    h("div", { class: "block-sub", text: "배운 건 제안으로만 보여 줘요. 승인한 것만 반영돼요." }));
+}
+async function findSignals(on) {
+  let r = null;
+  try { r = await apiPost("/api/find/signals", on === null ? { later: true } : { on }); } catch (err) { r = null; }
+  if (findRes && findRes.ok && r && r.ok) { findRes.consent = false; findRes.recording = on === true ? true : findRes.recording; renderFind(); }
+  if (on === true) showToast([h("div", { class: "toast-head", text: r && r.ok ? "기억하기를 켰어요" : "켜지 못했어요" }),
+    h("div", { class: "block-sub", text: "끄기: ro find-signals off · 지우기: ro find-signals clear" })], 4500);
+}
+async function findOpen(rank, reveal) {
+  let r = null;
+  try { r = await apiPost("/api/find/open", { rank, reveal: !!reveal }); } catch (err) { r = null; }
+  showToast([h("div", { class: "toast-head", text: !r ? "서버에 연결하지 못했어요." : !r.ok ? r.error
+    : reveal ? "Finder에서 보여 드렸어요" : "열었어요" })], r && r.ok ? 2200 : 5500);
+}
+window.addEventListener("keydown", (e) => {
+  if (findCard.style.display === "none" || !findRes || !findRes.ok || !palette.hidden || e.metaKey || e.ctrlKey || e.altKey) return;
+  const a = document.activeElement;
+  if (a && a !== document.body && !(a === askInput && !askInput.value) && !(a.classList && a.classList.contains("fd-row"))) return;
+  const ranks = [...findRes.items, ...(findRes.relaxed || []).flatMap(g => g.items)].map(i => i.rank);
+  const at = ranks.indexOf(findSel);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    if (!ranks.length) return;
+    e.preventDefault();
+    findSel = ranks[Math.max(0, Math.min(ranks.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)))];
+    renderFind();
+  } else if (e.key === "Enter" && ranks.length && !(a && a.tagName === "BUTTON" && !a.classList.contains("fd-row"))) {
+    const it = [...findRes.items, ...(findRes.relaxed || []).flatMap(g => g.items)].find(i => i.rank === findSel);
+    if (it) { e.preventDefault(); findOpen(it.rank, it.dataless); }
+  }
+});
+document.getElementById("sendFindBtn").addEventListener("click", () => {
+  const q = pendingSend && pendingSend.q;
+  hideSendCard();
+  if (q) runFind(q);
+});
 
 /* D · 미리 보고 되돌리는 정리 */
 async function showRecordOrganize() {
@@ -4497,9 +4694,14 @@ const COMMANDS = [
   { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)" },
   { id: "today", label: "/오늘", desc: "오늘 요약 보기" },
   { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true },
+  { id: "file", label: "/파일", desc: "내 파일 찾기 (이름·내용·기간)", arg: true },
   { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기" },
 ];
 // 내 기록을 묻는 말만 로컬 회상으로 보낸다. '오늘'·'어제'만 붙은 일반 요청("오늘 alpha 구조 설명해줘")은 질문이다
+// 파일을 찾는 말: 찾는 동사와 파일 명사가 함께 있을 때만. "이 파일 설명해줘" 같은 질문은 그대로 엔진 확인으로 간다
+const FIND_VERB = /(찾아\s*줘|찾아줘|찾아\s*봐|찾고\s*있|찾는|어디\s*(있|갔|에\s*있)|어딨|있더라|뭐였더라)/;
+const FIND_NOUN = /(파일|문서|자료|보고서|계약서|사진|이미지|스크린샷|pdf|xlsx?|docx?|pptx?|hwpx?|엑셀|ppt|한글)/i;
+const NOT_FILE = /(기록|로그|커밋|한\s*일)/;
 const RECALL_INTENT = /(뭐\s*했|무엇을\s*했|했[어지니나]\s*\??$|한\s*일|기록(에서|을|\s*찾|\s*보)|찾아\s*줘|찾기)/;
 let palIndex = 0, palRows = [], lastFocus = null;
 function recentList() {
@@ -4561,6 +4763,7 @@ async function runCommand(c, arg) {
   if (c.id === "organize") await showRecordOrganize();
   else if (c.id === "today") await runRecall("오늘 뭐 했지?");
   else if (c.id === "find") await runRecall(`${arg} 기록 찾아줘`);
+  else if (c.id === "file") await runFind(arg);
   else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
   return true;
 }
@@ -4715,6 +4918,17 @@ def make_handler(runtime):
                     self._send_json(200, runtime.resolve_write_approval(data["approve"], data.get("id")))
             elif parsed.path == "/api/recall":
                 self._send_json(200, runtime.recall_question(data.get("question", "")))
+            elif parsed.path == "/api/find":
+                self._send_json(200, runtime.finder.search(data.get("question"), data.get("body")))
+            elif parsed.path == "/api/find/open":
+                self._send_json(200, runtime.finder.open(data.get("rank"), data.get("reveal") is True))
+            elif parsed.path == "/api/find/pick":
+                self._send_json(200, runtime.finder.pick(data.get("rank"), data.get("answer")))
+            elif parsed.path == "/api/find/signals":
+                if data.get("later") is True:
+                    self._send_json(200, runtime.finder.dismiss_consent())
+                else:
+                    self._send_json(200, runtime.finder.signals(data.get("on")))
             elif parsed.path == "/api/capture":
                 self._send_json(200, runtime.capture(data.get("kind", ""), data.get("name", ""),
                                                      data.get("text", ""), data.get("size", 0)))
