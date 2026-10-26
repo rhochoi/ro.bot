@@ -70,7 +70,7 @@ class PetUiTest(unittest.TestCase):
         # reduced_motion으로 전환 중간색 오탐을 없애 결정적으로 측정한다
         for theme in ("ink", "chalk"):
             for tab, extra in (("home", None), ("home", "#filterStatsBtn"), ("timeline", None), ("organize", None),
-                               ("settings", None), ("settings", ".preview-block > summary")):
+                               ("settings", None)):
                 with self.subTest(theme=theme, tab=tab, extra=extra):
                     page = self.open_page(reduced_motion="reduce")
                     page.evaluate(f"document.body.classList.toggle('theme-chalk', {str(theme == 'chalk').lower()})")

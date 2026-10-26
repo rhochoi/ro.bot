@@ -104,7 +104,9 @@ ACTION_DESCS = {
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
+TINT_PRESETS = {"sage": "#8FB39A", "sky": "#8EBBE0", "lilac": "#B7A4E0"}
 PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk"),
+                "glass": ("auto", "light", "dark"), "tint": ("none", *TINT_PRESETS),
                 "focus": (True, False)}
 RECENT_MAX = 10
 TIMELINE_MAX = 60
@@ -646,6 +648,7 @@ class PetRuntime:
             "prefs": self.prefs(),
             "stats": stats,
             "last_answer": safe_answer,
+            "can_clear_notice": bool(last_answer or last_route_failed),
             "busy": busy,  # 새로고침해도 '답을 기다리는 중'과 취소 버튼을 되살린다
             "busy_question": log.redact(busy_task) if busy else "",
             "setup": self._setup_state(mapdata),
@@ -684,7 +687,7 @@ class PetRuntime:
         mapdata = ask.load_map(self.map_path, self.home)
         if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
             return None, {"ok": False, "reason": "needs_setup",
-                          "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
+                          "output": "프로젝트 지도가 없습니다. 터미널에서 ro map으로 스캔할 폴더를 확인하고 지도를 만드세요."}
         # 펫이 실행된 폴더(os.getcwd())는 사용자가 지금 보는 곳이 아니다: 질문이 가리키는 프로젝트만 붙인다
         pl = ask.plan(question, mapdata, cwd=cwd, use_context=True,
                       engine=engine or config.load(self.home).get("engine") or None,
@@ -859,8 +862,6 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   /* 분필(Chalk) 다크 모드 */
   body.theme-chalk {
-    --bot-fill: var(--ink);
-    --bot-eye: var(--chalk);
     --panel-bg: #232220;
     --panel-fg: #F3EFE6;
     --panel-soft: #2E2C29;
@@ -872,6 +873,11 @@ PET_HTML = r"""<!DOCTYPE html>
     --bubble-fill: #F3EFE6;
     --bubble-fg: #1A1917;
   }
+  /* 펫 몸통은 상태창 테마와 따로: 설정의 "유리 색"(기본은 macOS 화면 모드)을 따른다 */
+  body.glass-dark {
+    --bot-fill: var(--ink);
+    --bot-eye: var(--chalk);
+  }
   * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
   html, body {
     margin: 0; padding: 0;
@@ -882,7 +888,8 @@ PET_HTML = r"""<!DOCTYPE html>
     overflow: hidden;
   }
   /* 브라우저 모드(--browser): 투명 오버레이가 아니므로 배경을 깔아 카드·글자 대비를 지킨다 */
-  body.web { background: #DCD6CA; }
+  body.web { background: #DCD6CA; overflow-y: auto; }
+  body.web .stage { min-height: 398px; }
   @media (prefers-color-scheme: dark) {
     body.web { background: #2F2C28; }
   }
@@ -908,7 +915,7 @@ PET_HTML = r"""<!DOCTYPE html>
      말풍선 패널 (Ro의 말풍선 메타포 카드)
      ========================================================= */
   .bubble {
-    width: 332px;
+    width: 356px;
     background: var(--panel-bg);
     color: var(--panel-fg);
     border: 1.5px solid var(--panel-border);
@@ -922,10 +929,10 @@ PET_HTML = r"""<!DOCTYPE html>
     transition: opacity 0.16s ease, transform 0.16s cubic-bezier(.22,1,.36,1), background-color 0.2s ease, border-color 0.2s ease;
     transform-origin: bottom right;
     position: relative;
-    max-height: 440px;
-    /* 오버레이 창(360×530)에서 펫 높이를 뺀 만큼만 차지한다: 넘치면 탭 내용만 스크롤 */
-    min-height: 0;
-    flex: 0 1 auto;
+    /* 펫 124px + 바깥 여백 26px + 간격 8px를 제외한 높이는 탭과 무관하게 고정 */
+    height: calc(100vh - 158px);
+    min-height: 240px;
+    flex: 0 0 auto;
     box-sizing: border-box;
   }
   .bubble > .bubble-top, .bubble > .ask-form, .bubble > .toast { flex-shrink: 0; }
@@ -979,8 +986,9 @@ PET_HTML = r"""<!DOCTYPE html>
 
   /* 상단 헤더 & 네비게이션 */
   .bubble-top {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
     align-items: center;
     padding-bottom: 7px;
     border-bottom: 1px solid var(--divider);
@@ -999,6 +1007,8 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-fg);
   }
   .nav-tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -1008,12 +1018,13 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
   }
   .nav-tab {
+    flex: 1;
     background: transparent;
     border: none;
     color: var(--muted);
     padding: 2.5px 8px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     transition: background 0.14s ease, color 0.14s ease;
@@ -1027,6 +1038,8 @@ PET_HTML = r"""<!DOCTYPE html>
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
   .top-right {
+    grid-column: 2;
+    grid-row: 1;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1037,7 +1050,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: none;
     border-radius: 999px;
     padding: 2.5px 7px;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
   }
@@ -1051,8 +1064,8 @@ PET_HTML = r"""<!DOCTYPE html>
     font-size: 11px;
     font-weight: 700;
     cursor: pointer;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -1088,7 +1101,7 @@ PET_HTML = r"""<!DOCTYPE html>
     line-height: 1.25;
   }
   .greeting-sub {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--muted);
     line-height: 1.35;
   }
@@ -1103,7 +1116,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: none;
     border-radius: 999px;
     padding: 2.5px 9px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     transition: all 0.14s;
@@ -1141,7 +1154,7 @@ PET_HTML = r"""<!DOCTYPE html>
     line-height: 1.1;
   }
   .metric-label {
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--muted);
   }
@@ -1162,7 +1175,7 @@ PET_HTML = r"""<!DOCTYPE html>
     gap: 5px;
   }
   .gate-head {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     color: var(--accent-text);
     letter-spacing: 0.02em;
@@ -1176,12 +1189,12 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .gate-files {
     margin: 0; padding: 0 0 0 2px; list-style: none; max-height: 92px; overflow-y: auto;
-    font-size: 10.5px; line-height: 1.4; color: var(--panel-fg);
+    font-size: 11px; line-height: 1.4; color: var(--panel-fg);
   }
   .gate-files li { display: flex; gap: 4px; white-space: nowrap; }
   .gate-files li span { overflow: hidden; text-overflow: ellipsis; }
   .gate-files li .arrow { color: var(--muted); flex-shrink: 0; }
-  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 10px; color: var(--muted); }
+  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 11px; color: var(--muted); }
   .gate-actions {
     display: flex;
     flex-wrap: wrap;
@@ -1191,7 +1204,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .action-btn {
     border-radius: 999px;
     padding: 3px 10px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     border: 1px solid transparent;
@@ -1305,7 +1318,7 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
     padding-left: 2px;
   }
@@ -1319,7 +1332,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
     border-radius: 999px;
     padding: 2px 7px;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
   }
@@ -1333,7 +1346,7 @@ PET_HTML = r"""<!DOCTYPE html>
     margin-top: 1px;
   }
   .section-label {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 800;
     color: var(--muted);
     letter-spacing: -0.01em;
@@ -1343,7 +1356,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--muted);
     padding: 1.5px 6px;
     border-radius: 999px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     border: 1px solid var(--panel-border);
   }
@@ -1386,7 +1399,7 @@ PET_HTML = r"""<!DOCTYPE html>
     letter-spacing: -0.01em;
   }
   .act-time {
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
     flex-shrink: 0;
   }
@@ -1461,14 +1474,14 @@ PET_HTML = r"""<!DOCTYPE html>
   .orange-tag {
     background: var(--accent-strong);
     color: #FFFFFF;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 800;
     padding: 2.5px 7.5px;
     border-radius: 6px;
     letter-spacing: -0.01em;
   }
   .timeline-counter {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
     font-weight: 600;
   }
@@ -1503,7 +1516,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .timeline-meta {
     display: flex;
     justify-content: space-between;
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
     font-weight: 600;
   }
@@ -1532,38 +1545,11 @@ PET_HTML = r"""<!DOCTYPE html>
     padding-bottom: 0;
   }
   .block-title {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.02em;
-  }
-  .mood-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 5px;
-  }
-  .mood-btn {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    padding: 5px 4px;
-    font-size: 10px;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: center;
-    transition: all 0.12s;
-  }
-  .mood-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .mood-btn.active {
-    background: var(--accent-strong);
-    color: #FFFFFF;
-    border-color: var(--accent-strong);
-    font-weight: 800;
   }
   .options-row {
     display: flex;
@@ -1578,7 +1564,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
     border-radius: 8px;
     padding: 4px 6px;
-    font-size: 9.8px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     text-align: center;
@@ -1610,7 +1596,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-fg);
   }
   .toggle-sub {
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
   }
   .switch {
@@ -1619,7 +1605,8 @@ PET_HTML = r"""<!DOCTYPE html>
     width: 38px;
     height: 22px;
   }
-  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; width: 100%; height: 100%; }
+  .switch:focus-within .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
   .slider {
     position: absolute;
     cursor: pointer;
@@ -1647,32 +1634,6 @@ PET_HTML = r"""<!DOCTYPE html>
   input:checked + .slider:before {
     transform: translateX(16px);
     background-color: #FFFFFF;
-  }
-  .act-chips-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .act-btn {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 2.5px 7px;
-    font-size: 9.5px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-  .act-btn:hover {
-    background: var(--panel-fg);
-    color: var(--panel-bg);
-  }
-  .act-btn.active {
-    background: var(--accent-strong) !important;
-    color: #FFFFFF !important;
-    border-color: var(--accent-strong) !important;
-    font-weight: 800;
   }
 
   /* =========================================================
@@ -1739,7 +1700,7 @@ PET_HTML = r"""<!DOCTYPE html>
       inset 0 -3px 6px rgba(26, 25, 23, 0.20),
       0 3px 7px rgba(15, 14, 13, 0.32);
   }
-  body.theme-chalk.material-clay .pill {
+  body.glass-dark.material-clay .pill {
     border: none;
     box-shadow:
       inset 0 2.5px 4px rgba(255, 255, 255, 0.22),
@@ -1830,7 +1791,7 @@ PET_HTML = r"""<!DOCTYPE html>
     -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
     transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
   }
-  body.theme-chalk.material-glass .g-env {
+  body.glass-dark.material-glass .g-env {
     --env-sky: rgba(190, 200, 225, 0.30);
     --env-haze: rgba(120, 132, 165, 0.20);
     --env-horizon: rgba(0, 0, 0, 0.30);
@@ -1856,12 +1817,12 @@ PET_HTML = r"""<!DOCTYPE html>
     --g-tint-bot: rgba(255, 255, 255, 0.04);
     backdrop-filter: none; -webkit-backdrop-filter: none;
   }
-  body.theme-chalk.material-glass.native-glass-blur .pill {
+  body.glass-dark.material-glass.native-glass-blur .pill {
     --g-tint-top: rgba(40, 42, 52, 0.25);
     --g-tint-bot: rgba(14, 15, 20, 0.30);
   }
   /* 어두운 색상 모드: 연기 낀 유리 */
-  body.theme-chalk.material-glass .pill {
+  body.glass-dark.material-glass .pill {
     --g-tint-top: rgba(40, 42, 52, 0.55);
     --g-tint-bot: rgba(14, 15, 20, 0.62);
     --g-sheen: rgba(255, 255, 255, 0.30);
@@ -1870,17 +1831,17 @@ PET_HTML = r"""<!DOCTYPE html>
     --g-rim-soft: rgba(255, 255, 255, 0.18);
     --g-edge: rgba(0, 0, 0, 0.55);
   }
-  body.theme-chalk.material-glass .pill::before { opacity: 0.45; }
-  body.theme-chalk.material-glass .pill::after { opacity: 0.6; }
+  body.glass-dark.material-glass .pill::before { opacity: 0.45; }
+  body.glass-dark.material-glass .pill::after { opacity: 0.6; }
   /* 눈: 밝은 유리엔 진한 눈, 연기 유리엔 밝은 눈. 윤곽 광채는 상자 테두리(box-shadow)가 아니라
      실제로 칠한 모양을 따라가는 drop-shadow로 준다 — > < ∩ ◍ 모양에서 상자(마름모·반원)가 보이지 않게 */
   body.material-glass { --bot-eye: #15161A; }
-  body.theme-chalk.material-glass { --bot-eye: #F6F4EF; }
+  body.glass-dark.material-glass { --bot-eye: #F6F4EF; }
   body.material-glass .eyes {  /* 웃는 눈(⌒)도 .eyes 안에 있어 같은 광채를 받는다 */
     z-index: 2;
     filter: drop-shadow(0 0 0.8px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 1.6px rgba(255, 255, 255, 0.6));
   }
-  body.theme-chalk.material-glass .eyes {
+  body.glass-dark.material-glass .eyes {
     filter: drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
   }
 
@@ -2125,7 +2086,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: #f5f4ef;
     padding: 1.5px 7px;
     border-radius: 999px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 14px;
@@ -2152,31 +2113,37 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   [hidden] { display: none !important; }
   .gate-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-  .fb-done { font-size: 10.5px; color: var(--muted); }
+  .fb-done { font-size: 11px; color: var(--muted); }
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-cats:empty, .org-msg:empty { display: none; }
-  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+  .org-msg, .org-summary { font-size: 11px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
   .org-msg { white-space: pre-line; }  /* 건너뛴 파일과 이유를 한 줄씩 */
-  .stale-banner { flex-shrink: 0; font-size: 10.5px; line-height: 1.4; padding: 6px 9px; border-radius: 10px;
+  .stale-banner { flex-shrink: 0; font-size: 11px; line-height: 1.4; padding: 6px 9px; border-radius: 10px;
     background: var(--panel-soft); border: 1px solid var(--panel-border); color: var(--panel-fg); }
   .stale-banner[hidden] { display: none; }
+  .bubble button, .bubble input, .bubble select, .bubble summary, .bubble [role="option"], .bubble .switch {
+    min-width: 24px; min-height: 24px;
+  }
+  .bubble summary { cursor: pointer; font-size: 11px; }
+  #setupCard { border-color: var(--panel-border); background: var(--panel-soft); }
+  #timelineList:has(> .stats-empty), #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) { flex: 1; }
+  #timelineList > .stats-empty { flex: 1; display: grid; place-items: center; }
+  #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) > .org-summary { flex: 1; display: grid; place-items: center; }
   #setupText, #attentionText { white-space: pre-line; }
   #setupText code, #attentionText code { font: inherit; font-weight: 700; user-select: all; }
   .org-summary code, .org-msg code { white-space: nowrap; font: inherit; font-weight: 700; }
-  .block-sub { font-size: 10px; color: var(--muted); line-height: 1.4; }
-  .preview-block > summary { cursor: pointer; list-style: revert; }
-  .preview-block[open] { gap: 6px; }
+  .block-sub { font-size: 11px; color: var(--muted); line-height: 1.4; }
   .link-btn {
-    align-self: flex-start; background: none; border: none; padding: 2px 0; font: inherit; font-size: 10.5px;
+    align-self: flex-start; background: none; border: none; padding: 2px 0; font: inherit; font-size: 11px;
     font-weight: 700; color: var(--accent-text); cursor: pointer;
   }
   .view-block { display: flex; flex-direction: column; gap: 6px; }
   .stats-list { display: flex; flex-direction: column; gap: 5px; }
-  .stats-row { display: grid; grid-template-columns: 76px 1fr 26px; align-items: center; gap: 6px; font-size: 10.5px; }
+  .stats-row { display: grid; grid-template-columns: 76px 1fr 26px; align-items: center; gap: 6px; font-size: 11px; }
   .stats-row .bar { height: 6px; border-radius: 3px; background: var(--accent); min-width: 3px; }
   .stats-row .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 700; }
-  .stats-empty { font-size: 10.5px; color: var(--muted); text-align: center; padding: 10px 0; }
-  .timeline-more { font-size: 10px; color: var(--muted); text-align: center; padding: 2px 0 4px; }
+  .stats-empty { font-size: 11px; color: var(--muted); text-align: center; padding: 10px 0; }
+  .timeline-more { font-size: 11px; color: var(--muted); text-align: center; padding: 2px 0 4px; }
   .nav-tab { font-size: 11px !important; }
   body.theme-chalk .nav-tab.active { background: var(--chalk); color: var(--ink); }
   .mini-btn.quar { background: transparent; }
@@ -2192,7 +2159,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .mute-badge {
     position: absolute; top: -17px; right: -20px; display: flex; align-items: center; gap: 3px;
     background: var(--panel-fg); color: var(--panel-bg); border-radius: 999px;
-    padding: 1px 6px; font-size: 10px; font-weight: 800;
+    padding: 1px 6px; font-size: 11px; font-weight: 800;
   }
   /* A · 끌어다 놓기 */
   .pet-wrap.drop-ready::before {
@@ -2206,7 +2173,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
   .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
-  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
   .toast-row select {
     background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
     font: inherit; font-weight: 800; padding: 3px 8px;
@@ -2217,7 +2184,7 @@ PET_HTML = r"""<!DOCTYPE html>
   @keyframes toastBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
   .mini-btn {
     border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg);
-    border-radius: 999px; font: inherit; font-size: 10.5px; font-weight: 700; padding: 3px 9px; cursor: pointer;
+    border-radius: 999px; font: inherit; font-size: 11px; font-weight: 700; padding: 3px 9px; cursor: pointer;
   }
   .mini-btn.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
   body.theme-chalk .mini-btn.primary { background: var(--chalk); color: var(--ink); border-color: var(--chalk); }
@@ -2232,20 +2199,20 @@ PET_HTML = r"""<!DOCTYPE html>
   .rc-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
   .rc-n {
     display: inline-block; min-width: 15px; text-align: center; margin-left: 5px; border-radius: 5px;
-    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 9.5px; font-weight: 800; color: var(--muted);
+    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 11px; font-weight: 800; color: var(--muted);
   }
-  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 10.5px; }
+  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 11px; }
   .rc-ev summary { cursor: pointer; font-weight: 700; color: var(--muted); }
   .rc-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--divider); }
   .rc-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rc-row .d { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .rc-foot { font-size: 10px; color: var(--muted); }
+  .rc-foot { font-size: 11px; color: var(--muted); }
   .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
   .rec-org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
   body.theme-chalk .rec-org-bar { background: var(--chalk); }
   .rec-org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
   .rec-org-row { display: flex; flex-direction: column; gap: 3px; }
-  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
+  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 11px; }
   .rec-org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
   .rec-org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
   .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
@@ -2260,23 +2227,23 @@ PET_HTML = r"""<!DOCTYPE html>
   .fd-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .fd-glyph {
     flex: none; width: 30px; height: 30px; border-radius: 9px; background: var(--divider); display: grid; place-items: center;
-    font: 700 8.5px ui-monospace, Menlo, monospace; letter-spacing: 0.2px;
+    font: 700 11px ui-monospace, Menlo, monospace; letter-spacing: 0.2px;
   }
   .fd-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .fd-name { font-size: 12.5px; font-weight: 800; overflow-wrap: anywhere; line-height: 1.3; }
-  .fd-where { font: 10px ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
-  .fd-why { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
-  .fd-flag { align-self: flex-start; font-size: 9.5px; font-weight: 800; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
-  .fd-snip { font-size: 10.5px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 7px; line-height: 1.45; overflow-wrap: anywhere; }
-  .fd-sib { font-size: 10px; color: var(--muted); padding: 0 8px 4px 46px; overflow-wrap: anywhere; }
-  .fd-n { flex: none; font: 10px ui-monospace, Menlo, monospace; color: var(--muted); padding-top: 2px; }
-  .fd-note { display: flex; gap: 6px; align-items: flex-start; background: var(--panel-bg); border-radius: 9px; padding: 5px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; }
+  .fd-where { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .fd-why { font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .fd-flag { align-self: flex-start; font-size: 11px; font-weight: 800; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
+  .fd-snip { font-size: 11px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 7px; line-height: 1.45; overflow-wrap: anywhere; }
+  .fd-sib { font-size: 11px; color: var(--muted); padding: 0 8px 4px 46px; overflow-wrap: anywhere; }
+  .fd-n { flex: none; font: 11px ui-monospace, Menlo, monospace; color: var(--muted); padding-top: 2px; }
+  .fd-note { display: flex; gap: 6px; align-items: flex-start; background: var(--panel-bg); border-radius: 9px; padding: 5px 8px; font-size: 11px; color: var(--muted); line-height: 1.4; }
   .fd-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .fd-actions .mini-btn { padding: 5px 12px; font-size: 11px; }
   .mini-btn[disabled] { opacity: 0.5; cursor: default; }
-  .fd-sub { font-size: 10.5px; font-weight: 800; color: var(--muted); }
+  .fd-sub { font-size: 11px; font-weight: 800; color: var(--muted); }
   .fd-consent { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
-  .fd-consent ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; }
+  .fd-consent ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
   .fd-consent li::before { content: "✓"; color: var(--accent-text); font-weight: 800; margin-right: 6px; }
   .fd-input-row { display: flex; gap: 6px; }
   .fd-input {
@@ -2297,12 +2264,12 @@ PET_HTML = r"""<!DOCTYPE html>
   .pal-slash { color: var(--accent-text); font-weight: 800; }
   .pal-input { flex: 1; border: none; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12.5px; user-select: text; -webkit-user-select: text; }
   .pal-list { max-height: 270px; overflow-y: auto; padding: 4px 5px; }
-  .pal-sec { font-size: 9.5px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
+  .pal-sec { font-size: 11px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
   .pal-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 9px; font-size: 11.5px; cursor: pointer; }
   .pal-item[aria-selected="true"] { background: var(--panel-soft); }
   .pal-item b { font-weight: 800; min-width: 44px; }
-  .pal-item span { color: var(--muted); font-size: 10.5px; }
-  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 9.5px; color: var(--muted); }
+  .pal-item span { color: var(--muted); font-size: 11px; }
+  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 11px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
   /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
   .tab-pane.active {
@@ -2375,7 +2342,7 @@ PET_HTML = r"""<!DOCTYPE html>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
-        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">닫기</button>
+        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">알림 지우기</button>
         <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
@@ -2387,8 +2354,11 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="paneHome" class="tab-pane active">
       <!-- 준비가 덜 됐을 때(지도·엔진 없음): 무엇을 하면 되는지 계속 보여 준다 -->
       <div id="setupCard" class="gate-box" style="display:none;" role="region" aria-label="시작 준비">
-        <div class="gate-head">질문하려면 준비가 필요해요</div>
-        <div id="setupText" class="gate-body"></div>
+        <div id="setupSummary" class="gate-body"></div>
+        <details>
+          <summary>준비 방법</summary>
+          <div id="setupText" class="gate-body"></div>
+        </details>
       </div>
       <!-- 확인할 일: 무엇이 문제이고 다음에 무엇을 하면 되는지 -->
       <div id="attentionCard" class="gate-box" style="display:none;" role="region" aria-label="확인할 일">
@@ -2528,13 +2498,16 @@ PET_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- 색상 모드 -->
+        <!-- 펫 몸통 색: 시스템·라이트·다크(유리 색조) 또는 색. 상태창 색(라이트/다크)은 ⋯ 메뉴에서 따로 정한다 -->
         <div class="setting-block">
-          <div class="block-title">색상 모드</div>
-          <div class="options-row">
-            <button class="opt-btn theme-opt" data-theme="ink">라이트</button>
-            <button class="opt-btn theme-opt" data-theme="chalk">다크</button>
-            <button class="opt-btn theme-opt" data-theme="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
+          <div class="block-title">몸통 색</div>
+          <div class="options-row" style="flex-wrap:wrap;">
+            <button class="opt-btn look-opt" data-key="glass" data-value="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="light">라이트</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="dark">다크</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="sage">세이지</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="sky">하늘</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="lilac">라일락</button>
           </div>
         </div>
 
@@ -2553,34 +2526,6 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 표정·모션 미리보기 (설정이 아니라 구경용이라 접어 둔다) -->
-        <details class="setting-block preview-block">
-          <summary class="block-title">표정·모션 미리보기</summary>
-          <div class="block-sub">눌러 보기만 하고 저장되지 않습니다</div>
-          <div class="mood-grid">
-            <button class="mood-btn" data-mood="idle">기본</button>
-            <button class="mood-btn" data-mood="recording">기록 중</button>
-            <button class="mood-btn" data-mood="focus">집중</button>
-            <button class="mood-btn" data-mood="anxious">확인 필요</button>
-            <button class="mood-btn" data-mood="discovery">발견</button>
-            <button class="mood-btn" data-mood="resolved">해결</button>
-          </div>
-          <div class="act-chips-grid">
-            <button class="act-btn" data-act="breathe">숨쉬기</button>
-            <button class="act-btn" data-act="look_around">두리번</button>
-            <button class="act-btn" data-act="walk">걷기</button>
-            <button class="act-btn" data-act="thinking">생각</button>
-            <button class="act-btn" data-act="alert">깜짝</button>
-            <button class="act-btn" data-act="drowsy">졸음</button>
-            <button class="act-btn" data-act="gaze">시선</button>
-            <button class="act-btn" data-act="press">누름</button>
-            <button class="act-btn" data-act="pet">쓰다듬기</button>
-            <button class="act-btn" data-act="drag">끌기</button>
-            <button class="act-btn" data-act="shake">흔들기</button>
-            <button class="act-btn" data-act="drop">착지</button>
-            <button class="act-btn" data-act="success">성공</button>
-            <button class="act-btn" data-act="failure">실패</button>
-          </div>
-        </details>
       </div>
     </div>
 
@@ -2794,6 +2739,10 @@ let currentAction = null;
 let actionTimer = null;
 let previewLockUntil = 0;
 const INITIAL_PREFS = __RO_PREFS__;
+const TINT_PRESETS = __RO_TINT_PRESETS__;
+const GLASS_CHOICES = ["auto", "light", "dark"];
+let glassMode = GLASS_CHOICES.includes(INITIAL_PREFS.glass) ? INITIAL_PREFS.glass : "auto";
+let tintMode = Object.keys(TINT_PRESETS).includes(INITIAL_PREFS.tint) ? INITIAL_PREFS.tint : "none";
 let materialMode = ["clay", "glass"].includes(INITIAL_PREFS.material) ? INITIAL_PREFS.material : "clay";
 let themeMode = ["ink", "chalk", "auto"].includes(INITIAL_PREFS.theme) ? INITIAL_PREFS.theme : "auto";
 let systemDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -2842,7 +2791,7 @@ function updateMaterialUI() {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
     btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
-  kickNativeGlass();
+  updateLookUI();
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
@@ -2851,21 +2800,65 @@ function updateMaterialUI() {
 function updateThemeUI() {
   const isChalk = themeMode === "chalk" || (themeMode === "auto" && systemDark);
   document.body.classList.toggle("theme-chalk", isChalk);
-  document.querySelectorAll(".theme-opt").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.theme === themeMode);
-    btn.setAttribute("aria-pressed", String(btn.dataset.theme === themeMode));
-  });
+  updateLookUI();
 }
+
+function glassIsDark() {
+  return glassMode === "auto" ? systemDark : glassMode === "dark";
+}
+
+function relativeLuminance(hex) {
+  const rgb = hex.trim().slice(1).match(/../g).map(c => {
+    const s = parseInt(c, 16) / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+}
+
+function updateLookUI() {
+  document.querySelectorAll(".look-opt").forEach(btn => {
+    const on = btn.dataset.key === "glass" ? tintMode === "none" && btn.dataset.value === glassMode : btn.dataset.value === tintMode;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
+  });
+  document.body.classList.toggle("glass-dark", glassIsDark());
+  const bot = document.getElementById("roBot");
+  bot.style.removeProperty("--bot-fill");
+  bot.style.removeProperty("--bot-eye");
+  if (materialMode === "clay" && tintMode !== "none") {
+    const color = TINT_PRESETS[tintMode];
+    const css = getComputedStyle(bot);
+    const ink = css.getPropertyValue("--ink"), chalk = css.getPropertyValue("--chalk");
+    const lum = relativeLuminance(color);
+    const contrast = c => (Math.max(lum, relativeLuminance(c)) + 0.05) / (Math.min(lum, relativeLuminance(c)) + 0.05);
+    bot.style.setProperty("--bot-fill", color);
+    bot.style.setProperty("--bot-eye", contrast(ink) >= contrast(chalk) ? ink : chalk);
+  }
+  notifyHost({ type: "look", theme: themeMode, glass: glassMode, tint: tintMode });
+  kickNativeGlass();
+}
+
+window.setLookPref = function(key, value) {
+  if (key === "theme" && THEME_CHOICES.includes(value)) { themeMode = value; updateThemeUI(); }
+  else if (key === "glass" && GLASS_CHOICES.includes(value)) glassMode = value;
+  else if (key === "tint" && (value === "none" || Object.keys(TINT_PRESETS).includes(value))) tintMode = value;
+  else return;
+  updateLookUI();
+  return savePrefs({ [key]: value });
+};
 
 /* 재질·색상은 ~/.ro/config.json에 저장하고, 페이지를 만들 때 미리 넣어 깜빡이지 않게 한다 */
 /* 저장이 확인되기 전에는 화면만 바뀐 상태다: 실패하면 마지막으로 저장된 값으로 되돌리고 알린다 */
-const savedPrefs = { material: materialMode, theme: themeMode };
+const savedPrefs = { material: materialMode, theme: themeMode, glass: glassMode, tint: tintMode };
 async function savePrefs(changes) {
   let r = null;
   try { r = await apiPost("/api/prefs", changes); } catch (err) {}
   if (r && r.ok) { Object.assign(savedPrefs, changes); return; }
   if ("material" in changes) { materialMode = savedPrefs.material; updateMaterialUI(); }
   if ("theme" in changes) { themeMode = savedPrefs.theme; updateThemeUI(); }
+  if ("glass" in changes) glassMode = savedPrefs.glass;
+  if ("tint" in changes) tintMode = savedPrefs.tint;
+  updateLookUI();
   const why = r ? (r.error || r.output || "") : "서버에 연결하지 못했어요";
   showToast([h("div", { class: "toast-head", text: "설정을 저장하지 못해 원래대로 되돌렸어요. 다시 시도해 주세요." }),
     why ? h("div", { class: "block-sub", text: why }) : null], 5000);
@@ -2907,12 +2900,23 @@ function notifyHost(payload) {
   }
 }
 
+let bubbleOpenedAt = 0;
+let questionBusy = false;
 function setBubbleOpen(open) {
+  if (open && bubble.classList.contains("hidden")) bubbleOpenedAt = performance.now();
   bubble.classList.toggle("hidden", !open);
   if (open && !isNativeHost) fitStage();  // 닫힌 채로 펫을 옮겼다면 다시 연 말풍선이 화면 밖으로 잘리지 않게
   notifyHost({ type: "bubble", open: !!open });
   if (window._poll !== undefined) setPollRate(open);
 }
+
+window.addEventListener("blur", () => {
+  if (bubble.classList.contains("hidden") || performance.now() - bubbleOpenedAt < 300 ||
+      askInput.value || askInput.disabled || questionBusy ||
+      writeCard.style.display !== "none" || sendCard.style.display !== "none" ||
+      (ambient && ambient.focus) || !palette.hidden) return;
+  setBubbleOpen(false);
+});
 
 window.toggleBubbleFromHost = function(forceOpen) {
   const isHidden = bubble.classList.contains("hidden");
@@ -2936,9 +2940,6 @@ window.setMoodPreview = function(mood, durationMs) {
   currentMood = mood;
   eyesWrap.style.transform = "";
   setMoodClass(mood);
-  document.querySelectorAll(".mood-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.mood === mood);
-  });
   updateMaterialUI();
 };
 
@@ -2975,6 +2976,8 @@ closeBtn.addEventListener("click", (e) => {
 clearBtn.addEventListener("click", async (e) => {
   e.stopPropagation();
   previewLockUntil = 0;
+  askNotice = null;
+  askNoticeUntil = 0;
   recallShown = false;
   recallCard.style.display = "none";
   recOrgCard.style.display = "none";
@@ -2984,13 +2987,6 @@ clearBtn.addEventListener("click", async (e) => {
 });
 
 /* 설정 탭 핸들러 */
-document.querySelectorAll(".mood-btn").forEach(btn => {
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    window.setMoodPreview(btn.dataset.mood, 8000);
-  });
-});
-
 document.querySelectorAll(".mat-opt").forEach(btn => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -3000,24 +2996,17 @@ document.querySelectorAll(".mat-opt").forEach(btn => {
   });
 });
 
-document.querySelectorAll(".theme-opt").forEach(btn => {
+document.querySelectorAll(".look-opt").forEach(btn => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
-    themeMode = btn.dataset.theme;
-    updateThemeUI();
-    savePrefs({ theme: themeMode });
+    // 시스템·라이트·다크를 고르면 색 입히기는 끈다
+    if (btn.dataset.key === "glass" && tintMode !== "none") window.setLookPref("tint", "none");
+    window.setLookPref(btn.dataset.key, btn.dataset.value);
   });
 });
 
 wanderToggle.addEventListener("change", (e) => {
   notifyHost({ type: "toggleWander", enabled: wanderToggle.checked });
-});
-
-document.querySelectorAll(".act-btn").forEach((btn) => {
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    window.triggerAction(btn.dataset.act, 4500);
-  });
 });
 
 window.addEventListener("keydown", (e) => {
@@ -3044,10 +3033,6 @@ window.triggerAction = function(name, durationMs) {
     petWrap.classList.remove(`action-${act.replace(/_/g, "-")}`);
   }
   currentAction = name;
-
-  document.querySelectorAll(".act-btn").forEach(b => {
-    b.classList.toggle("active", !!(name && b.dataset.act === name));
-  });
 
   if (!name) {
     currentAction = null;
@@ -3242,11 +3227,12 @@ function syncNativeGlass() {
   let rects = [layerHead, layerBody, layerBase].map(glassPose);
   if (!rects.every(r => r[2] >= 1 && r[3] >= 1 && r[5] > 0.02)) rects = null;  // 숨은 펫
   setNativeGlassClass(!!rects);
-  const dark = document.body.classList.contains("theme-chalk");
-  const key = rects ? JSON.stringify(rects) + dark : "off";
+  const dark = glassIsDark();
+  const tint = TINT_PRESETS[tintMode];
+  const key = rects ? JSON.stringify(rects) + dark + (tint || "") : "off";
   if (key === nativeGlassSent) return;
   nativeGlassSent = key;
-  notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });
+  notifyHost(rects ? { type: "glass", on: true, rects, dark, ...(tint ? { tint } : {}) } : { type: "glass", on: false });
 }
 let webDragStart = null;
 let webDidDrag = false;
@@ -3363,6 +3349,7 @@ askInput.addEventListener("input", () => {
 /* 상태 렌더링 */
 let lastHostStatus = "";
 function applyState(st) {
+  questionBusy = !!st.busy;
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
   const hostStatus = { type: "status", today: (st.counts && st.counts.today_records) || 0 };
   if (JSON.stringify(hostStatus) !== lastHostStatus) {
@@ -3377,9 +3364,6 @@ function applyState(st) {
     }
     setMoodClass(st.mood);  // 다른 클래스(끌기·집중·메뉴 막대로 보내기 등)는 건드리지 않는다
 
-    document.querySelectorAll(".mood-btn").forEach(b => {
-      b.classList.toggle("active", b.dataset.mood === st.mood);
-    });
     updateMaterialUI();
 
     if (RoMotion.busy()) {
@@ -3397,7 +3381,7 @@ function applyState(st) {
     }
   }
 
-  const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
+  const showClear = !!(st.can_clear_notice || (askNotice && Date.now() < askNoticeUntil && !st.busy && !askInput.disabled));
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
   const counts = st.counts || {};
@@ -3428,6 +3412,7 @@ function applyState(st) {
   if (setupCard.dataset.key !== setupKey) {
     setupCard.dataset.key = setupKey;
     setupCard.style.display = st.setup ? "flex" : "none";
+    if (st.setup) document.getElementById("setupSummary").textContent = `${st.setup.steps[0].what}. 질문 준비가 필요하지만 기록은 지금도 됩니다.`;
     if (st.setup) setupText.replaceChildren(...st.setup.steps.map(s => h("div", {},
       h("div", { text: `· ${s.what}` }), h("div", { class: "block-sub" }, "터미널: ", h("code", { text: s.do })),
       s.why ? h("div", { class: "block-sub", text: s.why }) : null)));
@@ -4259,7 +4244,7 @@ const RoMotion = (() => {
   }
   function ensureLoop() { if (!manual && raf == null) raf = requestAnimationFrame(loop); }
 
-  /* 설정 화면·메뉴의 미리보기용 합성 입력 */
+  /* 네이티브 메뉴의 미리보기용 합성 입력 */
   let demoTimer = null;
   function demo(name, done) {
     clearInterval(demoTimer);
@@ -4812,8 +4797,9 @@ setPollRate(!bubble.classList.contains("hidden"));
 
 def render_html(token, prefs=None):
     """토큰과 저장된 화면 설정(재질·색상)을 넣어 페이지를 만든다. 설정은 고정 선택지만 통과시킨다."""
-    p = {k: v for k, v in (prefs or {}).items() if k in ("material", "theme") and v in PREF_CHOICES[k]}
-    return PET_HTML.replace("__RO_TOKEN__", token).replace("__RO_PREFS__", json.dumps(p))
+    p = {k: v for k, v in (prefs or {}).items() if k in ("material", "theme", "glass", "tint") and v in PREF_CHOICES[k]}
+    return (PET_HTML.replace("__RO_TOKEN__", token).replace("__RO_PREFS__", json.dumps(p))
+            .replace("__RO_TINT_PRESETS__", json.dumps(TINT_PRESETS)))
 
 
 def make_handler(runtime):
