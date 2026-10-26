@@ -581,13 +581,13 @@ class LiveInputTest(MotionBase):
         pg.wait_for_function("document.getElementById('petWrap').dataset.motion === 'drop'")
         pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=4000)
 
-    def test_preview_buttons_play_each_motion_and_clear_the_label(self):
+    def test_host_preview_api_plays_each_motion_and_clears_action(self):
         pg = self.live()
         for act, seen in (("press", "happy"), ("drop", "squint"), ("drag", "big"), ("shake", "squint")):
             pg.evaluate("(a) => window.triggerAction(a, 0)", act)
             pg.wait_for_function("(s) => document.getElementById('petWrap').dataset.eyes === s", arg=seen, timeout=4000)
             pg.wait_for_function("!document.getElementById('petWrap').dataset.motion", timeout=8000)
-            self.assertFalse(pg.evaluate("document.querySelector('.act-btn.active') !== null"))
+            self.assertIsNone(pg.evaluate("currentAction"))
 
     def test_shake_preview_squints_then_swirls_after_landing(self):
         pg = self.live()

@@ -248,8 +248,23 @@ class PetTest(unittest.TestCase):
             self.assertIsNone(rt.snapshot()["organize"]["undo"])
             self.assertFalse(rt.queue_organize_undo()["ok"])
 
+    def test_clear_notice_is_only_available_for_dismissible_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
+            self.assertFalse(rt.snapshot()["can_clear_notice"])
+            rt.queue_write_approval("파일 수정 작업")
+            self.assertFalse(rt.snapshot()["can_clear_notice"])
+            log.append("route", "실패한 질문", {"ok": False}, log_dir=d)
+            self.assertTrue(rt.snapshot()["can_clear_notice"])
+            rt.clear_notice()
+            self.assertFalse(rt.snapshot()["can_clear_notice"])
+            rt.last_answer = {"question": "q", "output": "답", "engine": "codex", "reason": "", "projects": []}
+            self.assertTrue(rt.snapshot()["can_clear_notice"])
+            rt.clear_notice()
+            self.assertFalse(rt.snapshot()["can_clear_notice"])
+
     def test_bubble_fits_overlay_window(self):
-        # 오버레이 창(360×530)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
+        # 오버레이 창(388px × 화면 높이의 80%, 최대 760px)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         # 쓰기 승인 카드는 탭 밖(입력창 위)에 있어 어느 탭에서도 보인다
         html = pet.PET_HTML
         order = [html.index(k) for k in ('id="bubbleTop"', 'id="paneHome"', 'id="activityList"', 'id="paneOrganize"',

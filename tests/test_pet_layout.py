@@ -1,5 +1,9 @@
-"""360×530 펫 패널 회귀 검사. playwright/chromium이 없으면 건너뛴다."""
+"""388×760 펫 패널 회귀 검사. playwright/chromium이 없으면 건너뛴다."""
 import os
+import json
+import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,7 +51,7 @@ class PetLayoutTest(unittest.TestCase):
         cls.url = "http://127.0.0.1:%d/" % cls.server.server_address[1]
 
     def open_page(self):
-        ctx = self.browser.new_context(viewport={"width": 360, "height": 530}, reduced_motion="reduce")
+        ctx = self.browser.new_context(viewport={"width": 388, "height": 760}, reduced_motion="reduce")
         self.addCleanup(ctx.close)
         page = ctx.new_page()
         page.goto(self.url)
@@ -55,6 +59,37 @@ class PetLayoutTest(unittest.TestCase):
         page.wait_for_function("Number(document.querySelector('#metricEvents').textContent) >= 3")
         page.evaluate("setBubbleOpen(true)")
         return page
+
+    def test_tabs_keep_height_position_and_accessible_sizes(self):
+        page = self.open_page()
+        measurements = []
+        for tab in ("Home", "Timeline", "Organize", "Settings"):
+            page.click("#tabBtn" + tab)
+            measurements.append(page.evaluate("""() => {
+                const visible = el => el.checkVisibility() && el.getBoundingClientRect().height > 0;
+                const leaves = [...bubble.querySelectorAll('*')].filter(el => visible(el) && !el.children.length && el.textContent.trim());
+                const controls = [...bubble.querySelectorAll('button,input,select,summary,[role="option"],.switch')].filter(visible);
+                const small = controls.filter(el => { const r = el.getBoundingClientRect(); return r.width < 24 || r.height < 24; });
+                return {height: bubble.getBoundingClientRect().height,
+                        y: document.querySelector('.nav-tabs').getBoundingClientRect().y,
+                        minFont: Math.min(...leaves.map(el => parseFloat(getComputedStyle(el).fontSize))),
+                        small: small.map(el => el.id || el.className)};
+            }"""))
+        self.assertEqual(len({m["height"] for m in measurements}), 1, measurements)
+        self.assertEqual(len({m["y"] for m in measurements}), 1, measurements)
+        self.assertEqual(measurements[0]["height"], 602)
+        for m in measurements:
+            self.assertGreaterEqual(m["minFont"], 11, m)
+            self.assertEqual(m["small"], [], m)
+
+    def test_clear_notice_is_not_a_preview_control(self):
+        page = self.open_page()
+        page.evaluate("window.setMoodPreview('idle', 8000); applyState({mood: 'idle'})")
+        self.assertFalse(page.locator("#clearBtn").is_visible())
+        page.evaluate("askNotice = {q: '질문', msg: '안내'}; askNoticeUntil = Infinity; applyState({mood: 'idle'})")
+        self.assertEqual(page.inner_text("#clearBtn"), "알림 지우기")
+        page.click("#clearBtn")
+        page.wait_for_selector("#clearBtn", state="hidden")
 
     def test_panel_and_palette_fit_window(self):
         page = self.open_page()
@@ -193,13 +228,16 @@ class PetLayoutTest(unittest.TestCase):
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
             srv = pet.start_server(rt)
             try:
-                ctx = self.browser.new_context(viewport={"width": 360, "height": 530}, reduced_motion="reduce")
+                ctx = self.browser.new_context(viewport={"width": 388, "height": 760}, reduced_motion="reduce")
                 self.addCleanup(ctx.close)
                 page = ctx.new_page()
                 page.goto("http://127.0.0.1:%d/" % srv.server_address[1])
                 page.wait_for_selector("#stage")
                 page.evaluate("setBubbleOpen(true)")
                 page.wait_for_selector("#setupCard", state="visible")
+                self.assertNotIn("ro map", page.inner_text("#setupCard"))
+                self.assertIn("기록은 지금도 됩니다", page.inner_text("#setupCard"))
+                page.click("#setupCard summary")
                 self.assertIn("ro map", page.inner_text("#setupCard"))
             finally:
                 srv.shutdown()
@@ -217,7 +255,7 @@ class PetLayoutTest(unittest.TestCase):
         page.evaluate("setBubbleOpen(true)")
         left, right = page.evaluate("(() => { const r = bubble.getBoundingClientRect(); return [r.left, r.right]; })()")
         self.assertGreaterEqual(left, -0.5)
-        self.assertLessEqual(right, 360.5)
+        self.assertLessEqual(right, 388.5)
 
     def test_glass_eyes_have_no_box_outline_and_stay_visible_in_dark_mode(self):
         page = self.open_page()
@@ -244,6 +282,53 @@ class PetLayoutTest(unittest.TestCase):
         self.assertFalse(page.locator("#statsView").is_visible())
         self.assertTrue(page.locator("#activityList").is_visible())
         self.assertEqual(page.locator("#filterSummaryBtn").get_attribute("aria-pressed"), "true")
+
+
+@unittest.skipUnless(shutil.which("node"), "JS blur 단위 검사에 node 필요")
+class PetBlurTest(unittest.TestCase):
+    def test_blur_preserves_work_and_opening_grace(self):
+        # 실제 이벤트 핸들러와 열기 함수를 실행한다. 서버/네이티브 펫은 띄우지 않는다.
+        source = pet.PET_HTML.split("let bubbleOpenedAt = 0;", 1)[1].split("window.toggleBubbleFromHost", 1)[0]
+        script = r"""
+const assert = require('node:assert/strict');
+let now = 1000, hidden = true, blur;
+const performance = {now: () => now};
+const bubble = {classList: {contains: () => hidden, toggle: (_, v) => {hidden = v;}}};
+const window = {addEventListener: (name, fn) => {assert.equal(name, 'blur'); blur = fn;}};
+const askInput = {value: '', disabled: false};
+const writeCard = {style: {display: 'none'}}, sendCard = {style: {display: 'none'}};
+const ambient = {focus: false}, palette = {hidden: true};
+const isNativeHost = true, notifyHost = () => {};
+let bubbleOpenedAt = 0;
+SOURCE
+function reset() {
+  hidden = true; askInput.value = ''; askInput.disabled = false; questionBusy = false;
+  writeCard.style.display = sendCard.style.display = 'none'; ambient.focus = false; palette.hidden = true;
+  setBubbleOpen(true); now += 301;
+}
+for (const [name, protect] of [
+  ['draft', () => {askInput.value = '초안';}],
+  ['whitespace', () => {askInput.value = ' ';}],
+  ['busy', () => {questionBusy = true;}],
+  ['sending', () => {askInput.disabled = true;}],
+  ['write', () => {writeCard.style.display = 'flex';}],
+  ['send', () => {sendCard.style.display = 'flex';}],
+  ['focus', () => {ambient.focus = true;}],
+  ['palette', () => {palette.hidden = false;}],
+]) {reset(); protect(); blur(); assert.equal(hidden, false, name);}
+reset(); blur(); assert.equal(hidden, true, 'empty input closes');
+reset(); now = bubbleOpenedAt + 299; blur(); assert.equal(hidden, false, 'opening grace');
+now = bubbleOpenedAt + 300; blur(); assert.equal(hidden, true, 'grace ends');
+reset(); setBubbleOpen(true); blur(); assert.equal(hidden, true, 'already open does not renew grace');
+""".replace("SOURCE", source)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_embedded_script_parses(self):
+        script = re.search(r"<script>(.*?)</script>", pet.PET_HTML, re.S).group(1)
+        result = subprocess.run(["node", "-e", "new (require('node:vm').Script)(" + json.dumps(script) + ")"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

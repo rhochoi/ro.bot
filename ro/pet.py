@@ -646,6 +646,7 @@ class PetRuntime:
             "prefs": self.prefs(),
             "stats": stats,
             "last_answer": safe_answer,
+            "can_clear_notice": bool(last_answer or last_route_failed),
             "busy": busy,  # 새로고침해도 '답을 기다리는 중'과 취소 버튼을 되살린다
             "busy_question": log.redact(busy_task) if busy else "",
             "setup": self._setup_state(mapdata),
@@ -684,7 +685,7 @@ class PetRuntime:
         mapdata = ask.load_map(self.map_path, self.home)
         if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
             return None, {"ok": False, "reason": "needs_setup",
-                          "output": "프로젝트 지도가 없습니다. 터미널에서 `ro map`으로 스캔할 폴더를 확인하고 지도를 만드세요."}
+                          "output": "프로젝트 지도가 없습니다. 터미널에서 ro map으로 스캔할 폴더를 확인하고 지도를 만드세요."}
         # 펫이 실행된 폴더(os.getcwd())는 사용자가 지금 보는 곳이 아니다: 질문이 가리키는 프로젝트만 붙인다
         pl = ask.plan(question, mapdata, cwd=cwd, use_context=True,
                       engine=engine or config.load(self.home).get("engine") or None,
@@ -882,7 +883,8 @@ PET_HTML = r"""<!DOCTYPE html>
     overflow: hidden;
   }
   /* 브라우저 모드(--browser): 투명 오버레이가 아니므로 배경을 깔아 카드·글자 대비를 지킨다 */
-  body.web { background: #DCD6CA; }
+  body.web { background: #DCD6CA; overflow-y: auto; }
+  body.web .stage { min-height: 398px; }
   @media (prefers-color-scheme: dark) {
     body.web { background: #2F2C28; }
   }
@@ -908,7 +910,7 @@ PET_HTML = r"""<!DOCTYPE html>
      말풍선 패널 (Ro의 말풍선 메타포 카드)
      ========================================================= */
   .bubble {
-    width: 332px;
+    width: 356px;
     background: var(--panel-bg);
     color: var(--panel-fg);
     border: 1.5px solid var(--panel-border);
@@ -922,10 +924,10 @@ PET_HTML = r"""<!DOCTYPE html>
     transition: opacity 0.16s ease, transform 0.16s cubic-bezier(.22,1,.36,1), background-color 0.2s ease, border-color 0.2s ease;
     transform-origin: bottom right;
     position: relative;
-    max-height: 440px;
-    /* 오버레이 창(360×530)에서 펫 높이를 뺀 만큼만 차지한다: 넘치면 탭 내용만 스크롤 */
-    min-height: 0;
-    flex: 0 1 auto;
+    /* 펫 124px + 바깥 여백 26px + 간격 8px를 제외한 높이는 탭과 무관하게 고정 */
+    height: calc(100vh - 158px);
+    min-height: 240px;
+    flex: 0 0 auto;
     box-sizing: border-box;
   }
   .bubble > .bubble-top, .bubble > .ask-form, .bubble > .toast { flex-shrink: 0; }
@@ -979,8 +981,9 @@ PET_HTML = r"""<!DOCTYPE html>
 
   /* 상단 헤더 & 네비게이션 */
   .bubble-top {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
     align-items: center;
     padding-bottom: 7px;
     border-bottom: 1px solid var(--divider);
@@ -999,6 +1002,8 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-fg);
   }
   .nav-tabs {
+    grid-column: 1 / -1;
+    grid-row: 2;
     display: flex;
     align-items: center;
     gap: 2px;
@@ -1008,12 +1013,13 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
   }
   .nav-tab {
+    flex: 1;
     background: transparent;
     border: none;
     color: var(--muted);
     padding: 2.5px 8px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     transition: background 0.14s ease, color 0.14s ease;
@@ -1027,6 +1033,8 @@ PET_HTML = r"""<!DOCTYPE html>
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   }
   .top-right {
+    grid-column: 2;
+    grid-row: 1;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -1037,7 +1045,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: none;
     border-radius: 999px;
     padding: 2.5px 7px;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
   }
@@ -1051,8 +1059,8 @@ PET_HTML = r"""<!DOCTYPE html>
     font-size: 11px;
     font-weight: 700;
     cursor: pointer;
-    width: 20px;
-    height: 20px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -1088,7 +1096,7 @@ PET_HTML = r"""<!DOCTYPE html>
     line-height: 1.25;
   }
   .greeting-sub {
-    font-size: 10.5px;
+    font-size: 11px;
     color: var(--muted);
     line-height: 1.35;
   }
@@ -1103,7 +1111,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: none;
     border-radius: 999px;
     padding: 2.5px 9px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     transition: all 0.14s;
@@ -1141,7 +1149,7 @@ PET_HTML = r"""<!DOCTYPE html>
     line-height: 1.1;
   }
   .metric-label {
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 600;
     color: var(--muted);
   }
@@ -1162,7 +1170,7 @@ PET_HTML = r"""<!DOCTYPE html>
     gap: 5px;
   }
   .gate-head {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     color: var(--accent-text);
     letter-spacing: 0.02em;
@@ -1176,12 +1184,12 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .gate-files {
     margin: 0; padding: 0 0 0 2px; list-style: none; max-height: 92px; overflow-y: auto;
-    font-size: 10.5px; line-height: 1.4; color: var(--panel-fg);
+    font-size: 11px; line-height: 1.4; color: var(--panel-fg);
   }
   .gate-files li { display: flex; gap: 4px; white-space: nowrap; }
   .gate-files li span { overflow: hidden; text-overflow: ellipsis; }
   .gate-files li .arrow { color: var(--muted); flex-shrink: 0; }
-  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 10px; color: var(--muted); }
+  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 11px; color: var(--muted); }
   .gate-actions {
     display: flex;
     flex-wrap: wrap;
@@ -1191,7 +1199,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .action-btn {
     border-radius: 999px;
     padding: 3px 10px;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
     border: 1px solid transparent;
@@ -1305,7 +1313,7 @@ PET_HTML = r"""<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
     padding-left: 2px;
   }
@@ -1319,7 +1327,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
     border-radius: 999px;
     padding: 2px 7px;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 700;
     cursor: pointer;
   }
@@ -1333,7 +1341,7 @@ PET_HTML = r"""<!DOCTYPE html>
     margin-top: 1px;
   }
   .section-label {
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 800;
     color: var(--muted);
     letter-spacing: -0.01em;
@@ -1343,7 +1351,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--muted);
     padding: 1.5px 6px;
     border-radius: 999px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 700;
     border: 1px solid var(--panel-border);
   }
@@ -1386,7 +1394,7 @@ PET_HTML = r"""<!DOCTYPE html>
     letter-spacing: -0.01em;
   }
   .act-time {
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
     flex-shrink: 0;
   }
@@ -1461,14 +1469,14 @@ PET_HTML = r"""<!DOCTYPE html>
   .orange-tag {
     background: var(--accent-strong);
     color: #FFFFFF;
-    font-size: 9.5px;
+    font-size: 11px;
     font-weight: 800;
     padding: 2.5px 7.5px;
     border-radius: 6px;
     letter-spacing: -0.01em;
   }
   .timeline-counter {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--muted);
     font-weight: 600;
   }
@@ -1503,7 +1511,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .timeline-meta {
     display: flex;
     justify-content: space-between;
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
     font-weight: 600;
   }
@@ -1532,38 +1540,11 @@ PET_HTML = r"""<!DOCTYPE html>
     padding-bottom: 0;
   }
   .block-title {
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 700;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.02em;
-  }
-  .mood-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 5px;
-  }
-  .mood-btn {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 8px;
-    padding: 5px 4px;
-    font-size: 10px;
-    font-weight: 600;
-    cursor: pointer;
-    text-align: center;
-    transition: all 0.12s;
-  }
-  .mood-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent-text);
-  }
-  .mood-btn.active {
-    background: var(--accent-strong);
-    color: #FFFFFF;
-    border-color: var(--accent-strong);
-    font-weight: 800;
   }
   .options-row {
     display: flex;
@@ -1578,7 +1559,7 @@ PET_HTML = r"""<!DOCTYPE html>
     border: 1px solid var(--panel-border);
     border-radius: 8px;
     padding: 4px 6px;
-    font-size: 9.8px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     text-align: center;
@@ -1610,7 +1591,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: var(--panel-fg);
   }
   .toggle-sub {
-    font-size: 9.5px;
+    font-size: 11px;
     color: var(--muted);
   }
   .switch {
@@ -1619,7 +1600,8 @@ PET_HTML = r"""<!DOCTYPE html>
     width: 38px;
     height: 22px;
   }
-  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; width: 100%; height: 100%; }
+  .switch:focus-within .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
   .slider {
     position: absolute;
     cursor: pointer;
@@ -1647,32 +1629,6 @@ PET_HTML = r"""<!DOCTYPE html>
   input:checked + .slider:before {
     transform: translateX(16px);
     background-color: #FFFFFF;
-  }
-  .act-chips-grid {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .act-btn {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 2.5px 7px;
-    font-size: 9.5px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-  .act-btn:hover {
-    background: var(--panel-fg);
-    color: var(--panel-bg);
-  }
-  .act-btn.active {
-    background: var(--accent-strong) !important;
-    color: #FFFFFF !important;
-    border-color: var(--accent-strong) !important;
-    font-weight: 800;
   }
 
   /* =========================================================
@@ -2125,7 +2081,7 @@ PET_HTML = r"""<!DOCTYPE html>
     color: #f5f4ef;
     padding: 1.5px 7px;
     border-radius: 999px;
-    font-size: 9px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: -0.01em;
     line-height: 14px;
@@ -2152,31 +2108,37 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   [hidden] { display: none !important; }
   .gate-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-  .fb-done { font-size: 10.5px; color: var(--muted); }
+  .fb-done { font-size: 11px; color: var(--muted); }
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-cats:empty, .org-msg:empty { display: none; }
-  .org-msg, .org-summary { font-size: 10.5px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
+  .org-msg, .org-summary { font-size: 11px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
   .org-msg { white-space: pre-line; }  /* 건너뛴 파일과 이유를 한 줄씩 */
-  .stale-banner { flex-shrink: 0; font-size: 10.5px; line-height: 1.4; padding: 6px 9px; border-radius: 10px;
+  .stale-banner { flex-shrink: 0; font-size: 11px; line-height: 1.4; padding: 6px 9px; border-radius: 10px;
     background: var(--panel-soft); border: 1px solid var(--panel-border); color: var(--panel-fg); }
   .stale-banner[hidden] { display: none; }
+  .bubble button, .bubble input, .bubble select, .bubble summary, .bubble [role="option"], .bubble .switch {
+    min-width: 24px; min-height: 24px;
+  }
+  .bubble summary { cursor: pointer; font-size: 11px; }
+  #setupCard { border-color: var(--panel-border); background: var(--panel-soft); }
+  #timelineList:has(> .stats-empty), #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) { flex: 1; }
+  #timelineList > .stats-empty { flex: 1; display: grid; place-items: center; }
+  #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) > .org-summary { flex: 1; display: grid; place-items: center; }
   #setupText, #attentionText { white-space: pre-line; }
   #setupText code, #attentionText code { font: inherit; font-weight: 700; user-select: all; }
   .org-summary code, .org-msg code { white-space: nowrap; font: inherit; font-weight: 700; }
-  .block-sub { font-size: 10px; color: var(--muted); line-height: 1.4; }
-  .preview-block > summary { cursor: pointer; list-style: revert; }
-  .preview-block[open] { gap: 6px; }
+  .block-sub { font-size: 11px; color: var(--muted); line-height: 1.4; }
   .link-btn {
-    align-self: flex-start; background: none; border: none; padding: 2px 0; font: inherit; font-size: 10.5px;
+    align-self: flex-start; background: none; border: none; padding: 2px 0; font: inherit; font-size: 11px;
     font-weight: 700; color: var(--accent-text); cursor: pointer;
   }
   .view-block { display: flex; flex-direction: column; gap: 6px; }
   .stats-list { display: flex; flex-direction: column; gap: 5px; }
-  .stats-row { display: grid; grid-template-columns: 76px 1fr 26px; align-items: center; gap: 6px; font-size: 10.5px; }
+  .stats-row { display: grid; grid-template-columns: 76px 1fr 26px; align-items: center; gap: 6px; font-size: 11px; }
   .stats-row .bar { height: 6px; border-radius: 3px; background: var(--accent); min-width: 3px; }
   .stats-row .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 700; }
-  .stats-empty { font-size: 10.5px; color: var(--muted); text-align: center; padding: 10px 0; }
-  .timeline-more { font-size: 10px; color: var(--muted); text-align: center; padding: 2px 0 4px; }
+  .stats-empty { font-size: 11px; color: var(--muted); text-align: center; padding: 10px 0; }
+  .timeline-more { font-size: 11px; color: var(--muted); text-align: center; padding: 2px 0 4px; }
   .nav-tab { font-size: 11px !important; }
   body.theme-chalk .nav-tab.active { background: var(--chalk); color: var(--ink); }
   .mini-btn.quar { background: transparent; }
@@ -2192,7 +2154,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .mute-badge {
     position: absolute; top: -17px; right: -20px; display: flex; align-items: center; gap: 3px;
     background: var(--panel-fg); color: var(--panel-bg); border-radius: 999px;
-    padding: 1px 6px; font-size: 10px; font-weight: 800;
+    padding: 1px 6px; font-size: 11px; font-weight: 800;
   }
   /* A · 끌어다 놓기 */
   .pet-wrap.drop-ready::before {
@@ -2206,7 +2168,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
   .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
-  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--muted); }
+  .toast-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
   .toast-row select {
     background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
     font: inherit; font-weight: 800; padding: 3px 8px;
@@ -2217,7 +2179,7 @@ PET_HTML = r"""<!DOCTYPE html>
   @keyframes toastBar { from { transform: scaleX(1); } to { transform: scaleX(0); } }
   .mini-btn {
     border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg);
-    border-radius: 999px; font: inherit; font-size: 10.5px; font-weight: 700; padding: 3px 9px; cursor: pointer;
+    border-radius: 999px; font: inherit; font-size: 11px; font-weight: 700; padding: 3px 9px; cursor: pointer;
   }
   .mini-btn.primary { background: var(--ink); color: var(--chalk); border-color: var(--ink); }
   body.theme-chalk .mini-btn.primary { background: var(--chalk); color: var(--ink); border-color: var(--chalk); }
@@ -2232,20 +2194,20 @@ PET_HTML = r"""<!DOCTYPE html>
   .rc-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; }
   .rc-n {
     display: inline-block; min-width: 15px; text-align: center; margin-left: 5px; border-radius: 5px;
-    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 9.5px; font-weight: 800; color: var(--muted);
+    background: var(--panel-bg); border: 1px solid var(--panel-border); font-size: 11px; font-weight: 800; color: var(--muted);
   }
-  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 10.5px; }
+  .rc-ev { background: var(--panel-bg); border-radius: 10px; padding: 6px 8px; font-size: 11px; }
   .rc-ev summary { cursor: pointer; font-weight: 700; color: var(--muted); }
   .rc-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-top: 1px solid var(--divider); }
   .rc-row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rc-row .d { color: var(--muted); font-variant-numeric: tabular-nums; }
-  .rc-foot { font-size: 10px; color: var(--muted); }
+  .rc-foot { font-size: 11px; color: var(--muted); }
   .chip-row { display: flex; gap: 6px; flex-wrap: wrap; }
   .rec-org-bar { height: 5px; border-radius: 3px; background: var(--ink); }
   body.theme-chalk .rec-org-bar { background: var(--chalk); }
   .rec-org-line { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; }
   .rec-org-row { display: flex; flex-direction: column; gap: 3px; }
-  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 10.5px; }
+  .rec-org-amb { display: flex; flex-direction: column; gap: 5px; font-size: 11px; }
   .rec-org-amb select { font: inherit; border-radius: 8px; border: 1px solid var(--panel-border); background: var(--panel-bg); color: var(--panel-fg); }
   .rec-org-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
   .timeline-row.flash { outline: 2px solid var(--accent); border-radius: 10px; }
@@ -2260,23 +2222,23 @@ PET_HTML = r"""<!DOCTYPE html>
   .fd-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .fd-glyph {
     flex: none; width: 30px; height: 30px; border-radius: 9px; background: var(--divider); display: grid; place-items: center;
-    font: 700 8.5px ui-monospace, Menlo, monospace; letter-spacing: 0.2px;
+    font: 700 11px ui-monospace, Menlo, monospace; letter-spacing: 0.2px;
   }
   .fd-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .fd-name { font-size: 12.5px; font-weight: 800; overflow-wrap: anywhere; line-height: 1.3; }
-  .fd-where { font: 10px ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
-  .fd-why { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
-  .fd-flag { align-self: flex-start; font-size: 9.5px; font-weight: 800; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
-  .fd-snip { font-size: 10.5px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 7px; line-height: 1.45; overflow-wrap: anywhere; }
-  .fd-sib { font-size: 10px; color: var(--muted); padding: 0 8px 4px 46px; overflow-wrap: anywhere; }
-  .fd-n { flex: none; font: 10px ui-monospace, Menlo, monospace; color: var(--muted); padding-top: 2px; }
-  .fd-note { display: flex; gap: 6px; align-items: flex-start; background: var(--panel-bg); border-radius: 9px; padding: 5px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; }
+  .fd-where { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); overflow-wrap: anywhere; }
+  .fd-why { font-size: 11px; color: var(--muted); line-height: 1.4; }
+  .fd-flag { align-self: flex-start; font-size: 11px; font-weight: 800; color: var(--accent-text); background: var(--accent-soft); border-radius: 999px; padding: 1px 7px; }
+  .fd-snip { font-size: 11px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 7px; line-height: 1.45; overflow-wrap: anywhere; }
+  .fd-sib { font-size: 11px; color: var(--muted); padding: 0 8px 4px 46px; overflow-wrap: anywhere; }
+  .fd-n { flex: none; font: 11px ui-monospace, Menlo, monospace; color: var(--muted); padding-top: 2px; }
+  .fd-note { display: flex; gap: 6px; align-items: flex-start; background: var(--panel-bg); border-radius: 9px; padding: 5px 8px; font-size: 11px; color: var(--muted); line-height: 1.4; }
   .fd-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .fd-actions .mini-btn { padding: 5px 12px; font-size: 11px; }
   .mini-btn[disabled] { opacity: 0.5; cursor: default; }
-  .fd-sub { font-size: 10.5px; font-weight: 800; color: var(--muted); }
+  .fd-sub { font-size: 11px; font-weight: 800; color: var(--muted); }
   .fd-consent { background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; padding: 9px 10px; display: flex; flex-direction: column; gap: 6px; }
-  .fd-consent ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 10.5px; }
+  .fd-consent ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
   .fd-consent li::before { content: "✓"; color: var(--accent-text); font-weight: 800; margin-right: 6px; }
   .fd-input-row { display: flex; gap: 6px; }
   .fd-input {
@@ -2297,12 +2259,12 @@ PET_HTML = r"""<!DOCTYPE html>
   .pal-slash { color: var(--accent-text); font-weight: 800; }
   .pal-input { flex: 1; border: none; outline: none; background: transparent; color: inherit; font: inherit; font-size: 12.5px; user-select: text; -webkit-user-select: text; }
   .pal-list { max-height: 270px; overflow-y: auto; padding: 4px 5px; }
-  .pal-sec { font-size: 9.5px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
+  .pal-sec { font-size: 11px; font-weight: 800; color: var(--muted); padding: 6px 8px 2px; }
   .pal-item { display: flex; gap: 8px; align-items: baseline; padding: 6px 8px; border-radius: 9px; font-size: 11.5px; cursor: pointer; }
   .pal-item[aria-selected="true"] { background: var(--panel-soft); }
   .pal-item b { font-weight: 800; min-width: 44px; }
-  .pal-item span { color: var(--muted); font-size: 10.5px; }
-  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 9.5px; color: var(--muted); }
+  .pal-item span { color: var(--muted); font-size: 11px; }
+  .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 11px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
   /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
   .tab-pane.active {
@@ -2375,7 +2337,7 @@ PET_HTML = r"""<!DOCTYPE html>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
-        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">닫기</button>
+        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">알림 지우기</button>
         <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
@@ -2387,8 +2349,11 @@ PET_HTML = r"""<!DOCTYPE html>
     <div id="paneHome" class="tab-pane active">
       <!-- 준비가 덜 됐을 때(지도·엔진 없음): 무엇을 하면 되는지 계속 보여 준다 -->
       <div id="setupCard" class="gate-box" style="display:none;" role="region" aria-label="시작 준비">
-        <div class="gate-head">질문하려면 준비가 필요해요</div>
-        <div id="setupText" class="gate-body"></div>
+        <div id="setupSummary" class="gate-body"></div>
+        <details>
+          <summary>준비 방법</summary>
+          <div id="setupText" class="gate-body"></div>
+        </details>
       </div>
       <!-- 확인할 일: 무엇이 문제이고 다음에 무엇을 하면 되는지 -->
       <div id="attentionCard" class="gate-box" style="display:none;" role="region" aria-label="확인할 일">
@@ -2553,34 +2518,6 @@ PET_HTML = r"""<!DOCTYPE html>
         </div>
 
         <!-- 표정·모션 미리보기 (설정이 아니라 구경용이라 접어 둔다) -->
-        <details class="setting-block preview-block">
-          <summary class="block-title">표정·모션 미리보기</summary>
-          <div class="block-sub">눌러 보기만 하고 저장되지 않습니다</div>
-          <div class="mood-grid">
-            <button class="mood-btn" data-mood="idle">기본</button>
-            <button class="mood-btn" data-mood="recording">기록 중</button>
-            <button class="mood-btn" data-mood="focus">집중</button>
-            <button class="mood-btn" data-mood="anxious">확인 필요</button>
-            <button class="mood-btn" data-mood="discovery">발견</button>
-            <button class="mood-btn" data-mood="resolved">해결</button>
-          </div>
-          <div class="act-chips-grid">
-            <button class="act-btn" data-act="breathe">숨쉬기</button>
-            <button class="act-btn" data-act="look_around">두리번</button>
-            <button class="act-btn" data-act="walk">걷기</button>
-            <button class="act-btn" data-act="thinking">생각</button>
-            <button class="act-btn" data-act="alert">깜짝</button>
-            <button class="act-btn" data-act="drowsy">졸음</button>
-            <button class="act-btn" data-act="gaze">시선</button>
-            <button class="act-btn" data-act="press">누름</button>
-            <button class="act-btn" data-act="pet">쓰다듬기</button>
-            <button class="act-btn" data-act="drag">끌기</button>
-            <button class="act-btn" data-act="shake">흔들기</button>
-            <button class="act-btn" data-act="drop">착지</button>
-            <button class="act-btn" data-act="success">성공</button>
-            <button class="act-btn" data-act="failure">실패</button>
-          </div>
-        </details>
       </div>
     </div>
 
@@ -2907,12 +2844,23 @@ function notifyHost(payload) {
   }
 }
 
+let bubbleOpenedAt = 0;
+let questionBusy = false;
 function setBubbleOpen(open) {
+  if (open && bubble.classList.contains("hidden")) bubbleOpenedAt = performance.now();
   bubble.classList.toggle("hidden", !open);
   if (open && !isNativeHost) fitStage();  // 닫힌 채로 펫을 옮겼다면 다시 연 말풍선이 화면 밖으로 잘리지 않게
   notifyHost({ type: "bubble", open: !!open });
   if (window._poll !== undefined) setPollRate(open);
 }
+
+window.addEventListener("blur", () => {
+  if (bubble.classList.contains("hidden") || performance.now() - bubbleOpenedAt < 300 ||
+      askInput.value || askInput.disabled || questionBusy ||
+      writeCard.style.display !== "none" || sendCard.style.display !== "none" ||
+      (ambient && ambient.focus) || !palette.hidden) return;
+  setBubbleOpen(false);
+});
 
 window.toggleBubbleFromHost = function(forceOpen) {
   const isHidden = bubble.classList.contains("hidden");
@@ -2936,9 +2884,6 @@ window.setMoodPreview = function(mood, durationMs) {
   currentMood = mood;
   eyesWrap.style.transform = "";
   setMoodClass(mood);
-  document.querySelectorAll(".mood-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.mood === mood);
-  });
   updateMaterialUI();
 };
 
@@ -2975,6 +2920,8 @@ closeBtn.addEventListener("click", (e) => {
 clearBtn.addEventListener("click", async (e) => {
   e.stopPropagation();
   previewLockUntil = 0;
+  askNotice = null;
+  askNoticeUntil = 0;
   recallShown = false;
   recallCard.style.display = "none";
   recOrgCard.style.display = "none";
@@ -2984,13 +2931,6 @@ clearBtn.addEventListener("click", async (e) => {
 });
 
 /* 설정 탭 핸들러 */
-document.querySelectorAll(".mood-btn").forEach(btn => {
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    window.setMoodPreview(btn.dataset.mood, 8000);
-  });
-});
-
 document.querySelectorAll(".mat-opt").forEach(btn => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
@@ -3011,13 +2951,6 @@ document.querySelectorAll(".theme-opt").forEach(btn => {
 
 wanderToggle.addEventListener("change", (e) => {
   notifyHost({ type: "toggleWander", enabled: wanderToggle.checked });
-});
-
-document.querySelectorAll(".act-btn").forEach((btn) => {
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    window.triggerAction(btn.dataset.act, 4500);
-  });
 });
 
 window.addEventListener("keydown", (e) => {
@@ -3044,10 +2977,6 @@ window.triggerAction = function(name, durationMs) {
     petWrap.classList.remove(`action-${act.replace(/_/g, "-")}`);
   }
   currentAction = name;
-
-  document.querySelectorAll(".act-btn").forEach(b => {
-    b.classList.toggle("active", !!(name && b.dataset.act === name));
-  });
 
   if (!name) {
     currentAction = null;
@@ -3363,6 +3292,7 @@ askInput.addEventListener("input", () => {
 /* 상태 렌더링 */
 let lastHostStatus = "";
 function applyState(st) {
+  questionBusy = !!st.busy;
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
   const hostStatus = { type: "status", today: (st.counts && st.counts.today_records) || 0 };
   if (JSON.stringify(hostStatus) !== lastHostStatus) {
@@ -3377,9 +3307,6 @@ function applyState(st) {
     }
     setMoodClass(st.mood);  // 다른 클래스(끌기·집중·메뉴 막대로 보내기 등)는 건드리지 않는다
 
-    document.querySelectorAll(".mood-btn").forEach(b => {
-      b.classList.toggle("active", b.dataset.mood === st.mood);
-    });
     updateMaterialUI();
 
     if (RoMotion.busy()) {
@@ -3397,7 +3324,7 @@ function applyState(st) {
     }
   }
 
-  const showClear = !!(st.last_answer || st.mood === "anxious" || locked);
+  const showClear = !!(st.can_clear_notice || (askNotice && Date.now() < askNoticeUntil && !st.busy && !askInput.disabled));
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
   const counts = st.counts || {};
@@ -3428,6 +3355,7 @@ function applyState(st) {
   if (setupCard.dataset.key !== setupKey) {
     setupCard.dataset.key = setupKey;
     setupCard.style.display = st.setup ? "flex" : "none";
+    if (st.setup) document.getElementById("setupSummary").textContent = `${st.setup.steps[0].what}. 질문 준비가 필요하지만 기록은 지금도 됩니다.`;
     if (st.setup) setupText.replaceChildren(...st.setup.steps.map(s => h("div", {},
       h("div", { text: `· ${s.what}` }), h("div", { class: "block-sub" }, "터미널: ", h("code", { text: s.do })),
       s.why ? h("div", { class: "block-sub", text: s.why }) : null)));
@@ -4259,7 +4187,7 @@ const RoMotion = (() => {
   }
   function ensureLoop() { if (!manual && raf == null) raf = requestAnimationFrame(loop); }
 
-  /* 설정 화면·메뉴의 미리보기용 합성 입력 */
+  /* 네이티브 메뉴의 미리보기용 합성 입력 */
   let demoTimer = null;
   function demo(name, done) {
     clearInterval(demoTimer);
