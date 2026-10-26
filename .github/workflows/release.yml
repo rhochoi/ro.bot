@@ -1,16 +1,19 @@
-# main에 머지되면 테스트 후 날짜 버전 태그(vYYYY.M.D, 같은 날 여러 번이면 .1, .2 …)와 Release를 만든다.
+# PR과 main 푸시에서 테스트를 돌리고, main에 머지되면 날짜 버전 태그(vYYYY.M.D, 같은 날 여러 번이면 .1, .2 …)와 Release를 만든다.
 # 패키지 버전은 setuptools-scm이 이 태그에서 계산하므로 사람이 버전을 고칠 일이 없다.
 name: release
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
+# 태그 번호가 겹치지 않게 main 푸시만 한 줄로 세우고, PR 검사는 PR마다 따로 돈다
 concurrency:
-  group: release
+  group: ${{ github.event_name == 'push' && 'release' || format('pr-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
@@ -24,8 +27,12 @@ jobs:
         with:
           python-version: "3.13"
       - name: test
-        run: python -m unittest discover -s tests -t .
+        # 일부 테스트가 pytest 방식(tmp_path·monkeypatch)이라 pytest로 돌린다. unittest 방식 테스트도 함께 실행된다.
+        run: |
+          python -m pip install pytest
+          python -m pytest -q
       - name: tag and release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

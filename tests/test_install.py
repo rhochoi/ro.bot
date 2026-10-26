@@ -43,7 +43,8 @@ echo "rog-bot 0.1.0"
 
 class InstallScriptTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # 설치 스크립트가 가짜 펫을 배경에서 띄워 정리와 겹칠 수 있다: 정리 실패로 테스트가 깨지지 않게 한다
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         t = Path(self.tmp.name)
         self.stubs, self.home, self.log = t / "stubs", t / "home", t / "log"
         self.stubs.mkdir()
