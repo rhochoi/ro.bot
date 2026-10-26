@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import ask, fsutil, log, route
+from . import ask, fsutil, log, mapper, route
 
 ARMS = ("ctx", "none", "explore")
 HOME = "~/.ro"
@@ -43,7 +43,7 @@ STALE_SECONDS = 3600
 
 
 def _git(path, *args):
-    r = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, timeout=10)
+    r = subprocess.run(mapper.git_argv(path, *args), capture_output=True, text=True, timeout=10)
     return r.stdout.strip() if r.returncode == 0 else ""
 
 

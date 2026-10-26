@@ -10,6 +10,7 @@ from . import config, findeval, fsutil, log, ocr
 from .extract import IMAGE_EXTENSIONS, MAX_FILE_BYTES, extract_text
 
 HIDDEN_SNIPPET = '(민감 패턴 포함, 조각 숨김)'
+REDACT_VERSION = 2  # log.redact 규칙을 넓힐 때 올린다: 예전 규칙으로 저장된 본문을 버리고 다시 색인
 
 
 class Index:
@@ -41,6 +42,12 @@ class Index:
                 CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5(text, tokenize='trigram');
                 CREATE TEMP TABLE scope(id INTEGER PRIMARY KEY);
             ''')
+            # 마스킹 규칙이 바뀌면 예전 규칙으로 저장된 본문을 지우고 다시 색인한다(secure_delete로 덮어씀)
+            if self.db.execute('PRAGMA user_version').fetchone()[0] < REDACT_VERSION:
+                with self.db:
+                    self.db.execute('DELETE FROM files')
+                    self.db.execute('DELETE FROM body')
+                self.db.execute(f'PRAGMA user_version={REDACT_VERSION}')
         except BaseException:
             self.db.close()
             raise

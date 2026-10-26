@@ -280,7 +280,8 @@ def test_timeout_pending_in_index(area, tmp_path, monkeypatch):
     paths = [image(root, f'{i}.png') for i in range(2)]
     helper(tmp_path, monkeypatch, slow=True)
     with findindex.Index(home, [root]) as index:
-        counts = index.ensure(paths, budget_s=0.3)
+        # 도우미가 첫 결과를 낸 뒤 5초 잠든다. 예산은 부하 중 파이썬 시작 시간을 넘게 두되 5초보다 훨씬 짧게
+        counts = index.ensure(paths, budget_s=2.0)
         assert counts['ocr'] == counts['pending'] == 1
         assert index.status()['files'] == 1
 

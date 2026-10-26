@@ -300,6 +300,16 @@ def _unique(dest, taken):
 
 
 # ---------- 계획 ----------
+def _item_id(p, used):
+    """경로에서 짧은 ID(8자). 드물게 겹치면 겹치지 않을 때까지 늘린다(겹치면 다른 파일이 승인될 수 있음)."""
+    digest = hashlib.sha1(f"organize:{p}".encode()).hexdigest()
+    n = 8
+    while digest[:n] in used:
+        n += 4
+    used.add(digest[:n])
+    return digest[:n]
+
+
 def _dir(home):
     return Path(home).expanduser() / "organize"  # 예전 계획 위치(읽기만)
 
@@ -332,7 +342,7 @@ def scan(root=ROOT, dest_root=DEST_ROOT, extractor=extract, now=None, today=None
     recent = []
     files = list(_candidates(root, dest_root, now, recent))
     texts = extractor([p for p, _ in files])
-    items, taken = [], set()
+    items, taken, ids = [], set(), set()
     for p, st in files:
         text, meta = (_nfc(x) for x in texts.get(str(p), ("", "")))
         named = p.with_name(_nfc(p.name))  # 판단용 이름. 실제 이동은 원래 경로 p로 한다
@@ -343,7 +353,7 @@ def scan(root=ROOT, dest_root=DEST_ROOT, extractor=extract, now=None, today=None
         dest = _unique(dest_root / cat / f"{prefix}_{title}{p.suffix.lower()}", taken)
         taken.add(dest)
         items.append({
-            "id": hashlib.sha1(f"organize:{p}".encode()).hexdigest()[:8], "path": str(p),
+            "id": _item_id(p, ids), "path": str(p),
             "size": st.st_size, "mtime": int(st.st_mtime), "sha": _sha(p), "category": cat,
             "dest": str(dest), "confidence": conf, "review": conf < MIN_CONFIDENCE,
             "reasons": reasons + [f"날짜: {why}"], "edited": False,

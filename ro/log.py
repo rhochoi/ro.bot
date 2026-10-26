@@ -16,14 +16,17 @@ LOG_DIR = "~/.ro/log"
 SECRET_KEY = re.compile(r"pass(word)?|secret|token|api[_-]?key|credential|private[_-]?key", re.I)
 SECRET_VALUE = re.compile(
     r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
-    r"|AIza[0-9A-Za-z_-]{30,}|xox[abp]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|AIza[0-9A-Za-z_-]{30,}|xox[abp]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
     r"|\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+)"  # JWT
 )
 MASK = "[REDACTED]"
 # 자유 문장 속 비밀: "password=..." "token: ..." "Bearer ..." (키 이름은 남기고 값만 가린다)
-# 값이 따옴표로 묶이면 따옴표 안 전체(공백 포함)를 가린다.
+# 값이 따옴표로 묶이면 따옴표 안 전체(공백 포함)를 가린다. 환경변수 이름(DB_PASSWORD·OPENAI_API_KEY·
+# AWS_SECRET_ACCESS_KEY·PGPASSWORD)도 잡되, token_count·tokens처럼 뒤에 다른 말이 붙은 이름은 그대로 둔다.
 SECRET_ASSIGN = re.compile(
-    r"\b(pass(?:word|wd)?|secret|token|api[_-]?key|authorization)(\s*[:=]\s*)(?!\[REDACTED\])"
+    r"(?<![A-Za-z0-9_-])((?:[A-Za-z0-9]+[_-])*(?:PG)?(?:pass(?:word|wd)?|secret|token|api[_-]?key|authorization)"
+    r"(?:[_-]?(?:access[_-]?)?key)?)(\s*[:=]\s*)(?!\[REDACTED\])"
     r"(\"[^\"]*\"|'[^']*'|\S+)", re.I)
 # "비밀번호는 hunter2"처럼 조사로 이어진 값: 숫자·기호가 섞인 낱말만 비밀로 본다("비밀번호는 어떻게"는 그대로)
 SECRET_KO = re.compile(

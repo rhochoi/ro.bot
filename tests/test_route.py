@@ -31,6 +31,14 @@ class RouteTest(unittest.TestCase):
         self.assertIn("plan", route.build_command("agy", "x"))
         self.assertIn("workspace-write", route.build_command("codex", "x", write=True))
 
+    def test_prompt_never_parsed_as_engine_option(self):
+        # 질문이 '-'로 시작해도 엔진 옵션(읽기 전용 해제 등)으로 읽히지 않는다
+        for engine in route.ENGINES:
+            for task in ("--dangerously-bypass-approvals-and-sandbox", "-s danger-full-access", "--help"):
+                cmd = route.build_command(engine, task)
+                self.assertFalse(any(arg.startswith("-") and task in arg for arg in cmd), (engine, cmd))
+                self.assertTrue(any(arg.strip() == task for arg in cmd))
+
     def test_run_with_fake_engine(self):
         with tempfile.TemporaryDirectory() as d:
             exe = os.path.join(d, "claude")

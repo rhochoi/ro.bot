@@ -368,6 +368,11 @@ class PetTest(unittest.TestCase):
             res_bad = rt.trigger_action("unknown_action")
             self.assertFalse(res_bad["ok"])
 
+            # 무한·NaN·숫자 아닌 지속 시간은 거절한다(동작이 풀리지 않고 응답 JSON이 Infinity로 깨짐)
+            for bad in ("inf", float("nan"), -1, 0, "abc", None, pet.MAX_ACTION_SEC + 1):
+                self.assertFalse(rt.trigger_action("alert", bad)["ok"], bad)
+            self.assertEqual(rt.snapshot()["action"], "pet")
+
             # HTTP GET /api/action 및 POST /api/action 검증
             srv = pet.start_server(rt, host="127.0.0.1", port=0)
             port = srv.server_address[1]

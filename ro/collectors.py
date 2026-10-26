@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import ambient, config, fsutil, log
+from . import ambient, config, fsutil, log, mapper
 
 HOME = "~/.ro"
 FIRST_RUN_DAYS = 30
@@ -30,6 +30,7 @@ FIRST_RUN_MAX = 2000
 IDLE_SECONDS = 1800  # 이 시간 이상 변화 없는 세션만 '끝난 세션'으로 기록
 SOURCES = ("git", "shell", "sessions")
 SESSION_ENGINES = ("codex", "claude")
+GIT_TIMEOUT = 10  # 네트워크 드라이브의 저장소에서 수집이 멈추지 않게
 # 하위 명령이 의미 있는 프로그램만 두 번째 토큰을 남긴다(echo secret 같은 인자 유출 방지)
 SUBCMD_PROGS = {"git", "gh", "npm", "npx", "pnpm", "yarn", "docker", "brew", "cargo", "pip", "pip3",
                 "uv", "kubectl", "make", "ro"}
@@ -67,8 +68,7 @@ def set_allow(source, target=None, enabled=True, home=HOME):
     cfg = load_config(home)
     if source == "git":
         repo = str(Path(target).expanduser().resolve())
-        if enabled and subprocess.run(["git", "-C", repo, "rev-parse", "--is-inside-work-tree"],
-                                      capture_output=True, text=True).returncode != 0:
+        if enabled and _git(repo, "rev-parse", "--is-inside-work-tree").returncode != 0:
             raise ValueError(f"git 저장소가 아닙니다: {repo}")
         repos = [r for r in cfg["git"] if r != repo]
         cfg["git"] = repos + ([repo] if enabled else [])
@@ -122,12 +122,19 @@ def _emit(source, kind, at, summary, data, dry, log_dir):
 
 
 # ---------- git ----------
+def _git(repo, *args):
+    try:
+        return subprocess.run(mapper.git_argv(repo, *args), capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", "")
+
+
 def collect_git(cfg, state, dry=False, home=HOME, log_dir=log.LOG_DIR):
     n = 0
     for repo in cfg["git"]:
         if not Path(repo).is_dir():
             continue
-        git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)  # noqa: E731
+        git = lambda *a: _git(repo, *a)  # noqa: E731
         head = git("rev-parse", "HEAD").stdout.strip()
         if not head:
             continue

@@ -110,6 +110,7 @@ PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk")
                 "focus": (True, False)}
 RECENT_MAX = 10
 TIMELINE_MAX = 60
+MAX_ACTION_SEC = 60.0  # 상호작용 한 번이 이어지는 최대 시간
 PREVIEW_TTL_SEC = 600.0  # 보내기 전 확인을 받은 계획이 이보다 오래되면 다시 확인받는다
 
 
@@ -224,14 +225,20 @@ class PetRuntime:
         """모션 상호작용(ACTIONS: 숨쉬기·두리번·걷기·생각·깜짝·졸음·시선·누름·쓰다듬기·끌기·흔들기·착지·성공·실패)을 즉시 발동한다."""
         if action not in ACTIONS:
             return {"ok": False, "error": f"지원하지 않는 상호작용: {action}"}
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "duration은 숫자여야 합니다."}
+        if not 0 < duration <= MAX_ACTION_SEC:  # inf·nan이면 동작이 풀리지 않고 응답 JSON도 깨진다
+            return {"ok": False, "error": f"duration은 0초 초과 {MAX_ACTION_SEC}초 이하여야 합니다."}
         now = time.time()
         with self._lock:
             self.current_action = action
-            self.action_until = now + float(duration)
+            self.action_until = now + duration
         return {
             "ok": True,
             "action": action,
-            "duration": float(duration),
+            "duration": duration,
             "label": ACTION_LABELS.get(action, action),
             "desc": ACTION_DESCS.get(action, "")
         }
@@ -4995,8 +5002,7 @@ def make_handler(runtime):
                 self._send_json(200, runtime.clear_notice())
             elif parsed.path == "/api/action":
                 act = data.get("action") or data.get("name", "")
-                dur = float(data.get("duration", 4.0))
-                self._send_json(200, runtime.trigger_action(act, dur))
+                self._send_json(200, runtime.trigger_action(act, data.get("duration", 4.0)))
             else:
                 self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -5037,7 +5043,7 @@ def ensure_mac_binary(force_build=False):
 
 def _is_pet_process(pid, key):
     """PID가 재사용됐을 수 있으니 명령줄이 실제 ro pet / ro-pet-host일 때만 참."""
-    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=5)
     cmd = r.stdout.strip()
     if key == "host_pid":
         return "ro-pet-host" in cmd
@@ -5063,7 +5069,10 @@ def stop_existing_pets(home=learn.HOME):
         except Exception:
             pass
     if sys.platform == "darwin":
-        subprocess.run(["pkill", "-f", "ro-pet-host"], capture_output=True)
+        try:
+            subprocess.run(["pkill", "-f", "ro-pet-host"], capture_output=True, timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _write_pid_file(home, host_pid=None):

@@ -116,6 +116,9 @@ def installed_fallback(engine):
 
 
 def build_command(engine, task, write=False, cwd=None, skip_git_check=False, model=""):
+    # '-'로 시작하는 프롬프트는 엔진 CLI가 옵션으로 읽는다(예: 읽기 전용을 푸는 옵션). 공백을 앞에 붙여 값으로만 읽히게 한다.
+    if task.startswith("-"):
+        task = " " + task
     if engine == "claude":
         cmd = ["claude", "-p", task, "--permission-mode", "acceptEdits" if write else "plan"]
         return cmd + (["--model", model] if model else [])

@@ -3,9 +3,9 @@
 #   공개 저장소:   curl -fsSL https://raw.githubusercontent.com/rhochoi/ro.bot/main/install.sh | bash
 #   비공개 저장소: gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.github.raw" | bash
 #
-# 하는 일: 저장소가 공개면 로그인 없이 진행, 아니면 gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정
+# 하는 일: 저장소가 공개면 로그인 없이 진행, 아니면 gh 로그인 확인 → git이 gh 자격 증명을 쓰도록 설정(확인 후)
 #          → uv 설치(없을 때, 확인 후)
-#          → uv가 Python까지 받아 ro 설치 → PATH 안내 → ro doctor → (macOS) 펫 띄우기.
+#          → uv가 Python까지 받아 ro 설치 → PATH 추가(확인 후) → ro doctor → (macOS) 펫 띄우기.
 # 다시 실행하면 최신 버전으로 재설치하고 펫을 새로 띄운다. 기억·로그(~/.ro)는 건드리지 않는다.
 # 환경 변수: RO_REF=브랜치|태그(기본 main), RO_YES=1(확인 질문 생략), RO_PET=0(펫 자동 실행 끄기)
 set -euo pipefail
@@ -55,7 +55,9 @@ main() {
     fi
     gh api "repos/$REPO" --silent 2>/dev/null \
       || die "$REPO 에 접근할 수 없습니다. 저장소 초대를 수락했는지 확인하세요."
-    say "git이 GitHub 자격 증명으로 gh를 쓰도록 설정합니다(gh auth setup-git)."
+    # 전역 git 설정(~/.gitconfig의 자격 증명 도우미)을 바꾸므로 먼저 묻는다
+    confirm "비공개 저장소를 받으려면 git이 gh 자격 증명을 쓰도록 전역 설정을 바꿔야 합니다(gh auth setup-git). 진행할까요?" \
+      || die "중단했습니다. 직접 설정하려면: gh auth setup-git 후 다시 실행하세요."
     gh auth setup-git
   fi
 
@@ -83,10 +85,13 @@ main() {
   case ":$PATH:" in
     *":$bin:"*) ;;
     *)
-      say "$bin 을 PATH에 추가합니다(uv tool update-shell, 셸 설정 파일 수정)."
-      uv tool update-shell
+      if confirm "$bin 을 PATH에 추가하려면 셸 설정 파일을 고쳐야 합니다(uv tool update-shell). 진행할까요?"; then
+        uv tool update-shell
+        warn "새 터미널을 열어야 ro 명령이 잡힙니다."
+      else
+        warn "셸 설정을 바꾸지 않았습니다. 직접 추가하세요: export PATH=\"$bin:\$PATH\""
+      fi
       export PATH="$bin:$PATH"
-      warn "새 터미널을 열어야 ro 명령이 잡힙니다."
       ;;
   esac
 
