@@ -113,7 +113,7 @@ SOURCE
             for key in ("glass", "tint"):
                 for value in pet.PREF_CHOICES[key]:
                     self.assertTrue(rt.set_prefs({key: value})["ok"])
-                for value in ("bogus", "#FF4B1F", "</script>", None, {}, [], True):
+                for value in ("bogus", "#8FB39A", "</script>", None, {}, [], True):
                     before = rt.prefs()
                     self.assertFalse(rt.set_prefs({key: value})["ok"])
                     self.assertEqual(rt.prefs(), before)
@@ -205,7 +205,7 @@ class LookWebTest(unittest.TestCase):
             self.assertGreaterEqual(ratio, 4.5, name)
             self.assertIn(current["eye"], ("#1A1917", "#F5F2EB"))
         page.reload()
-        self.assertEqual(page.evaluate(styles)["fill"], pet.TINT_PRESETS["amber"])
+        self.assertEqual(page.evaluate(styles)["fill"], pet.TINT_PRESETS["lilac"])
         page.evaluate("setLookPref('tint', 'none')")
         self.assertEqual(page.evaluate(styles), baseline)
         self.assertEqual(page.locator("#roBot").evaluate("e => e.style.getPropertyValue('--bot-fill')"), "")
@@ -213,12 +213,12 @@ class LookWebTest(unittest.TestCase):
         self.assertEqual(page.locator("#roBot").evaluate("e => e.style.getPropertyValue('--bot-eye')"), "")
 
     def test_invalid_choice_and_failed_save_restore_host(self):
-        page = self.page({"material": "clay", "glass": "light", "tint": "coral"}, native=True)
+        page = self.page({"material": "clay", "glass": "light", "tint": "sage"}, native=True)
         page.evaluate("setLookPref('tint', '__proto__'); setLookPref('theme', 'bogus'); setLookPref('glass', 'bogus')")
-        self.assertEqual(self.rt.prefs()["tint"], "coral")
+        self.assertEqual(self.rt.prefs()["tint"], "sage")
         page.route("**/api/prefs", lambda route: route.fulfill(status=200, content_type="application/json", body='{"ok":false}'))
         for key, value in (("glass", "dark"), ("tint", "sky")):
             page.evaluate("([k, v]) => setLookPref(k, v)", [key, value])
             self.assertEqual(page.evaluate("hostMessages.filter(m => m.type === 'look').at(-1)"),
-                             {"type": "look", "theme": "auto", "glass": "light", "tint": "coral"})
-        self.assertEqual(page.locator("#roBot").evaluate("e => e.style.getPropertyValue('--bot-fill')"), "#FF4B1F")
+                             {"type": "look", "theme": "auto", "glass": "light", "tint": "sage"})
+        self.assertEqual(page.locator("#roBot").evaluate("e => e.style.getPropertyValue('--bot-fill')"), "#8FB39A")

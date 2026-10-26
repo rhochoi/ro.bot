@@ -104,8 +104,7 @@ ACTION_DESCS = {
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
-TINT_PRESETS = {"coral": "#FF4B1F", "sage": "#8FB39A", "sky": "#8EBBE0",
-                "lilac": "#B7A4E0", "amber": "#E8B04A"}
+TINT_PRESETS = {"sage": "#8FB39A", "sky": "#8EBBE0", "lilac": "#B7A4E0"}
 PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk"),
                 "glass": ("auto", "light", "dark"), "tint": ("none", *TINT_PRESETS),
                 "focus": (True, False)}
@@ -2499,24 +2498,16 @@ PET_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- 펫 색: 유리 색조와 몸통 색. 상태창 색(라이트/다크)은 ⋯ 메뉴에서 따로 정한다 -->
-        <div class="setting-block">
-          <div class="block-title">유리 색</div>
-          <div class="options-row">
-            <button class="opt-btn look-opt" data-key="glass" data-value="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
-            <button class="opt-btn look-opt" data-key="glass" data-value="light">밝게</button>
-            <button class="opt-btn look-opt" data-key="glass" data-value="dark">어둡게</button>
-          </div>
-        </div>
+        <!-- 펫 몸통 색: 시스템·라이트·다크(유리 색조) 또는 색. 상태창 색(라이트/다크)은 ⋯ 메뉴에서 따로 정한다 -->
         <div class="setting-block">
           <div class="block-title">몸통 색</div>
           <div class="options-row" style="flex-wrap:wrap;">
-            <button class="opt-btn look-opt" data-key="tint" data-value="none">기본</button>
-            <button class="opt-btn look-opt" data-key="tint" data-value="coral">코랄</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="light">라이트</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="dark">다크</button>
             <button class="opt-btn look-opt" data-key="tint" data-value="sage">세이지</button>
             <button class="opt-btn look-opt" data-key="tint" data-value="sky">하늘</button>
             <button class="opt-btn look-opt" data-key="tint" data-value="lilac">라일락</button>
-            <button class="opt-btn look-opt" data-key="tint" data-value="amber">앰버</button>
           </div>
         </div>
 
@@ -2826,9 +2817,9 @@ function relativeLuminance(hex) {
 
 function updateLookUI() {
   document.querySelectorAll(".look-opt").forEach(btn => {
-    const cur = btn.dataset.key === "glass" ? glassMode : tintMode;
-    btn.classList.toggle("active", btn.dataset.value === cur);
-    btn.setAttribute("aria-pressed", String(btn.dataset.value === cur));
+    const on = btn.dataset.key === "glass" ? tintMode === "none" && btn.dataset.value === glassMode : btn.dataset.value === tintMode;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-pressed", String(on));
   });
   document.body.classList.toggle("glass-dark", glassIsDark());
   const bot = document.getElementById("roBot");
@@ -3008,6 +2999,8 @@ document.querySelectorAll(".mat-opt").forEach(btn => {
 document.querySelectorAll(".look-opt").forEach(btn => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
+    // 시스템·라이트·다크를 고르면 색 입히기는 끈다
+    if (btn.dataset.key === "glass" && tintMode !== "none") window.setLookPref("tint", "none");
     window.setLookPref(btn.dataset.key, btn.dataset.value);
   });
 });
