@@ -2499,13 +2499,24 @@ PET_HTML = r"""<!DOCTYPE html>
           </div>
         </div>
 
-        <!-- 색상 모드 -->
+        <!-- 펫 색: 유리 색조와 몸통 색. 상태창 색(라이트/다크)은 ⋯ 메뉴에서 따로 정한다 -->
         <div class="setting-block">
-          <div class="block-title">색상 모드</div>
+          <div class="block-title">유리 색</div>
           <div class="options-row">
-            <button class="opt-btn theme-opt" data-theme="ink">라이트</button>
-            <button class="opt-btn theme-opt" data-theme="chalk">다크</button>
-            <button class="opt-btn theme-opt" data-theme="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="auto" title="macOS 화면 모드(라이트/다크)를 따릅니다">시스템</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="light">밝게</button>
+            <button class="opt-btn look-opt" data-key="glass" data-value="dark">어둡게</button>
+          </div>
+        </div>
+        <div class="setting-block">
+          <div class="block-title">몸통 색</div>
+          <div class="options-row" style="flex-wrap:wrap;">
+            <button class="opt-btn look-opt" data-key="tint" data-value="none">기본</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="coral">코랄</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="sage">세이지</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="sky">하늘</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="lilac">라일락</button>
+            <button class="opt-btn look-opt" data-key="tint" data-value="amber">앰버</button>
           </div>
         </div>
 
@@ -2798,10 +2809,6 @@ function updateMaterialUI() {
 function updateThemeUI() {
   const isChalk = themeMode === "chalk" || (themeMode === "auto" && systemDark);
   document.body.classList.toggle("theme-chalk", isChalk);
-  document.querySelectorAll(".theme-opt").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.theme === themeMode);
-    btn.setAttribute("aria-pressed", String(btn.dataset.theme === themeMode));
-  });
   updateLookUI();
 }
 
@@ -2818,6 +2825,11 @@ function relativeLuminance(hex) {
 }
 
 function updateLookUI() {
+  document.querySelectorAll(".look-opt").forEach(btn => {
+    const cur = btn.dataset.key === "glass" ? glassMode : tintMode;
+    btn.classList.toggle("active", btn.dataset.value === cur);
+    btn.setAttribute("aria-pressed", String(btn.dataset.value === cur));
+  });
   document.body.classList.toggle("glass-dark", glassIsDark());
   const bot = document.getElementById("roBot");
   bot.style.removeProperty("--bot-fill");
@@ -2831,12 +2843,13 @@ function updateLookUI() {
     bot.style.setProperty("--bot-fill", color);
     bot.style.setProperty("--bot-eye", contrast(ink) >= contrast(chalk) ? ink : chalk);
   }
-  notifyHost({ type: "look", glass: glassMode, tint: tintMode });
+  notifyHost({ type: "look", theme: themeMode, glass: glassMode, tint: tintMode });
   kickNativeGlass();
 }
 
 window.setLookPref = function(key, value) {
-  if (key === "glass" && GLASS_CHOICES.includes(value)) glassMode = value;
+  if (key === "theme" && THEME_CHOICES.includes(value)) { themeMode = value; updateThemeUI(); }
+  else if (key === "glass" && GLASS_CHOICES.includes(value)) glassMode = value;
   else if (key === "tint" && (value === "none" || Object.keys(TINT_PRESETS).includes(value))) tintMode = value;
   else return;
   updateLookUI();
@@ -2992,12 +3005,10 @@ document.querySelectorAll(".mat-opt").forEach(btn => {
   });
 });
 
-document.querySelectorAll(".theme-opt").forEach(btn => {
+document.querySelectorAll(".look-opt").forEach(btn => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();
-    themeMode = btn.dataset.theme;
-    updateThemeUI();
-    savePrefs({ theme: themeMode });
+    window.setLookPref(btn.dataset.key, btn.dataset.value);
   });
 });
 

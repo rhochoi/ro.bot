@@ -38,6 +38,7 @@ const updateMaterialUI = () => updateLookUI();
 let nativeGlassKind = 'liquid', nativeGlassSent = '', nativeGlassLoop = false, nativeGlassTick = 0;
 const layerHead = {}, layerBody = {}, layerBase = {};
 const glassPose = () => [0, 0, 80, 20, 0, 1];
+const THEME_CHOICES = ['ink', 'chalk', 'auto'];
 let succeed = true;
 const stored = {};
 const apiPost = async (path, changes) => {
@@ -49,7 +50,7 @@ SOURCE
 (async () => {
   updateThemeUI();
   assert.deepEqual(Object.fromEntries(props), {});
-  assert.deepEqual(messages.at(-1), {type: 'look', glass: 'auto', tint: 'none'});
+  assert.deepEqual(messages.at(-1), {type: 'look', theme: 'auto', glass: 'auto', tint: 'none'});
   for (const theme of ['ink', 'chalk']) {
     themeMode = theme;
     updateThemeUI();
@@ -90,14 +91,14 @@ SOURCE
   const count = messages.length;
   nativeGlassTick = 1; syncNativeGlass();
   assert.equal(messages.length, count);
-  for (const [key, value] of [['glass', 'bogus'], ['tint', '__proto__'], ['theme', 'chalk']]) {
+  for (const [key, value] of [['glass', 'bogus'], ['tint', '__proto__'], ['theme', 'bogus']]) {
     await window.setLookPref(key, value);
     assert.equal(messages.length, count);
   }
   succeed = false;
   for (const [key, value] of [['glass', 'dark'], ['tint', 'sky']]) {
     await window.setLookPref(key, value);
-    assert.deepEqual(messages.at(-1), {type: 'look', glass: 'auto', tint: 'sage'});
+    assert.deepEqual(messages.at(-1), {type: 'look', theme: 'ink', glass: 'auto', tint: 'sage'});
   }
   assert.equal(stored.tint, 'sage');
   assert.equal(stored.glass, 'auto');
@@ -167,7 +168,7 @@ class LookWebTest(unittest.TestCase):
         self.assertFalse(msg["dark"])
         self.assertEqual(msg["tint"], pet.TINT_PRESETS["sage"])
         self.assertEqual(page.evaluate("hostMessages.filter(m => m.type === 'look').at(-1)"),
-                         {"type": "look", "glass": "light", "tint": "sage"})
+                         {"type": "look", "theme": "chalk", "glass": "light", "tint": "sage"})
         for theme, glass, system, dark in (("ink", "dark", False, True), ("chalk", "auto", False, False), ("ink", "auto", True, True)):
             page.evaluate("([theme, glass, system]) => {systemDark = system; setThemeModeFromHost(theme); return setLookPref('glass', glass)}", [theme, glass, system])
             page.wait_for_function("dark => hostMessages.filter(m => m.type === 'glass' && m.on).at(-1).dark === dark", arg=dark)
@@ -213,11 +214,11 @@ class LookWebTest(unittest.TestCase):
 
     def test_invalid_choice_and_failed_save_restore_host(self):
         page = self.page({"material": "clay", "glass": "light", "tint": "coral"}, native=True)
-        page.evaluate("setLookPref('tint', '__proto__'); setLookPref('theme', 'chalk'); setLookPref('glass', 'bogus')")
+        page.evaluate("setLookPref('tint', '__proto__'); setLookPref('theme', 'bogus'); setLookPref('glass', 'bogus')")
         self.assertEqual(self.rt.prefs()["tint"], "coral")
         page.route("**/api/prefs", lambda route: route.fulfill(status=200, content_type="application/json", body='{"ok":false}'))
         for key, value in (("glass", "dark"), ("tint", "sky")):
             page.evaluate("([k, v]) => setLookPref(k, v)", [key, value])
             self.assertEqual(page.evaluate("hostMessages.filter(m => m.type === 'look').at(-1)"),
-                             {"type": "look", "glass": "light", "tint": "coral"})
+                             {"type": "look", "theme": "auto", "glass": "light", "tint": "coral"})
         self.assertEqual(page.locator("#roBot").evaluate("e => e.style.getPropertyValue('--bot-fill')"), "#FF4B1F")

@@ -437,7 +437,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var mode: PetMode = .desktop
     private var urlString: String = "http://127.0.0.1:8765/"
     private var wanderEnabled: Bool = false
-    private var lookPrefs = ["glass": "auto", "tint": "none"]
+    private var lookPrefs = ["theme": "auto"]
     private var lookItems: [NSMenuItem] = []
     private var bubbleOpen: Bool = false
     private var placeTop: Bool = false
@@ -929,14 +929,11 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         menu.addItem(matRoot)
 
         let lookMenu = NSMenu()
-        let looks: [(String, String, [(String, String)])] = [
-            ("유리 색", "glass", [("시스템 따라가기", "auto"), ("항상 밝게", "light"), ("항상 어둡게", "dark")]),
-            ("몸통 색", "tint", [("기본", "none"), ("코랄", "coral"), ("세이지", "sage"),
-                                ("하늘", "sky"), ("라일락", "lilac"), ("앰버", "amber")])
+        // 상태창 색(라이트/다크). 펫 색(유리·몸통)은 상태창 설정 탭에서 고른다
+        let looks: [(String, [(String, String)])] = [
+            ("theme", [("시스템 따라가기", "auto"), ("라이트", "ink"), ("다크", "chalk")])
         ]
-        for (title, key, choices) in looks {
-            if !lookMenu.items.isEmpty { lookMenu.addItem(NSMenuItem.separator()) }
-            lookMenu.addItem(menuSection(title))
+        for (key, choices) in looks {
             for (label, value) in choices {
                 let item = NSMenuItem(title: label, action: #selector(selectLook(_:)), keyEquivalent: "")
                 item.target = self
@@ -946,7 +943,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
                 lookMenu.addItem(item)
             }
         }
-        let lookRoot = NSMenuItem(title: "모양", action: nil, keyEquivalent: "")
+        let lookRoot = NSMenuItem(title: "상태창 색", action: nil, keyEquivalent: "")
         lookRoot.submenu = lookMenu
         menu.addItem(lookRoot)
 
