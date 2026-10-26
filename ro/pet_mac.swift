@@ -64,7 +64,7 @@ enum NativeGlass {
 
     /// 알약 모양(높이의 절반 반지름)으로 frame에 맞추고, 중심을 축으로 rotation도(웹 화면의 시계 방향)만큼 돌린다.
     /// 부모가 뒤집힌 좌표(아래로 +y)라 양수 회전이 화면에서 시계 방향이 되어 CSS rotate와 같은 방향이다. dark면 연기 낀 유리
-    static func shape(_ v: NSView, frame: NSRect, rotation: CGFloat, alpha: CGFloat, dark: Bool) {
+    static func shape(_ v: NSView, frame: NSRect, rotation: CGFloat, alpha: CGFloat, dark: Bool, tint: NSColor?) {
         v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         v.frameCenterRotation = 0  // 돌린 채로 frame을 바꾸면 테두리 상자 기준으로 바뀐다
         let sizeChanged = v.frame.size != frame.size
@@ -75,11 +75,12 @@ enum NativeGlass {
         if #available(macOS 26.0, *), let g = v as? NSGlassEffectView {
             g.style = .clear  // 뒤가 또렷이 비치고 가장자리에서 휘는 투명 유리(기본 .regular는 뿌옇다)
             g.cornerRadius = frame.height / 2
-            g.tintColor = dark ? NSColor.black.withAlphaComponent(0.28) : nil
+            g.tintColor = tint?.withAlphaComponent(0.32) ?? (dark ? NSColor.black.withAlphaComponent(0.28) : nil)
             return
         }
         #endif
         guard let e = v as? NSVisualEffectView else { return }
+        // 구형 NSVisualEffectView는 몸통 tint를 지원하지 않으므로 기존 material을 유지한다.
         e.material = dark ? .hudWindow : .popover
         if sizeChanged || e.maskImage == nil { e.maskImage = pillMask(frame.size) }
     }
@@ -90,6 +91,13 @@ enum NativeGlass {
             NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
             return true
         }
+    }
+
+    static func tintColor(_ hex: String?) -> NSColor? {
+        guard let hex = hex, hex.range(of: "^#[0-9A-Fa-f]{6}$", options: .regularExpression) != nil,
+              let rgb = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255,
+                       green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1)
     }
 }
 
@@ -429,6 +437,8 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     private var mode: PetMode = .desktop
     private var urlString: String = "http://127.0.0.1:8765/"
     private var wanderEnabled: Bool = false
+    private var lookPrefs = ["glass": "auto", "tint": "none"]
+    private var lookItems: [NSMenuItem] = []
     private var bubbleOpen: Bool = false
     private var placeTop: Bool = false
     private var placeLeft: Bool = false
@@ -918,6 +928,28 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         menu.addItem(NSMenuItem.separator())
         menu.addItem(matRoot)
 
+        let lookMenu = NSMenu()
+        let looks: [(String, String, [(String, String)])] = [
+            ("유리 색", "glass", [("테마 따라가기", "auto"), ("항상 밝게", "light"), ("항상 어둡게", "dark")]),
+            ("몸통 색", "tint", [("기본", "none"), ("코랄", "coral"), ("세이지", "sage"),
+                                ("하늘", "sky"), ("라일락", "lilac"), ("앰버", "amber")])
+        ]
+        for (title, key, choices) in looks {
+            if !lookMenu.items.isEmpty { lookMenu.addItem(NSMenuItem.separator()) }
+            lookMenu.addItem(menuSection(title))
+            for (label, value) in choices {
+                let item = NSMenuItem(title: label, action: #selector(selectLook(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = [key, value]
+                item.state = lookPrefs[key] == value ? .on : .off
+                lookItems.append(item)
+                lookMenu.addItem(item)
+            }
+        }
+        let lookRoot = NSMenuItem(title: "모양", action: nil, keyEquivalent: "")
+        lookRoot.submenu = lookMenu
+        menu.addItem(lookRoot)
+
         wanderItem = NSMenuItem(title: "돌아다니기", action: #selector(toggleWander), keyEquivalent: "w")
         wanderItem.target = self
         wanderItem.state = wanderEnabled ? .on : .off
@@ -1111,7 +1143,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
     }
 
     /// 웹 화면이 알려 준 몸통 세 층의 자리·기울기·불투명도에 유리를 맞춘다. on=false(재질이 다르거나 펫이 숨음)면 걷는다
-    private func updateGlass(on: Bool, rects: [[Double]], dark: Bool) {
+    private func updateGlass(on: Bool, rects: [[Double]], dark: Bool, tint: String?) {
         guard on, rects.count == 3, rects.allSatisfy({ $0.count == 6 }) else {
             glassLayer.isHidden = true
             return
@@ -1129,9 +1161,10 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)  // 숨쉬기·흔들기를 따라갈 때 미끄러지는 애니메이션 없이 바로 옮긴다
+        let color = NativeGlass.tintColor(tint)
         for (v, r) in zip(glassViews, rects) {
             NativeGlass.shape(v, frame: NSRect(x: r[0], y: r[1], width: r[2], height: r[3]),
-                              rotation: CGFloat(r[4]), alpha: CGFloat(r[5]), dark: dark)
+                              rotation: CGFloat(r[4]), alpha: CGFloat(r[5]), dark: dark, tint: color)
         }
         CATransaction.commit()
         glassLayer.isHidden = false
@@ -1450,6 +1483,11 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         webView.evaluateJavaScript("window.setMaterialFromHost && window.setMaterialFromHost('\(code)');", completionHandler: nil)
     }
 
+    @objc private func selectLook(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? [String], choice.count == 2 else { return }
+        webView.evaluateJavaScript("window.setLookPref && window.setLookPref('\(choice[0])', '\(choice[1])');", completionHandler: nil)
+    }
+
     @objc private func toggleWander() {
         wanderEnabled.toggle()
         wanderItem.state = wanderEnabled ? .on : .off
@@ -1512,9 +1550,19 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
         } else if type == "bubble" {
             let open = (dict["open"] as? Bool) ?? false
             setBubbleState(open)
+        } else if type == "look" {
+            for item in lookItems {
+                guard let choice = item.representedObject as? [String], choice.count == 2 else { continue }
+                if let value = dict[choice[0]] as? String, value == choice[1] { lookPrefs[choice[0]] = value }
+            }
+            for item in lookItems {
+                guard let choice = item.representedObject as? [String], choice.count == 2 else { continue }
+                item.state = lookPrefs[choice[0]] == choice[1] ? .on : .off
+            }
         } else if type == "glass" {
             let rects = (dict["rects"] as? [[NSNumber]])?.map { $0.map { $0.doubleValue } } ?? []
-            updateGlass(on: (dict["on"] as? Bool) ?? false, rects: rects, dark: (dict["dark"] as? Bool) ?? false)
+            updateGlass(on: (dict["on"] as? Bool) ?? false, rects: rects,
+                        dark: (dict["dark"] as? Bool) ?? false, tint: dict["tint"] as? String)
         } else if type == "toggleWander" {
             let enabled = (dict["enabled"] as? Bool) ?? !wanderEnabled
             wanderEnabled = enabled

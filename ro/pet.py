@@ -104,7 +104,10 @@ ACTION_DESCS = {
 RECORDING_WINDOW_SEC = 8.0
 RESOLVED_WINDOW_SEC = 10.0
 AUDIT_TTL_SEC = 30.0  # 로그·학습 파일이 그대로여도 권한·비밀값 감사는 이 주기로 다시 돈다
+TINT_PRESETS = {"coral": "#FF4B1F", "sage": "#8FB39A", "sky": "#8EBBE0",
+                "lilac": "#B7A4E0", "amber": "#E8B04A"}
 PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk"),
+                "glass": ("auto", "light", "dark"), "tint": ("none", *TINT_PRESETS),
                 "focus": (True, False)}
 RECENT_MAX = 10
 TIMELINE_MAX = 60
@@ -1786,7 +1789,7 @@ PET_HTML = r"""<!DOCTYPE html>
     -webkit-mask: radial-gradient(closest-side, transparent 58%, #000 82%, #000 100%);
     transition: background-position 0.45s cubic-bezier(.22, 1, .36, 1);
   }
-  body.theme-chalk.material-glass .g-env {
+  body.glass-dark.material-glass .g-env {
     --env-sky: rgba(190, 200, 225, 0.30);
     --env-haze: rgba(120, 132, 165, 0.20);
     --env-horizon: rgba(0, 0, 0, 0.30);
@@ -1812,12 +1815,12 @@ PET_HTML = r"""<!DOCTYPE html>
     --g-tint-bot: rgba(255, 255, 255, 0.04);
     backdrop-filter: none; -webkit-backdrop-filter: none;
   }
-  body.theme-chalk.material-glass.native-glass-blur .pill {
+  body.glass-dark.material-glass.native-glass-blur .pill {
     --g-tint-top: rgba(40, 42, 52, 0.25);
     --g-tint-bot: rgba(14, 15, 20, 0.30);
   }
   /* 어두운 색상 모드: 연기 낀 유리 */
-  body.theme-chalk.material-glass .pill {
+  body.glass-dark.material-glass .pill {
     --g-tint-top: rgba(40, 42, 52, 0.55);
     --g-tint-bot: rgba(14, 15, 20, 0.62);
     --g-sheen: rgba(255, 255, 255, 0.30);
@@ -1826,17 +1829,17 @@ PET_HTML = r"""<!DOCTYPE html>
     --g-rim-soft: rgba(255, 255, 255, 0.18);
     --g-edge: rgba(0, 0, 0, 0.55);
   }
-  body.theme-chalk.material-glass .pill::before { opacity: 0.45; }
-  body.theme-chalk.material-glass .pill::after { opacity: 0.6; }
+  body.glass-dark.material-glass .pill::before { opacity: 0.45; }
+  body.glass-dark.material-glass .pill::after { opacity: 0.6; }
   /* 눈: 밝은 유리엔 진한 눈, 연기 유리엔 밝은 눈. 윤곽 광채는 상자 테두리(box-shadow)가 아니라
      실제로 칠한 모양을 따라가는 drop-shadow로 준다 — > < ∩ ◍ 모양에서 상자(마름모·반원)가 보이지 않게 */
   body.material-glass { --bot-eye: #15161A; }
-  body.theme-chalk.material-glass { --bot-eye: #F6F4EF; }
+  body.glass-dark.material-glass { --bot-eye: #F6F4EF; }
   body.material-glass .eyes {  /* 웃는 눈(⌒)도 .eyes 안에 있어 같은 광채를 받는다 */
     z-index: 2;
     filter: drop-shadow(0 0 0.8px rgba(255, 255, 255, 0.95)) drop-shadow(0 0 1.6px rgba(255, 255, 255, 0.6));
   }
-  body.theme-chalk.material-glass .eyes {
+  body.glass-dark.material-glass .eyes {
     filter: drop-shadow(0 0 0.8px rgba(0, 0, 0, 0.9)) drop-shadow(0 0 2px rgba(0, 0, 0, 0.5));
   }
 
@@ -2731,6 +2734,10 @@ let currentAction = null;
 let actionTimer = null;
 let previewLockUntil = 0;
 const INITIAL_PREFS = __RO_PREFS__;
+const TINT_PRESETS = __RO_TINT_PRESETS__;
+const GLASS_CHOICES = ["auto", "light", "dark"];
+let glassMode = GLASS_CHOICES.includes(INITIAL_PREFS.glass) ? INITIAL_PREFS.glass : "auto";
+let tintMode = Object.keys(TINT_PRESETS).includes(INITIAL_PREFS.tint) ? INITIAL_PREFS.tint : "none";
 let materialMode = ["clay", "glass"].includes(INITIAL_PREFS.material) ? INITIAL_PREFS.material : "clay";
 let themeMode = ["ink", "chalk", "auto"].includes(INITIAL_PREFS.theme) ? INITIAL_PREFS.theme : "auto";
 let systemDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
@@ -2779,7 +2786,7 @@ function updateMaterialUI() {
     btn.classList.toggle("active", btn.dataset.mat === materialMode);
     btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
-  kickNativeGlass();
+  updateLookUI();
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
@@ -2792,17 +2799,59 @@ function updateThemeUI() {
     btn.classList.toggle("active", btn.dataset.theme === themeMode);
     btn.setAttribute("aria-pressed", String(btn.dataset.theme === themeMode));
   });
+  updateLookUI();
 }
+
+function glassIsDark() {
+  return glassMode === "auto" ? document.body.classList.contains("theme-chalk") : glassMode === "dark";
+}
+
+function relativeLuminance(hex) {
+  const rgb = hex.trim().slice(1).match(/../g).map(c => {
+    const s = parseInt(c, 16) / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+}
+
+function updateLookUI() {
+  document.body.classList.toggle("glass-dark", glassIsDark());
+  const bot = document.getElementById("roBot");
+  bot.style.removeProperty("--bot-fill");
+  bot.style.removeProperty("--bot-eye");
+  if (materialMode === "clay" && tintMode !== "none") {
+    const color = TINT_PRESETS[tintMode];
+    const css = getComputedStyle(bot);
+    const ink = css.getPropertyValue("--ink"), chalk = css.getPropertyValue("--chalk");
+    const lum = relativeLuminance(color);
+    const contrast = c => (Math.max(lum, relativeLuminance(c)) + 0.05) / (Math.min(lum, relativeLuminance(c)) + 0.05);
+    bot.style.setProperty("--bot-fill", color);
+    bot.style.setProperty("--bot-eye", contrast(ink) >= contrast(chalk) ? ink : chalk);
+  }
+  notifyHost({ type: "look", glass: glassMode, tint: tintMode });
+  kickNativeGlass();
+}
+
+window.setLookPref = function(key, value) {
+  if (key === "glass" && GLASS_CHOICES.includes(value)) glassMode = value;
+  else if (key === "tint" && (value === "none" || Object.keys(TINT_PRESETS).includes(value))) tintMode = value;
+  else return;
+  updateLookUI();
+  return savePrefs({ [key]: value });
+};
 
 /* 재질·색상은 ~/.ro/config.json에 저장하고, 페이지를 만들 때 미리 넣어 깜빡이지 않게 한다 */
 /* 저장이 확인되기 전에는 화면만 바뀐 상태다: 실패하면 마지막으로 저장된 값으로 되돌리고 알린다 */
-const savedPrefs = { material: materialMode, theme: themeMode };
+const savedPrefs = { material: materialMode, theme: themeMode, glass: glassMode, tint: tintMode };
 async function savePrefs(changes) {
   let r = null;
   try { r = await apiPost("/api/prefs", changes); } catch (err) {}
   if (r && r.ok) { Object.assign(savedPrefs, changes); return; }
   if ("material" in changes) { materialMode = savedPrefs.material; updateMaterialUI(); }
   if ("theme" in changes) { themeMode = savedPrefs.theme; updateThemeUI(); }
+  if ("glass" in changes) glassMode = savedPrefs.glass;
+  if ("tint" in changes) tintMode = savedPrefs.tint;
+  updateLookUI();
   const why = r ? (r.error || r.output || "") : "서버에 연결하지 못했어요";
   showToast([h("div", { class: "toast-head", text: "설정을 저장하지 못해 원래대로 되돌렸어요. 다시 시도해 주세요." }),
     why ? h("div", { class: "block-sub", text: why }) : null], 5000);
@@ -3171,11 +3220,12 @@ function syncNativeGlass() {
   let rects = [layerHead, layerBody, layerBase].map(glassPose);
   if (!rects.every(r => r[2] >= 1 && r[3] >= 1 && r[5] > 0.02)) rects = null;  // 숨은 펫
   setNativeGlassClass(!!rects);
-  const dark = document.body.classList.contains("theme-chalk");
-  const key = rects ? JSON.stringify(rects) + dark : "off";
+  const dark = glassIsDark();
+  const tint = TINT_PRESETS[tintMode];
+  const key = rects ? JSON.stringify(rects) + dark + (tint || "") : "off";
   if (key === nativeGlassSent) return;
   nativeGlassSent = key;
-  notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });
+  notifyHost(rects ? { type: "glass", on: true, rects, dark, ...(tint ? { tint } : {}) } : { type: "glass", on: false });
 }
 let webDragStart = null;
 let webDidDrag = false;
@@ -4740,8 +4790,9 @@ setPollRate(!bubble.classList.contains("hidden"));
 
 def render_html(token, prefs=None):
     """토큰과 저장된 화면 설정(재질·색상)을 넣어 페이지를 만든다. 설정은 고정 선택지만 통과시킨다."""
-    p = {k: v for k, v in (prefs or {}).items() if k in ("material", "theme") and v in PREF_CHOICES[k]}
-    return PET_HTML.replace("__RO_TOKEN__", token).replace("__RO_PREFS__", json.dumps(p))
+    p = {k: v for k, v in (prefs or {}).items() if k in ("material", "theme", "glass", "tint") and v in PREF_CHOICES[k]}
+    return (PET_HTML.replace("__RO_TOKEN__", token).replace("__RO_PREFS__", json.dumps(p))
+            .replace("__RO_TINT_PRESETS__", json.dumps(TINT_PRESETS)))
 
 
 def make_handler(runtime):

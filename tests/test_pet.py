@@ -470,7 +470,7 @@ class PetTest(unittest.TestCase):
         self.assertIn("rects.allSatisfy({ $0.count == 6 })", src)  # 자리·기울기·불투명도
         self.assertIn("v.frameCenterRotation = rotation", src)
         self.assertNotIn("CGWindowListCreateImage", src)  # 화면을 캡처하지 않는다
-        self.assertIn('notifyHost(rects ? { type: "glass", on: true, rects, dark } : { type: "glass", on: false });', pet.PET_HTML)
+        self.assertIn('notifyHost(rects ? { type: "glass", on: true, rects, dark, ...(tint ? { tint } : {}) } : { type: "glass", on: false });', pet.PET_HTML)
 
     def test_drag_up_docks_into_menubar(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
