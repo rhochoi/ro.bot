@@ -72,6 +72,8 @@ def main(argv=None):
     fa.add_argument("query")
     fa.add_argument("path")
     fa.add_argument("--type", choices=findeval.TYPES, required=True)
+    for parser in (fg, fr, fa):
+        parser.add_argument("--set", dest="set_name", default="dev")
     am = sub.add_parser("ambient", help="장치·일정·알림 입력 채널")
     asub = am.add_subparsers(dest="amb_cmd", required=True)
     sr = asub.add_parser("serial", help="시리얼 장치 출력을 로그로 기록")
@@ -173,13 +175,13 @@ def main(argv=None):
         try:
             roots = findeval.default_roots()
             if args.find_eval_cmd == "gen":
-                questions = findeval.gen(roots, args.n, args.seed)
-                print(f"질문 {len(questions)}개 저장: {findeval.display_path(findeval._file(config.HOME))}")
+                questions = findeval.gen(roots, args.n, args.seed, set_name=args.set_name)
+                print(f"질문 {len(questions)}개 저장: {findeval.display_path(findeval._file(config.HOME, args.set_name))}")
             elif args.find_eval_cmd == "add":
-                q = findeval.add(args.query, args.path, args.type)
+                q = findeval.add(args.query, args.path, args.type, set_name=args.set_name)
                 print(f"추가: {q['type']} / {q['id']}")
             else:
-                questions = findeval.load_questions()
+                questions = findeval.load_questions(set_name=args.set_name)
                 if not questions:
                     raise ValueError("평가 질문이 없습니다. 먼저 ro find-eval gen을 실행하세요.")
                 searchers = {"mdfind": findeval.mdfind_name, "scan": lambda q: findeval.scan_name(q, roots),
