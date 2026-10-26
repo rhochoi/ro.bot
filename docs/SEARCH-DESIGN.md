@@ -164,3 +164,8 @@ N(존재 확인)은 비교 대상이 없으면 해시가 아니라 "확인한 �
 F2b: 이름 검색에서는 OCR을 실행하지 않는다. 본문 검색은 남은 시간 예산으로 배치하고 미완료 파일은 pending으로 남긴다. `ocr_phrase` 평가는 배치 전체가 완료되고 스캔 PDF가 20쪽 이내일 때만 생성한다. 실제 Vision 통합 테스트는 `RO_TEST_VISION=1`로 실행한다.
 
 F2b 검증(2026-10-26): 지정 5개 테스트 파일은 74 passed, 1 skipped(Vision opt-in), 13 subtests passed. 전체는 372 passed, 22 failed, 48 errors, 25 skipped로 통과 미완료. 기존 펫/API 테스트의 localhost·ps 샌드박스 차단과 Swift SDK 불일치를 확인했고, 설치 테스트 실패는 별도 12개 재실행에서 재현되지 않았다. 실제 Vision과 환경 제약 없는 전체 실행은 남아 있다.
+
+**결정 (2026-10-26) — 검색 범위:** 기본 범위에 **iCloud Drive**(`~/Library/Mobile Documents/com~apple~CloudDocs`)를 추가했다(사용자 승인).
+홈의 `Library`는 계속 차단하고 iCloud Drive 폴더 하나만 예외다(`findeval.path_parts`). 범위 설정 키는 지도용 `roots`와 분리해 `find_roots`로 둔다.
+iCloud Drive는 3,734개 파일 중 279개가 내려받기 필요 상태라 이름·메타데이터만 보고 본문은 읽지 않는다.
+**교훈:** 실제 질문 "MTA 관련 문서"의 정답이 iCloud Drive에 있어서, 범위 밖이면 검색기 개선과 무관하게 못 찾는다. 범위 문제는 평가에서 별도로 드러내야 한다.

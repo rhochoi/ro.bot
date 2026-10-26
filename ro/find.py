@@ -132,7 +132,7 @@ def _safe_path(path, roots=None):
         return None
     if roots is not None and not any(p.is_relative_to(root) for root in roots):
         return None
-    if any(findeval._blocked(part) for part in p.parts[1:]) or log.redact(str(p)) != str(p):
+    if any(findeval._blocked(part) for part in findeval.path_parts(p)) or log.redact(str(p)) != str(p):
         return None
     if any(ord(c) < 32 or ord(c) == 127 for c in str(p)):
         return None

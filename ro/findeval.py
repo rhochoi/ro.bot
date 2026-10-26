@@ -19,7 +19,8 @@ from . import config, fsutil, log
 from .mapper import SKIP_DIRS, is_secret
 
 HOME = config.HOME
-DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop"]
+ICLOUD_DRIVE = "~/Library/Mobile Documents/com~apple~CloudDocs"
+DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop", ICLOUD_DRIVE]
 TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words", "ocr_phrase", "real")
 CHOSEONG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 
@@ -45,8 +46,16 @@ def typo(text, rng=None):
 
 
 def default_roots(home=HOME):
-    roots = config.load(home).get("roots")
+    # config의 roots는 프로젝트 지도용이라 검색 범위는 find_roots로 따로 둔다.
+    roots = config.load(home).get("find_roots")
     return roots if isinstance(roots, list) else list(DEFAULT_ROOTS)
+
+
+def path_parts(path):
+    """차단 검사 대상 경로 요소. iCloud Drive 폴더 하나만 Library 차단의 예외다."""
+    p = Path(path)
+    drive = Path(ICLOUD_DRIVE).expanduser()
+    return p.relative_to(drive).parts if p == drive or p.is_relative_to(drive) else p.parts[1:]
 
 
 def _roots(roots):
@@ -62,7 +71,7 @@ def walk(roots):
     """프로젝트 내부도 열거하되 숨김·비밀·링크·빌드 폴더는 제외한다."""
     seen = set()
     for root in _roots(roots):
-        if root.is_symlink() or any(_blocked(p) for p in root.parts[1:]):
+        if root.is_symlink() or any(_blocked(p) for p in path_parts(root)):
             continue
         for dp, dirs, files in os.walk(root, followlinks=False):
             dirs[:] = sorted(d for d in dirs if not _blocked(d) and not (Path(dp) / d).is_symlink())
@@ -294,8 +303,12 @@ def add(query, answer_path, type, home=HOME, set_name="dev"):
     # 같은 열거 정책으로 수동 정답도 검증한다. 파일 내용은 읽지 않는다.
     plain = any(answer.is_relative_to(root) and not any(
         p.is_symlink() for p in (answer, *answer.parents) if p.is_relative_to(root)) for root in _roots(roots))
-    if not plain or not any(p == resolved for p, _ in walk(roots)):
+    # 입력은 NFC, 디스크 이름은 NFD일 수 있어 정규화 기준으로 비교하고 디스크의 실제 경로를 저장한다.
+    key = _path_key(resolved)
+    match = next((p for p, _ in walk(roots) if _path_key(p) == key), None) if plain else None
+    if match is None:
         raise ValueError("정답은 허용 폴더의 안전한 일반 파일이어야 합니다.")
+    resolved = match
     with fsutil.locked(path.with_suffix(".lock")):
         questions = load_questions(home, set_name)
         index = max((int(q["id"][1:]) for q in questions), default=0) + 1

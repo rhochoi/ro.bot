@@ -25,7 +25,7 @@ class FindEvalTest(unittest.TestCase):
         self.root = self.base / "Documents"
         self.root.mkdir()
         self.home = self.base / ".ro"
-        config.update(self.home, roots=[str(self.root)])
+        config.update(self.home, find_roots=[str(self.root)])
         self.a = self.file("계약 자료.txt")
         self.b = self.file(unicodedata.normalize("NFD", "계약 검토.pdf"))
         self.project = self.root / "project"
@@ -211,7 +211,7 @@ class FindEvalTest(unittest.TestCase):
     def test_defaults_empty_scope_and_empty_pool(self):
         self.assertEqual(findeval.default_roots(self.base / "absent"), findeval.DEFAULT_ROOTS)
         self.assertTrue(findeval.gen(home=self.home))
-        config.update(self.home, roots=[])
+        config.update(self.home, find_roots=[])
         self.assertEqual(findeval.default_roots(self.home), [])
         self.assertEqual(findeval.gen(home=self.home), [])
         self.assertEqual(findeval.gen([self.root], 0, home=self.home), [])
@@ -247,6 +247,15 @@ class FindEvalTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 findeval.add(query, self.a, "name_part", self.home)
         self.assertEqual(findeval.load_questions(self.home), original + [added])
+
+    def test_add_accepts_nfc_path_for_nfd_filename(self):
+        # 디스크는 NFD, 터미널 입력은 NFC인 한글 파일명(macOS)도 같은 파일로 등록한다.
+        disk = self.root / unicodedata.normalize("NFD", "계약서 최종.pdf")
+        disk.touch()
+        typed = self.root / unicodedata.normalize("NFC", "계약서 최종.pdf")
+        added = findeval.add("계약서", typed, "real", self.home)
+        self.assertEqual(len(added["answers"]), 1)
+        self.assertEqual(findeval.nfc(added["answers"][0]), findeval.nfc(str(disk)))
 
     def test_corrupt_file_not_overwritten_by_add(self):
         path = self.home / "search-eval" / "questions.jsonl"

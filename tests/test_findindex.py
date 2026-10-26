@@ -12,7 +12,7 @@ def setup(tmp_path):
     root = tmp_path / 'Documents'
     root.mkdir()
     home = tmp_path / 'state'
-    config.update(home, roots=[str(root)])
+    config.update(home, find_roots=[str(root)])
     return root, home
 
 
@@ -56,7 +56,7 @@ def test_prune_revoked_scope_clear_and_repository_rejection(setup, tmp_path):
         assert not index.search(['고유한'])
         assert '고유한'.encode() not in index.path.read_bytes()
         index.ensure([p])
-    config.update(home, roots=[])
+    config.update(home, find_roots=[])
     with findindex.Index(home) as index:
         assert not index.search(['고유한'])
         assert index.prune() == 1

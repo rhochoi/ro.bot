@@ -337,7 +337,7 @@ class FindBodyTest(unittest.TestCase):
         source = self.file('sample.txt')
         source.write_text('합성 검색구절입니다')
         home = self.base / 'state'
-        config.update(home, roots=[str(self.root)])
+        config.update(home, find_roots=[str(self.root)])
         out = io.StringIO()
         with patch.object(config, 'HOME', home), patch.object(log, 'append') as append, redirect_stdout(out):
             cli.main(['find', '검색구절', '--body', '--no-spotlight'])
@@ -388,3 +388,20 @@ class FindBodyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_icloud_drive_is_the_only_library_exception(tmp_path, monkeypatch):
+    # 홈의 Library는 막되 iCloud Drive 폴더 하나만 예외로 연다.
+    monkeypatch.setenv('HOME', str(tmp_path))
+    drive = tmp_path / 'Library' / 'Mobile Documents' / 'com~apple~CloudDocs'
+    (drive / 'Archive').mkdir(parents=True)
+    (drive / 'Archive' / 'Acme Model.pdf').touch()
+    (drive / 'Archive' / '.hidden.pdf').touch()
+    mail = tmp_path / 'Library' / 'Mail'
+    mail.mkdir()
+    (mail / 'note.txt').touch()
+    assert [p.name for p, _ in findeval.walk([drive])] == ['Acme Model.pdf']
+    assert list(findeval.walk([mail])) == []
+    assert find._safe_path(drive / 'Archive' / 'Acme Model.pdf') is not None
+    assert find._safe_path(mail / 'note.txt') is None
+    assert find._safe_path(drive / 'Archive' / '.hidden.pdf') is None
