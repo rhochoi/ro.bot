@@ -72,7 +72,8 @@ class FindTest(unittest.TestCase):
         parsed = find.parse_query("그 .pdf 파일 계약서 영수증 초안 말고 사본 제외 -백업 어디 있더라 찾아줘", NOW)
         self.assertEqual(parsed, {"terms": ["계약서", "영수증"], "kinds": ["PDF"],
                                   "since": None, "until": None,
-                                  "exclude": ["초안", "사본", "백업"], "raw_ok": True})
+                                  "exclude": ["초안", "사본", "백업"], "raw_ok": True,
+                                  "phrases": [], "body": False, "no_extension": False})
         self.assertEqual(find.parse_query("계약서인데 초안 말고", NOW)["terms"], ["계약서"])
         self.assertEqual(find.parse_query("invoice 2024", NOW)["terms"], ["invoice", "2024"])
 
@@ -263,6 +264,126 @@ class FindTest(unittest.TestCase):
             run.reset_mock()
             cli.main(["find-eval", "run", "--searcher", "all"])
             self.assertEqual(run.call_count, 3)
+
+
+
+
+class FindBodyTest(unittest.TestCase):
+    setUp = FindTest.setUp
+    tearDown = FindTest.tearDown
+    file = FindTest.file
+    paths = FindTest.paths
+
+    def search(self, query, **kwargs):
+        return find.search(query, roots=[self.root], now=NOW, spotlight=False, home=self.base / 'state', **kwargs)
+
+    def test_body_parse_and_no_extension(self):
+        for query in ('"월 구독료"가 들어간 PDF 지난달', "'월 구독료'라고 쓴 PDF 지난달", '“월 구독료” 포함 PDF 지난달',
+                      '월 구독료가 들어간 PDF 지난달', '내용에 월 구독료 PDF 지난달', '본문 월 구독료 PDF 지난달'):
+            parsed = find.parse_query(query, NOW)
+            self.assertTrue(parsed['body'])
+            self.assertEqual(parsed['phrases'], ['월 구독료'])
+            self.assertEqual(parsed['terms'], [])
+            self.assertEqual(parsed['kinds'], ['PDF'])
+            self.assertEqual(parsed['since'], '2026-09-01')
+        self.assertTrue(find.parse_query('확장자 없는 파일')['no_extension'])
+
+    def test_extension_tokens(self):
+        for ext in ('skill', 'sh', 'rb'):
+            p = self.file('sample.' + ext)
+            result = self.search(ext.upper())
+            self.assertIn(p, self.paths(result))
+            self.assertIn('확장자 일치', result['results'][0]['reasons'])
+        plain = self.file('README')
+        self.assertEqual(self.paths(self.search('확장자 없는 파일')), [plain])
+
+    def test_hard_conditions_before_extract_and_old_version(self):
+        from ro import extract, findindex
+        good = self.file('계약.txt')
+        good.write_text('약속한 검색구절입니다')
+        old = self.file('계약_1.txt')
+        old.write_text('약속한 검색구절입니다')
+        for name in ('다른.txt', '계약.csv', '계약 초안.txt'):
+            self.file(name).write_text('약속한 검색구절입니다')
+        extracted = []
+        original = findindex.Index.ensure
+        def ensure(index, paths, **kwargs):
+            def extractor(p):
+                extracted.append(p)
+                return extract.extract_text(p)
+            return original(index, paths, extractor=extractor, **kwargs)
+        with patch.object(findindex.Index, 'ensure', ensure):
+            result = self.search('계약 텍스트 "검색구절" 들어간 초안 제외')
+        self.assertEqual(set(extracted), {good, old})
+        self.assertEqual(set(self.paths(result)), {good, old})
+        self.assertIn('후보 2개 중 2개 본문 확인', result['notes'][0])
+        self.assertIn('snippet', result['results'][0])
+        with patch.object(findindex.Index, 'ensure', side_effect=AssertionError('body read')):
+            self.search('"검색구절"', body=False)
+            self.search('계약')
+
+    def test_body_flag_budget_and_unsupported(self):
+        self.file('sample.txt').write_text('명시적 검색구절')
+        self.file('sample.pages')
+        result = self.search('검색구절', body=True, budget=0)
+        self.assertFalse(result['results'])
+        self.assertIn('미확인 파일 존재', result['notes'][-1])
+        result = self.search('검색구절', body=True)
+        self.assertEqual(len(result['results']), 1)
+        self.assertIn('미지원 1개', result['notes'][0])
+
+    def test_cli_body_and_index_commands(self):
+        from ro import config
+        source = self.file('sample.txt')
+        source.write_text('합성 검색구절입니다')
+        home = self.base / 'state'
+        config.update(home, roots=[str(self.root)])
+        out = io.StringIO()
+        with patch.object(config, 'HOME', home), patch.object(log, 'append') as append, redirect_stdout(out):
+            cli.main(['find', '검색구절', '--body', '--no-spotlight'])
+            self.assertIn('합성 검색구절입니다', out.getvalue())
+            out.seek(0)
+            out.truncate(0)
+            cli.main(['find-index', 'status'])
+            self.assertIn('색인 파일 1개', out.getvalue())
+            self.assertNotIn('sample', out.getvalue())
+            self.assertNotIn('검색구절', out.getvalue())
+            cli.main(['find-index', 'prune'])
+            cli.main(['find-index', 'clear'])
+            append.assert_not_called()
+        self.assertEqual(source.read_text(), '합성 검색구절입니다')
+
+    def test_period_exclusion_and_no_match_notes(self):
+        from ro import extract, findindex
+        recent = self.file('계약.txt')
+        recent.write_text('구절이 없는 문서')
+        old = self.file('계약-old.txt', '2025-01-01T12:00:00')
+        old.write_text('검색구절')
+        old_stamp = datetime(2025, 1, 1).timestamp()
+        os.utime(old, (old_stamp, old_stamp))
+        original = findindex.Index.ensure
+        read = []
+        def ensure(index, paths, **kwargs):
+            def extractor(p):
+                read.append(p)
+                return extract.extract_text(p)
+            return original(index, paths, extractor=extractor, **kwargs)
+        with patch.object(findindex.Index, 'ensure', ensure):
+            result = self.search('올해 계약 "검색구절" 들어간 문서')
+        self.assertEqual(read, [recent])
+        self.assertEqual(result['notes'][-1], '확인한 본문 범위에 일치 구절 없음')
+
+    def test_body_prefix_and_budget_validation(self):
+        parsed = find.parse_query('계약 내용에 월 구독료 PDF 지난달', NOW)
+        self.assertEqual(parsed['terms'], ['계약'])
+        self.assertEqual(parsed['phrases'], ['월 구독료'])
+        self.assertEqual(parsed['kinds'], ['PDF'])
+        self.assertFalse(find.parse_query('본문검색기.py')['body'])
+        with patch.object(findeval, 'walk', side_effect=AssertionError('enumerated')):
+            self.assertEqual(self.search('본문')['notes'], ['본문 구절을 입력하세요.'])
+        for budget in (-1, float('inf'), float('nan')):
+            with self.assertRaises(ValueError):
+                self.search('검색', body=True, budget=budget)
 
 
 if __name__ == "__main__":

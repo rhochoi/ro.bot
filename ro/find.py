@@ -1,4 +1,5 @@
-"""F1: 허용 범위의 이름·메타데이터 검색. 본문과 질문 로그는 읽거나 쓰지 않는다."""
+"""허용 범위의 이름·메타데이터 검색과 명시적으로 요청한 본문 검색."""
+import math
 import re
 import stat
 import subprocess
@@ -60,10 +61,18 @@ def _period(label, now):
 def parse_query(text, now=None):
     """since/until은 로컬 날짜의 양끝 포함 ISO 구간. raw_ok는 비밀값 검사 결과."""
     parsed = {"terms": [], "kinds": [], "since": None, "until": None, "exclude": [],
-              "raw_ok": log.redact(text) == text}
+              "raw_ok": log.redact(text) == text, "phrases": [], "body": False, "no_extension": False}
     if not parsed["raw_ok"]:
         return parsed
     q = findeval.nfc(text).casefold()
+
+    def phrase(match):
+        parsed["phrases"].append(next(g for g in match.groups() if g is not None))
+        return " "
+
+    q = re.sub(r"\"([^\"\n]+)\"|'([^'\n]+)'|“([^”\n]+)”", phrase, q)
+    parsed["no_extension"] = "확장자 없는 파일" in q
+    q = q.replace("확장자 없는 파일", " ")
     now = datetime.now() if now is None else now
     if not isinstance(now, datetime):
         now = datetime.fromtimestamp(now)
@@ -79,6 +88,28 @@ def parse_query(text, now=None):
         parsed["since"] = max(start for start, _ in intervals)
         parsed["until"] = min(end for _, end in intervals)
         q = PERIOD.sub(" ", q)
+    body_cue = bool(parsed["phrases"]) or bool(re.search(r"들어간|라고 쓴|(?<!\S)(?:내용[에이]?|포함|본문)(?!\S)", q))
+    if body_cue:
+        # 종류와 기간은 본문 구절에 흡수하지 않는다. 명확한 경계는 따옴표로 준다.
+        tokens = []
+        for token in q.split():
+            kind = next((label for label, (aliases, _) in KINDS.items() if token.strip(".,?!") in aliases), None)
+            if kind:
+                parsed["kinds"].append(kind)
+            else:
+                tokens.append(token)
+        q = " ".join(tokens)
+        if not parsed["phrases"]:
+            marker = re.search(r"(?<!\S)(?:내용[에이]?|본문)(?!\S)", q)
+            prefix, q = (q[:marker.start()], q[marker.end():]) if marker else ("", q)
+            parts = re.split(r"(?:이|가)?\s*들어간|(?:이)?라고 쓴|\s*포함", q)
+            words = [w for w in parts[0].split() if w not in STOP]
+            if words:
+                parsed["phrases"].append(" ".join(words))
+            q = prefix + " " + " ".join(parts[1:])
+        else:
+            q = re.sub(r"(?:이|가)?\s*들어간|(?:이)?라고 쓴|내용[에이]?|포함|본문", " ", q)
+        parsed["body"] = True
     for token in q.split():
         token = token.strip("'\".,?!")
         if not token or token in STOP:
@@ -89,7 +120,7 @@ def parse_query(text, now=None):
         else:
             # shortcut: 조사 전반을 떼면 실제 이름이 훼손됨, 실사용 실패 질문으로 규칙을 보강한다.
             parsed["terms"].append(token.removesuffix("인데"))
-    for key in ("terms", "kinds", "exclude"):
+    for key in ("terms", "kinds", "exclude", "phrases"):
         parsed[key] = list(dict.fromkeys(parsed[key]))
     return parsed
 
@@ -171,7 +202,7 @@ def _family(path):
     return path.parent, stem, path.suffix.casefold()
 
 
-def _rank(candidates, parsed, period_label, drop=None, short_typo=False):
+def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=True, strict=False):
     since = datetime.fromisoformat(parsed["since"]).timestamp() if parsed["since"] else None
     until = (datetime.fromisoformat(parsed["until"]) + timedelta(days=1)).timestamp() if parsed["until"] else None
     groups = {}
@@ -179,14 +210,19 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False):
         name = findeval.nfc(path.name).casefold()
         if any(word in findeval.nfc(str(path)).casefold() for word in parsed["exclude"]):
             continue
+        if parsed["no_extension"] and path.suffix:
+            continue
         kinds = [kind for kind in parsed["kinds"] if _kind(path, kind)]
         if drop != "kinds" and parsed["kinds"] and not kinds:
             continue
         if drop != "period" and since is not None and not since <= st.st_mtime < until:
             continue
         matches = [m for term in parsed["terms"]
-                   if (m := _match(term, name, findeval.nfc(path.stem).casefold(), short_typo))]
-        if parsed["terms"] and not matches:
+                   if (m := ((300, 0, "확장자 일치") if re.fullmatch(r"[a-z0-9]{1,10}", term)
+                              and term == path.suffix.lstrip('.').casefold()
+                              and term not in findeval.nfc(path.stem).casefold()
+                              else _match(term, name, findeval.nfc(path.stem).casefold(), short_typo)))]
+        if parsed["terms"] and (not matches or strict and len(matches) != len(parsed["terms"])):
             continue
         score = sum(m[0] for m in matches) + 1000 * len(matches)
         reasons = list(dict.fromkeys(m[2] for m in matches))
@@ -200,7 +236,7 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False):
         position = min((m[1] for m in matches), default=0)
         # 종류·기간만 있으면 이름 길이보다 수정일을 우선한다.
         key = (-score, position, len(name) if matches else 0, -st.st_mtime, str(path))
-        family = _family(path)
+        family = _family(path) if group else path
         previous = groups.get(family)
         count = previous[3] + 1 if previous else 1
         if previous and previous[2] > st.st_mtime:
@@ -215,19 +251,32 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False):
     return ranked
 
 
-def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None):
+def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
+           body=None, budget=20, home=findeval.HOME):
+    if not math.isfinite(budget) or budget < 0:
+        raise ValueError("budget은 0 이상이어야 합니다.")
     if limit < 1:
         raise ValueError("n은 1 이상이어야 합니다.")
     parsed = parse_query(text, now)
+    use_body = parsed["body"] if body is None else body
+    if body is True and not parsed["phrases"]:
+        parsed["phrases"], parsed["terms"] = parsed["terms"], []
+    elif body is False:
+        parsed["terms"].extend(parsed["phrases"])
+        parsed["phrases"] = []
+    parsed["body"] = use_body
     result = {"parsed": parsed, "results": [], "notes": [], "relaxed": []}
     if not parsed["raw_ok"]:
         result["notes"].append("민감정보가 포함된 질문은 검색하지 않습니다.")
         return result
-    if not (parsed["terms"] or parsed["kinds"] or parsed["since"]):
+    if use_body and not parsed["phrases"]:
+        result["notes"].append("본문 구절을 입력하세요.")
+        return result
+    if not (parsed["terms"] or parsed["kinds"] or parsed["since"] or parsed["phrases"] or parsed["no_extension"]):
         result["notes"].append("이름·종류·기간 단서를 입력하세요.")
         return result
     allowed = []
-    for root in findeval.default_roots() if roots is None else roots:
+    for root in findeval.default_roots(home) if roots is None else roots:
         safe = _safe_path(Path(root).expanduser().absolute())
         if safe is not None and safe.is_dir() and safe not in allowed:
             allowed.append(safe)
@@ -269,6 +318,42 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None):
                     if stat.S_ISREG(st.st_mode):
                         candidates[safe] = (st, True)
     label = " · ".join(m[0].removesuffix("에") for m in PERIOD.finditer(findeval.nfc(text)))
+    if use_body:
+        from .findindex import Index
+        rows = _rank(candidates, parsed, label, group=False, strict=True)
+        paths = [row["path"] for row in rows]
+        by_path = {row["path"]: row for row in rows}
+        with Index(home, allowed) as index:
+            counts = index.ensure(paths, budget_s=budget)
+            hits = index.search(parsed["phrases"], paths=paths, limit=max(1, len(paths)))
+            unsupported = ", ".join(sorted(index.unsupported_formats)) or "없음"
+            truncated = index.truncated
+            failures = index.failures
+        result["notes"].append(
+            f"후보 {len(paths)}개 중 {counts['indexed']}개 본문 확인, 미지원 {counts['skipped_unsupported']}개 "
+            f"({unsupported}, 추출 실패 {failures}개 포함), 내려받기 필요 {counts['needs_download']}개, "
+            f"크기 상한 초과 {counts['too_large']}개, 시간 예산·변경으로 미확인 {counts['pending']}개, 잘림 {truncated}개")
+        result["notes"].append("지원 범위: 텍스트·코드, DOCX 본문(머리글·바닥글 제외), XLSX 시트 이름·문자열, "
+                               "PPTX 전체 슬라이드, HWPX 전체 섹션, PDF 최대 200쪽·형식별 최대 2백만 자. HWP·Pages·구형 Office·이미지 미지원.")
+        ranked = []
+        for hit in hits:
+            row = by_path[hit["path"]]
+            row["score"] += hit["score"] * 10000
+            if any(phrase in findeval.nfc(hit["path"].stem).casefold() for phrase in hit["phrases"]):
+                row["score"] += 500
+                row["reasons"].append("본문 구절이 이름에도 일치")
+            row["reasons"].extend(f"본문에 '{phrase}' 포함" + (f" ({location})" if location else "")
+                                  for phrase, location in zip(hit["phrases"], hit["locations"]))
+            row["flags"].append(hit["format"] + " 본문 확인")
+            if hit["truncated"]:
+                row["flags"].append("본문 일부만 확인(잘림)")
+            row["snippet"] = hit["snippet"]
+            ranked.append(row)
+        result["results"] = sorted(ranked, key=lambda r: (-r["score"], str(r["path"])))[:limit]
+        if not ranked:
+            incomplete = truncated or any(counts[k] for k in ('skipped_unsupported', 'needs_download', 'too_large', 'pending'))
+            result["notes"].append("확인한 본문에서 일치 없음; 미확인 파일 존재" if incomplete else "확인한 본문 범위에 일치 구절 없음")
+        return result
     ranked = _rank(candidates, parsed, label)
     result["results"] = ranked[:limit]
     if spotlight:
@@ -297,9 +382,9 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None):
     return result
 
 
-def searcher(roots=None):
+def searcher(roots=None, home=findeval.HOME):
     def find(query):
-        result = search(query, roots=roots, limit=20)
+        result = search(query, roots=roots, limit=20, home=home)
         find.errors += "Spotlight 사용 불가" in result["notes"]
         return [row["path"] for row in result["results"]]
     find.errors = 0

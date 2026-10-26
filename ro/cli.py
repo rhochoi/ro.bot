@@ -3,6 +3,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -55,16 +56,24 @@ def main(argv=None):
     au = sub.add_parser("audit", help="~/.ro 권한·비밀·무결성 점검")
     au.add_argument("--fix", action="store_true", help="권한만 0700/0600으로 조정")
     sub.add_parser("eval", help="안전 불변식 회귀 체크리스트")
-    fn = sub.add_parser("find", help="이름·종류·수정일로 파일 후보 찾기(읽기 전용)")
+    fn = sub.add_parser("find", help="이름·종류·수정일·본문으로 파일 후보 찾기(원본 읽기 전용)")
     fn.add_argument("query")
+    body_flags = fn.add_mutually_exclusive_group()
+    body_flags.add_argument("--body", dest="body", action="store_true", default=None)
+    body_flags.add_argument("--no-body", dest="body", action="store_false")
+    fn.add_argument("--budget", type=float, default=20)
+    fi = sub.add_parser("find-index", help="로컬 본문 색인 관리")
+    fi.add_argument("action", choices=["status", "clear", "prune"])
+
     fn.add_argument("--n", type=int, default=10)
     fn.add_argument("--no-spotlight", action="store_true")
     fn.add_argument("--root", nargs="+", action="extend")
-    fe = sub.add_parser("find-eval", help="파일명 검색 기준선 평가(이름·메타데이터만)")
+    fe = sub.add_parser("find-eval", help="파일명·본문 검색 평가")
     fes = fe.add_subparsers(dest="find_eval_cmd", required=True)
     fg = fes.add_parser("gen", help="자동 평가 질문 생성(기존 세트 교체)")
     fg.add_argument("--n", type=int, default=40)
     fg.add_argument("--seed", type=int, default=1)
+    fg.add_argument("--no-body", action="store_true", help="기존 이름·메타데이터 질문만 생성")
     fr = fes.add_parser("run", help="같은 질문으로 기준선 비교")
     fr.add_argument("--searcher", choices=["mdfind", "scan", "both", "find", "all"], default="both")
     fr.add_argument("--k", type=int, default=5)
@@ -154,17 +163,37 @@ def main(argv=None):
     pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)
 
+    if args.cmd == "find-index":
+        from .findindex import Index
+        try:
+            with Index(config.HOME) as index:
+                if args.action == "clear":
+                    index.clear()
+                    print("본문 색인 삭제 완료")
+                elif args.action == "prune":
+                    print(f"본문 색인 {index.prune()}개 정리")
+                else:
+                    status = index.status()
+                    print(f"색인 파일 {status['files']}개 · DB {status['bytes']}바이트 · 미지원 {sum(status['unsupported'].values())}개")
+                    for reason, count in status['unsupported'].items():
+                        print(f"  {reason}: {count}개")
+        except (ValueError, OSError, sqlite3.Error) as error:
+            print(f"색인 관리 불가: {type(error).__name__}")
+            return 1
+        return 0
     if args.cmd == "find":
         try:
-            result = find.search(args.query, roots=args.root, limit=args.n, spotlight=not args.no_spotlight)
+            result = find.search(args.query, roots=args.root, limit=args.n, spotlight=not args.no_spotlight, body=args.body, budget=args.budget, home=config.HOME)
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
-        except OSError:
-            raise SystemExit("검색 범위의 메타데이터를 확인하지 못했습니다.") from None
+        except (OSError, sqlite3.Error):
+            raise SystemExit("검색 범위 또는 본문 색인을 확인하지 못했습니다.") from None
         def show(rows):
             for number, row in enumerate(rows, 1):
                 details = " · ".join(row["reasons"] + row["flags"])
                 print(f"{number}. {findeval.display_path(row['path'])} — {details}")
+                if row.get("snippet"):
+                    print(f"   {row['snippet']}")
         show(result["results"])
         for note in result["notes"]:
             print(note)
@@ -175,7 +204,7 @@ def main(argv=None):
         try:
             roots = findeval.default_roots()
             if args.find_eval_cmd == "gen":
-                questions = findeval.gen(roots, args.n, args.seed, set_name=args.set_name)
+                questions = findeval.gen(roots, args.n, args.seed, set_name=args.set_name, body=not args.no_body)
                 print(f"질문 {len(questions)}개 저장: {findeval.display_path(findeval._file(config.HOME, args.set_name))}")
             elif args.find_eval_cmd == "add":
                 q = findeval.add(args.query, args.path, args.type, set_name=args.set_name)
@@ -185,7 +214,7 @@ def main(argv=None):
                 if not questions:
                     raise ValueError("평가 질문이 없습니다. 먼저 ro find-eval gen을 실행하세요.")
                 searchers = {"mdfind": findeval.mdfind_name, "scan": lambda q: findeval.scan_name(q, roots),
-                             "find": find.searcher(roots)}
+                             "find": find.searcher(roots, home=config.HOME)}
                 for name, searcher in searchers.items():
                     if args.searcher in (name, "all") or args.searcher == "both" and name != "find":
                         print(name)

@@ -1,4 +1,4 @@
-"""F0 파일명 기준선 평가. 사용자 파일은 이름·메타데이터만 읽는다.
+"""파일명·본문 검색 평가. 본문 질문 생성은 지원 형식만 읽는다.
 
 CLI 범위는 config.roots, 미설정 시 Downloads/Documents/Desktop이다.
 API에서 별도 roots로 생성했다면 run에도 같은 roots를 전달한다.
@@ -20,7 +20,7 @@ from .mapper import SKIP_DIRS, is_secret
 
 HOME = config.HOME
 DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop"]
-TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo")
+TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words")
 CHOSEONG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 
 
@@ -134,7 +134,44 @@ def _question(query, answers, kind, index, created, target=None):
             "answers": answers, "target": target, "created": created}
 
 
-def gen(roots=None, n=40, seed=1, home=HOME, *, set_name="dev", now=None):
+def _content_pools(paths, pools, rng):
+    from .extract import SUPPORTED, extract_text
+    from .find import _safe_path
+    corpus = {}
+    for p in sorted(paths):
+        if p.suffix.lower() not in SUPPORTED or _safe_path(p) is None:
+            continue
+        extracted = extract_text(p)
+        if not extracted['unsupported'] and not extracted['truncated']:
+            corpus[p] = log.redact(nfc(extracted['text'])).casefold()
+    word_files = defaultdict(set)
+    for p, text in corpus.items():
+        for word in set(re.findall(r"[^\W_]{2,}", text)):
+            if log.redact(word) == word and word != 'redacted':
+                word_files[word].add(p)
+    for p, text in corpus.items():
+        # shortcut: 문서별 구절 후보 20개만 시도, 평가 표본 부족 시 후보 수를 늘린다.
+        starts = list(range(0, len(text) - 7, 8))
+        rng.shuffle(starts)
+        for start in starts[:20]:
+            phrase = text[start:start + 20].strip()
+            if len(phrase) < 8 or any(c in phrase for c in '\n\r"') or log.redact(phrase) != phrase or 'redacted' in phrase:
+                continue
+            answers = [other for other, content in corpus.items() if phrase in content]
+            if 1 <= len(answers) <= 3:
+                pools['content_phrase'].append((f'"{phrase}"이 들어간 문서', answers))
+                break
+        words = sorted((word for word, files in word_files.items() if p in files),
+                       key=lambda word: (len(word_files[word]), -len(word), word))
+        if len(words) >= 2:
+            a, b = words[:2]
+            query = f'"{a}" "{b}"이 들어간 문서'
+            answers = [other for other, content in corpus.items() if a in content and b in content]
+            if len(answers) <= 3 and log.redact(query) == query:
+                pools['content_words'].append((query, answers))
+
+
+def gen(roots=None, n=40, seed=1, home=HOME, *, set_name="dev", now=None, body=True):
     """유형을 번갈아 최대 n개 생성한다. 후보가 부족하면 가능한 수만 저장한다."""
     if n < 0:
         raise ValueError("n은 0 이상이어야 합니다.")
@@ -187,6 +224,8 @@ def gen(roots=None, n=40, seed=1, home=HOME, *, set_name="dev", now=None):
             answers = sorted(p for p in paths if word in names[p])
             if 1 <= len(answers) <= 5:
                 pools["combo"].append((query, answers))
+    if body and n:
+        _content_pools(names, pools, rng)
     for pool in pools.values():
         rng.shuffle(pool)
     created = now.isoformat()
@@ -202,7 +241,8 @@ def gen(roots=None, n=40, seed=1, home=HOME, *, set_name="dev", now=None):
                     answers = [p for p, name in index.items() if query.casefold() in name]
                 elif kind == "kind_time":
                     answers = months[target.suffix.casefold(), query.split()[-2]]
-                questions.append(_question(query, answers, kind, len(questions) + 1, created, target))
+                if log.redact(query) == query:
+                    questions.append(_question(query, answers, kind, len(questions) + 1, created, target))
     with fsutil.locked(path.with_suffix(".lock")):
         _save(path, questions)
     return questions

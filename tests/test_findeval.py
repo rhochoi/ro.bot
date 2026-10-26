@@ -10,13 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from ro import config, find, findeval, mapper
+from ro import config, extract, find, findeval, mapper
 
 REPO = Path(__file__).resolve().parent.parent
 
 
 class FindEvalTest(unittest.TestCase):
     def setUp(self):
+        pdf = patch.object(extract, '_pdf', return_value={'text': '', 'unsupported': '테스트 PDF 미지원'})
+        pdf.start()
+        self.addCleanup(pdf.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name).resolve()
         self.root = self.base / "Documents"
@@ -104,7 +107,7 @@ class FindEvalTest(unittest.TestCase):
         files = list(findeval.walk([self.root]))
         with patch.object(findeval, "_save"), \
                 patch.object(Path, "open", side_effect=AssertionError("content read")):
-            questions = findeval.gen([self.root], 500, home=self.home, now=datetime(2026, 10, 26))
+            questions = findeval.gen([self.root], 500, home=self.home, now=datetime(2026, 10, 26), body=False)
         for q in questions:
             if q["type"] in ("name_part", "name_choseong"):
                 normal = findeval.choseong if q["type"] == "name_choseong" else findeval.nfc
@@ -352,7 +355,7 @@ class FindEvalTest(unittest.TestCase):
         done = subprocess.CompletedProcess([], 0, "", "")
         with patch.object(findeval.subprocess, "run", return_value=done):
             for searcher in (findeval.mdfind_name, lambda q: findeval.scan_name(q, [self.root]),
-                             find.searcher([self.root])):
+                             find.searcher([self.root], home=self.home)):
                 result = findeval.run(searcher, questions, roots=[self.root])
                 self.assertEqual(result["total"]["questions"], len(questions))
                 self.assertEqual(set(result["by_type"]), set(findeval.TYPES))
@@ -402,3 +405,38 @@ class FindEvalTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_content_questions_all_answers_and_safe_generation(tmp_path):
+    from ro import log
+    root = tmp_path / 'Documents'
+    root.mkdir()
+    home = tmp_path / 'state'
+    corpus = {}
+    for name, text in [('a.txt', '공동문구를포함한내용입니다. 은하수 멀리 떨어진 별자리'),
+                       ('b.txt', '공동문구를포함한내용입니다. 은하수 다른 단어 별자리'),
+                       ('c.md', '별개의문서내용을정리합니다. 오로라 다양한 내용 북극광')]:
+        p = root / name
+        p.write_text(text)
+        corpus[str(p)] = text.casefold()
+    blocked = root / 'recovery-codes.txt'
+    blocked.write_text('절대읽지않는파일입니다')
+    with patch.object(extract, 'extract_text', wraps=extract.extract_text) as reader:
+        questions = findeval.gen([root], n=100, home=home)
+    assert blocked not in [call.args[0] for call in reader.call_args_list]
+    content = [q for q in questions if q['type'].startswith('content_')]
+    assert {q['type'] for q in content} == {'content_phrase', 'content_words'}
+    for q in content:
+        parsed = find.parse_query(q['query'])
+        phrases = parsed['phrases']
+        assert parsed['body'] and log.redact(q['query']) == q['query']
+        assert set(q['answers']) == {p for p, text in corpus.items() if all(phrase in text for phrase in phrases)}
+        assert len(q['answers']) <= 3
+        if q['type'] == 'content_phrase':
+            assert len(phrases) == 1 and 8 <= len(phrases[0]) <= 20
+        else:
+            assert len(phrases) == 2
+        result = find.search(q['query'], roots=[root], home=home, spotlight=False)
+        assert set(q['answers']) <= {str(row['path']) for row in result['results']}
+    with patch.object(extract, 'extract_text', side_effect=AssertionError('read')):
+        assert not any(q['type'].startswith('content_') for q in findeval.gen([root], home=home, body=False))

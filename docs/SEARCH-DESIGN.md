@@ -141,3 +141,17 @@ N(존재 확인)은 비교 대상이 없으면 해시가 아니라 "확인한 �
 과잉 설계로 제외: 전역 벡터 DB, 상시 화면·열람 감시, 무제한 검색 에이전트, 전 파일 선제 해싱.
 
 **권장 흐름 (§5 대체):** `범위·민감정보 차단 → 질의 해석 → 파일명 열거 + Spotlight + 필요한 본문 검색 → 후보 병합 → 조건 검사·순위 → 근거와 검색 한계 표시`
+
+## 10. 구현 현황 (2026-10-26)
+
+| 단계 | 상태 | 비고 |
+|---|---|---|
+| F0 평가 | 완료 | `ro find-eval` — 정답 집합, combo·content 유형, MRR/precision, dev·holdout·body 세트(질문은 `~/.ro/search-eval/`, 저장소 밖) |
+| F1 이름·종류·기간 | 완료 | `ro find` — 직접 열거 + Spotlight 보조, 안전 필터 선행. dev 90% / holdout 88% (hit@5) |
+| F2 본문 | 완료 | `ro/extract.py`(검색용 전문 추출) + `ro/findindex.py`(SQLite FTS5 trigram, 3글자 미만 LIKE 폴백). `content_phrase` 100%, `content_words` 100% (body 세트, hit@5) |
+| F3 펫 UI | 미착수 | Pencil + Claude Code로 진행 예정 |
+| F4 사용 피드백 | 미착수 | |
+| F5 의미 검색·OCR | 미착수 | 표현이 다른 질문은 아직 측정 못 함 |
+
+**알려진 한계:** 본문 평가는 같은 추출기로 구절을 뽑아 만든 질문이라 추출 오류(PDF 단 순서 등)는 못 잡는다 → 실제로 기억나는 내용을 `ro find-eval add`로 보강.
+미지원: png/gif(OCR), pages·hwp·xls·doc, `.text`·`.log`·`.rtf` 등 일부 텍스트류(추가 쉬움). 색인은 처음 몇 번의 본문 질문에서 증분으로 만들어진다(1,883개 ≈ 100MB).
