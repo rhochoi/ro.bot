@@ -88,7 +88,7 @@ def parse_query(text, now=None):
         parsed["since"] = max(start for start, _ in intervals)
         parsed["until"] = min(end for _, end in intervals)
         q = PERIOD.sub(" ", q)
-    body_cue = bool(parsed["phrases"]) or bool(re.search(r"들어간|라고 쓴|(?<!\S)(?:내용[에이]?|포함|본문)(?!\S)", q))
+    body_cue = bool(parsed["phrases"]) or bool(re.search(r"들어간|적힌|라고 쓴|(?<!\S)(?:내용[에이]?|포함|본문)(?!\S)", q))
     if body_cue:
         # 종류와 기간은 본문 구절에 흡수하지 않는다. 명확한 경계는 따옴표로 준다.
         tokens = []
@@ -102,13 +102,13 @@ def parse_query(text, now=None):
         if not parsed["phrases"]:
             marker = re.search(r"(?<!\S)(?:내용[에이]?|본문)(?!\S)", q)
             prefix, q = (q[:marker.start()], q[marker.end():]) if marker else ("", q)
-            parts = re.split(r"(?:이|가)?\s*들어간|(?:이)?라고 쓴|\s*포함", q)
+            parts = re.split(r"(?:이|가)?\s*(?:들어간|적힌)|(?:이)?라고 쓴|\s*포함", q)
             words = [w for w in parts[0].split() if w not in STOP]
             if words:
                 parsed["phrases"].append(" ".join(words))
             q = prefix + " " + " ".join(parts[1:])
         else:
-            q = re.sub(r"(?:이|가)?\s*들어간|(?:이)?라고 쓴|내용[에이]?|포함|본문", " ", q)
+            q = re.sub(r"(?:이|가)?\s*(?:들어간|적힌)|(?:이)?라고 쓴|내용[에이]?|포함|본문", " ", q)
         parsed["body"] = True
     for token in q.split():
         token = token.strip("'\".,?!")
@@ -329,12 +329,13 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
             unsupported = ", ".join(sorted(index.unsupported_formats)) or "없음"
             truncated = index.truncated
             failures = index.failures
+            result["notes"].extend(index.notes)
         result["notes"].append(
-            f"후보 {len(paths)}개 중 {counts['indexed']}개 본문 확인, 미지원 {counts['skipped_unsupported']}개 "
+            f"후보 {len(paths)}개 중 {counts['indexed']}개 본문 확인(OCR {counts['ocr']}개), 미지원 {counts['skipped_unsupported']}개 "
             f"({unsupported}, 추출 실패 {failures}개 포함), 내려받기 필요 {counts['needs_download']}개, "
             f"크기 상한 초과 {counts['too_large']}개, 시간 예산·변경으로 미확인 {counts['pending']}개, 잘림 {truncated}개")
         result["notes"].append("지원 범위: 텍스트·코드, DOCX 본문(머리글·바닥글 제외), XLSX 시트 이름·문자열, "
-                               "PPTX 전체 슬라이드, HWPX 전체 섹션, PDF 최대 200쪽·형식별 최대 2백만 자. HWP·Pages·구형 Office·이미지 미지원.")
+                               "PPTX 전체 슬라이드, HWPX 전체 섹션, PDF 최대 200쪽·형식별 최대 2백만 자. 이미지·스캔 PDF는 로컬 OCR(최대 20쪽). HWP·Pages·구형 Office 미지원.")
         ranked = []
         for hit in hits:
             row = by_path[hit["path"]]
@@ -342,7 +343,7 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
             if any(phrase in findeval.nfc(hit["path"].stem).casefold() for phrase in hit["phrases"]):
                 row["score"] += 500
                 row["reasons"].append("본문 구절이 이름에도 일치")
-            row["reasons"].extend(f"본문에 '{phrase}' 포함" + (f" ({location})" if location else "")
+            row["reasons"].extend((f"이미지 속 글자에서 '{phrase}' 발견" if hit["format"] == "ocr" else f"본문에 '{phrase}' 포함") + (f" ({location})" if location else "")
                                   for phrase, location in zip(hit["phrases"], hit["locations"]))
             row["flags"].append(hit["format"] + " 본문 확인")
             if hit["truncated"]:

@@ -174,7 +174,7 @@ def main(argv=None):
                     print(f"본문 색인 {index.prune()}개 정리")
                 else:
                     status = index.status()
-                    print(f"색인 파일 {status['files']}개 · DB {status['bytes']}바이트 · 미지원 {sum(status['unsupported'].values())}개")
+                    print(f"색인 파일 {status['files']}개 · OCR {status['ocr']}개 · DB {status['bytes']}바이트 · 미지원 {sum(status['unsupported'].values())}개")
                     for reason, count in status['unsupported'].items():
                         print(f"  {reason}: {count}개")
         except (ValueError, OSError, sqlite3.Error) as error:

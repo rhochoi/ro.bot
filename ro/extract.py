@@ -15,6 +15,7 @@ TEXT_EXTENSIONS = set(('.txt .md .csv .tsv .json .jsonl .py .js .jsx .ts .tsx .s
                        '.c .h .cpp .hpp .java .kt .rb .sh .bash .zsh .html .htm .css .scss '
                        '.xml .yaml .yml .toml .ini .sql .r .m .mm .vue .svelte .skill').split())
 SUPPORTED = TEXT_EXTENSIONS | {'.docx', '.xlsx', '.pptx', '.hwpx', '.pdf'}
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.heic', '.tiff', '.gif', '.webp'}
 PDF_JXA = r"""
 ObjC.import('Foundation'); ObjC.import('PDFKit');
 function run(argv) {
@@ -100,7 +101,7 @@ def _office(path):
         return {'text': '\n'.join(chunks)}
 
 
-def extract_text(path, max_chars=2_000_000):
+def extract_text(path, max_chars=2_000_000, *, ocr_text=None):
     if max_chars < 1:
         raise ValueError('max_chars는 1 이상이어야 합니다.')
     path = Path(path)
@@ -114,6 +115,11 @@ def extract_text(path, max_chars=2_000_000):
             result['unsupported'] = '내려받기 필요'
         elif st.st_size > MAX_FILE_BYTES:
             result['unsupported'] = '파일 크기 상한 초과(50MB)'
+        elif path.suffix.lower() in IMAGE_EXTENSIONS:
+            result.update(text=ocr_text or '', format='ocr' if ocr_text is not None else result['format'],
+                          unsupported='' if ocr_text is not None else 'OCR 필요(배치 경로 사용)')
+        elif path.suffix.lower() == '.pdf' and ocr_text is not None:
+            result.update(text=ocr_text, format='ocr')
         elif path.suffix.lower() not in SUPPORTED:
             result['unsupported'] = '미지원 형식: ' + result['format']
         elif path.suffix.lower() == '.pdf':

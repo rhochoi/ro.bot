@@ -148,7 +148,7 @@ def test_budget_stops_before_next_changed_file(setup):
     extractor = Mock(wraps=extract.extract_text)
     with findindex.Index(home) as index, patch.object(findindex.time, 'monotonic', side_effect=[0, 0, 21]):
         counts = index.ensure(paths, extractor=extractor)
-        assert counts == {'indexed': 1, 'skipped_unsupported': 0, 'needs_download': 0, 'too_large': 0, 'pending': 1}
+        assert counts == {'indexed': 1, 'ocr': 0, 'skipped_unsupported': 0, 'needs_download': 0, 'too_large': 0, 'pending': 1}
         assert extractor.call_count == 1
 
 

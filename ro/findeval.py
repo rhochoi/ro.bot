@@ -20,7 +20,7 @@ from .mapper import SKIP_DIRS, is_secret
 
 HOME = config.HOME
 DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop"]
-TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words", "real")
+TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words", "ocr_phrase", "real")
 CHOSEONG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 
 
@@ -134,16 +134,39 @@ def _question(query, answers, kind, index, created, target=None):
             "answers": answers, "target": target, "created": created}
 
 
-def _content_pools(paths, pools, rng):
-    from .extract import SUPPORTED, extract_text
+def _content_pools(paths, pools, rng, home):
+    from . import ocr
+    from .extract import IMAGE_EXTENSIONS, SUPPORTED, extract_text
     from .find import _safe_path
-    corpus = {}
+    corpus, candidates = {}, []
     for p in sorted(paths):
-        if p.suffix.lower() not in SUPPORTED or _safe_path(p) is None:
+        if p.suffix.lower() not in SUPPORTED | IMAGE_EXTENSIONS or _safe_path(p) is None:
             continue
         extracted = extract_text(p)
+        if extracted['unsupported'] in ('OCR 필요(배치 경로 사용)', '스캔본 추정(OCR 필요)') and ocr.safe_input(p):
+            candidates.append(p)
         if not extracted['unsupported'] and not extracted['truncated']:
             corpus[p] = log.redact(nfc(extracted['text'])).casefold()
+    if candidates and ocr.available(home=home):
+        recognized = ocr.ocr_batch(candidates, home=home)
+        # 부분 배치로는 모든 정답을 확정할 수 없다.
+        if all(p in recognized and not recognized[p]['unsupported'] and
+               (p.suffix.lower() != '.pdf' or recognized[p]['pages'] <= 20) for p in candidates):
+            ocr_corpus = {p: log.redact(nfc(recognized[p]['text'])).casefold() for p in candidates}
+            for p, text in ocr_corpus.items():
+                starts = list(range(0, len(text) - 7, 8))
+                rng.shuffle(starts)
+                for start in starts[:20]:
+                    phrase = text[start:start + 20].strip()
+                    if len(phrase) < 8 or any(c in phrase for c in '\n\r"') or log.redact(phrase) != phrase or 'redacted' in phrase:
+                        continue
+                    answers = [other for other, content in ocr_corpus.items() if phrase in content]
+                    if 1 <= len(answers) <= 3:
+                        ending = '이 적힌 이미지' if all(a.suffix.lower() in IMAGE_EXTENSIONS for a in answers) else '이 들어간 문서'
+                        query = f'"{phrase}"{ending}'
+                        if log.redact(query) == query:
+                            pools['ocr_phrase'].append((query, answers))
+                            break
     word_files = defaultdict(set)
     for p, text in corpus.items():
         for word in set(re.findall(r"[^\W_]{2,}", text)):
@@ -225,7 +248,7 @@ def gen(roots=None, n=40, seed=1, home=HOME, *, set_name="dev", now=None, body=T
             if 1 <= len(answers) <= 5:
                 pools["combo"].append((query, answers))
     if body and n:
-        _content_pools(names, pools, rng)
+        _content_pools(names, pools, rng, home)
     for pool in pools.values():
         rng.shuffle(pool)
     created = now.isoformat()

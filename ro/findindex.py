@@ -6,8 +6,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import config, findeval, fsutil, log
-from .extract import MAX_FILE_BYTES, extract_text
+from . import config, findeval, fsutil, log, ocr
+from .extract import IMAGE_EXTENSIONS, MAX_FILE_BYTES, extract_text
 
 HIDDEN_SNIPPET = '(민감 패턴 포함, 조각 숨김)'
 
@@ -18,6 +18,7 @@ class Index:
         self.roots = [p for r in (findeval.default_roots(home) if roots is None else roots)
                       if (p := _safe_path(Path(r).expanduser().absolute())) is not None and p.is_dir()]
         directory = Path(home).expanduser().absolute() / 'search-index'
+        self.home = home
         self.path = directory / 'index.db'
         if any(p.is_symlink() for p in (self.path, directory, *directory.parents)):
             raise ValueError('색인 경로는 심볼릭 링크일 수 없습니다.')
@@ -60,25 +61,27 @@ class Index:
     def ensure(self, paths, budget_s=20, extractor=extract_text):
         if not math.isfinite(budget_s) or budget_s < 0:
             raise ValueError('budget은 0 이상이어야 합니다.')
-        counts = dict.fromkeys(('indexed', 'skipped_unsupported', 'needs_download', 'too_large', 'pending'), 0)
+        counts = dict.fromkeys(('indexed', 'ocr', 'skipped_unsupported', 'needs_download', 'too_large', 'pending'), 0)
         start = time.monotonic()
         self.unsupported_formats = set()
+        self.notes = []
         self.truncated = self.failures = 0
         # walk의 허용 목록과 현재 경로 검사를 모두 통과해야 읽거나 캐시한다.
         allowed = {p for p, _ in findeval.walk(self.roots)}
+        prepared, candidates = {}, []
         for raw in dict.fromkeys(paths):
             p = self._safe(raw)
             if p is None or p not in allowed:
                 continue
             try:
                 st = p.stat()
-                old = self.db.execute('SELECT size,mtime_ns,unsupported,truncated FROM files WHERE path=?', (str(p),)).fetchone()
-                truncated = False
+                old = self.db.execute('SELECT size,mtime_ns,unsupported,truncated,format FROM files WHERE path=?', (str(p),)).fetchone()
                 dataless = bool(getattr(st, 'st_flags', 0) & 0x40000000)
-                if old and old[:2] == (st.st_size, st.st_mtime_ns) and dataless == (old[2] == '내려받기 필요'):
-                    reason = old[2]
-                    truncated = old[3]
-                # shortcut: 예산은 파일 사이에서 검사, 단일 추출 지연이 문제면 취소 가능한 작업으로 바꾼다.
+                retry_ocr = old and (p.suffix.lower() in IMAGE_EXTENSIONS or old[2] == '스캔본 추정(OCR 필요)') and old[2]
+                cached = old and old[:2] == (st.st_size, st.st_mtime_ns) and dataless == (old[2] == '내려받기 필요') and not retry_ocr
+                if cached:
+                    result = dict(unsupported=old[2], truncated=old[3], format=old[4])
+                # shortcut: 일반 추출 예산은 파일 사이에서 검사, 단일 추출 지연이 문제면 취소 가능한 작업으로 바꾼다.
                 elif not dataless and time.monotonic() - start >= budget_s:
                     counts['pending'] += 1
                     continue
@@ -86,13 +89,47 @@ class Index:
                     result = ({'text': '', 'format': p.suffix.lstrip('.'), 'truncated': False,
                                'unsupported': '내려받기 필요' if dataless else '파일 크기 상한 초과(50MB)'}
                               if dataless or st.st_size > MAX_FILE_BYTES else extractor(p))
-                    truncated = result['truncated']
+                    if (result['unsupported'] in ('OCR 필요(배치 경로 사용)', '스캔본 추정(OCR 필요)')
+                            and ocr.safe_input(p) and self._safe(p) is not None):
+                        candidates.append(p)
+                prepared[p] = (st, cached, result)
+            except OSError:
+                counts['pending'] += 1
+        recognized, attempted = {}, False
+        if candidates:
+            remaining = max(0, budget_s - (time.monotonic() - start))
+            if remaining == 0:
+                attempted = True
+            elif ocr.available(home=self.home, timeout_s=remaining):
+                attempted = True
+                remaining = max(0, budget_s - (time.monotonic() - start))
+                safe = [p for p in candidates if self._safe(p) is not None and ocr.safe_input(p)]
+                recognized = ocr.ocr_batch(safe, timeout_s=remaining, home=self.home)
+                if ocr.unavailable_reason:
+                    attempted = False
+                    self.notes.append('OCR 불가: ' + ocr.unavailable_reason)
+            else:
+                self.notes.append('OCR 불가: ' + ocr.unavailable_reason)
+        if not self.notes and any(value['unsupported'] for value in recognized.values()):
+            self.notes.append('OCR 불가: 일부 파일 인식 미지원 또는 실패')
+        candidates = set(candidates)
+        for p, (st, cached, result) in prepared.items():
+            try:
+                if p in candidates and attempted:
+                    if p not in recognized:
+                        counts['pending'] += 1
+                        continue
+                    value = recognized[p]
+                    if not value['unsupported']:
+                        result = extractor(p, ocr_text=value['text'])
+                        result['truncated'] |= p.suffix.lower() == '.pdf' and value['pages'] > 20
+                if not cached:
                     after = p.stat()
-                    if self._safe(p) is None or (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns) or bool(getattr(after, 'st_flags', 0) & 0x40000000) != dataless:
+                    if (self._safe(p) is None or (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns)
+                            or bool(getattr(after, 'st_flags', 0) & 0x40000000) != bool(getattr(st, 'st_flags', 0) & 0x40000000)):
                         counts['pending'] += 1
                         self._delete(p)
                         continue
-                    reason = result['unsupported']
                     original = findeval.nfc(result['text'])
                     body = log.redact(original)
                     with self.db:
@@ -100,12 +137,14 @@ class Index:
                         cursor = self.db.execute('''INSERT INTO files
                             (path,size,mtime_ns,format,truncated,unsupported,extracted_at,text,sensitive)
                             VALUES (?,?,?,?,?,?,?,?,?)''', (str(p), st.st_size, st.st_mtime_ns, result['format'],
-                            result['truncated'], reason, time.time(), body, body != original))
+                            result['truncated'], result['unsupported'], time.time(), body, body != original))
                         self.db.execute('INSERT INTO body(rowid,text) VALUES (?,?)', (cursor.lastrowid, body.casefold()))
+                reason = result['unsupported']
                 key = ('needs_download' if reason == '내려받기 필요' else
                        'too_large' if '크기 상한' in reason else 'skipped_unsupported' if reason else 'indexed')
                 counts[key] += 1
-                self.truncated += bool(truncated)
+                counts['ocr'] += key == 'indexed' and result['format'] == 'ocr'
+                self.truncated += bool(result['truncated'])
                 if key == 'skipped_unsupported':
                     self.unsupported_formats.add(p.suffix.lower() or '확장자 없음')
                     self.failures += '실패' in reason or '불가' in reason
@@ -197,7 +236,8 @@ class Index:
         self.db.execute('VACUUM')
 
     def status(self):
-        return {'files': self.db.execute('SELECT count(*) FROM files').fetchone()[0],
+        return {'ocr': self.db.execute("SELECT count(*) FROM files WHERE format='ocr' AND unsupported=''").fetchone()[0],
+                'files': self.db.execute('SELECT count(*) FROM files').fetchone()[0],
                 'bytes': self.path.stat().st_size,
                 'unsupported': dict(self.db.execute("SELECT unsupported,count(*) FROM files WHERE unsupported != '' GROUP BY unsupported"))}
 

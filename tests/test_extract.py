@@ -72,7 +72,7 @@ def test_dataless_size_and_unsupported_never_open(tmp_path):
     with patch.object(Path, 'lstat', return_value=SimpleNamespace(st_mode=0o100600, st_flags=0, st_size=extract.MAX_FILE_BYTES + 1)), \
             patch.object(Path, 'open', side_effect=AssertionError('opened')):
         assert '50MB' in extract.extract_text(p)['unsupported']
-    for ext in ('pages', 'hwp', 'doc', 'xls', 'ppt', 'png'):
+    for ext in ('pages', 'hwp', 'doc', 'xls', 'ppt'):
         p = tmp_path / ('sample.' + ext)
         p.touch()
         with patch.object(Path, 'open', side_effect=AssertionError('opened')):

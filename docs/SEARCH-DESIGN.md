@@ -149,9 +149,18 @@ N(존재 확인)은 비교 대상이 없으면 해시가 아니라 "확인한 �
 | F0 평가 | 완료 | `ro find-eval` — 정답 집합, combo·content 유형, MRR/precision, dev·holdout·body 세트(질문은 `~/.ro/search-eval/`, 저장소 밖) |
 | F1 이름·종류·기간 | 완료 | `ro find` — 직접 열거 + Spotlight 보조, 안전 필터 선행. dev 90% / holdout 88% (hit@5) |
 | F2 본문 | 완료 | `ro/extract.py`(검색용 전문 추출) + `ro/findindex.py`(SQLite FTS5 trigram, 3글자 미만 LIKE 폴백). `content_phrase` 100%, `content_words` 100% (body 세트, hit@5) |
+| F2b 이미지·스캔 OCR | 구현·가짜 헬퍼 검증 | macOS Vision 배치, 로컬 해시 캐시, 스캔 PDF 최대 20쪽. 실제 맥 실행은 별도 검증 |
 | F3 펫 UI | 미착수 | Pencil + Claude Code로 진행 예정 |
 | F4 사용 피드백 | 미착수 | |
-| F5 의미 검색·OCR | 미착수 | 표현이 다른 질문은 아직 측정 못 함 |
+| F5 의미 검색 | 미착수 | 표현이 다른 질문은 아직 측정 못 함 |
 
 **알려진 한계:** 본문 평가는 같은 추출기로 구절을 뽑아 만든 질문이라 추출 오류(PDF 단 순서 등)는 못 잡는다 → 실제로 기억나는 내용을 `ro find-eval add`로 보강.
-미지원: png/gif(OCR), pages·hwp·xls·doc, `.text`·`.log`·`.rtf` 등 일부 텍스트류(추가 쉬움). 색인은 처음 몇 번의 본문 질문에서 증분으로 만들어진다(1,883개 ≈ 100MB).
+미지원: pages·hwp·xls·doc, `.text`·`.log`·`.rtf` 등 일부 텍스트류(추가 쉬움). 색인은 처음 몇 번의 본문 질문에서 증분으로 만들어진다(1,883개 ≈ 100MB).
+
+**결정 (2026-10-26):** 사진 속 사물·장면 검색("고양이 사진" 같은 이미지 분류·캡션)은 **지금 만들지 않는다.** 이미지 중 글자가 든 것은 10%이고(OCR로 해결),
+나머지 90%는 아이콘·글자 없는 이미지라 실제로 찾을 수요를 아직 확인하지 못했다. 이미지는 **OCR(글자)까지만** 범위로 한다.
+다시 검토하는 조건: `ro find-eval add`로 모은 실제 질문 중 "사진 내용으로 찾으려 했던" 사례가 반복될 때.
+
+F2b: 이름 검색에서는 OCR을 실행하지 않는다. 본문 검색은 남은 시간 예산으로 배치하고 미완료 파일은 pending으로 남긴다. `ocr_phrase` 평가는 배치 전체가 완료되고 스캔 PDF가 20쪽 이내일 때만 생성한다. 실제 Vision 통합 테스트는 `RO_TEST_VISION=1`로 실행한다.
+
+F2b 검증(2026-10-26): 지정 5개 테스트 파일은 74 passed, 1 skipped(Vision opt-in), 13 subtests passed. 전체는 372 passed, 22 failed, 48 errors, 25 skipped로 통과 미완료. 기존 펫/API 테스트의 localhost·ps 샌드박스 차단과 Swift SDK 불일치를 확인했고, 설치 테스트 실패는 별도 12개 재실행에서 재현되지 않았다. 실제 Vision과 환경 제약 없는 전체 실행은 남아 있다.

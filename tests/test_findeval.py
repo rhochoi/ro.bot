@@ -76,8 +76,8 @@ class FindEvalTest(unittest.TestCase):
 
     def test_gen_types_answers_normalization_permissions_and_seed(self):
         questions = findeval.gen([self.root], n=40, seed=8, home=self.home)
-        # real은 손으로 넣는 질문 전용이라 gen이 만들지 않는다.
-        self.assertEqual({q["type"] for q in questions}, set(findeval.TYPES) - {"real"})
+        # real은 수동 질문이며 이 합성 자료에는 OCR 후보가 없다.
+        self.assertEqual({q["type"] for q in questions}, set(findeval.TYPES) - {"real", "ocr_phrase"})
         self.assertEqual(len({q["id"] for q in questions}), len(questions))
         allowed = {str(p) for p, _ in findeval.walk([self.root])}
         for q in questions:
