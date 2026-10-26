@@ -20,7 +20,7 @@ from .mapper import SKIP_DIRS, is_secret
 
 HOME = config.HOME
 DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop"]
-TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words")
+TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words", "real")
 CHOSEONG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
 
 
