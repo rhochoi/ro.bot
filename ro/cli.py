@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (config, fixtures, fsutil, ambient, ask, bench, findeval, harden, learn, log, mapper, organize, pet, route,
+from . import (config, fixtures, fsutil, ambient, ask, bench, find, findeval, harden, learn, log, mapper, organize, pet, route,
                selfupdate, setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
@@ -55,13 +55,18 @@ def main(argv=None):
     au = sub.add_parser("audit", help="~/.ro 권한·비밀·무결성 점검")
     au.add_argument("--fix", action="store_true", help="권한만 0700/0600으로 조정")
     sub.add_parser("eval", help="안전 불변식 회귀 체크리스트")
+    fn = sub.add_parser("find", help="이름·종류·수정일로 파일 후보 찾기(읽기 전용)")
+    fn.add_argument("query")
+    fn.add_argument("--n", type=int, default=10)
+    fn.add_argument("--no-spotlight", action="store_true")
+    fn.add_argument("--root", nargs="+", action="extend")
     fe = sub.add_parser("find-eval", help="파일명 검색 기준선 평가(이름·메타데이터만)")
     fes = fe.add_subparsers(dest="find_eval_cmd", required=True)
     fg = fes.add_parser("gen", help="자동 평가 질문 생성(기존 세트 교체)")
     fg.add_argument("--n", type=int, default=40)
     fg.add_argument("--seed", type=int, default=1)
     fr = fes.add_parser("run", help="같은 질문으로 기준선 비교")
-    fr.add_argument("--searcher", choices=["mdfind", "scan", "both"], default="both")
+    fr.add_argument("--searcher", choices=["mdfind", "scan", "both", "find", "all"], default="both")
     fr.add_argument("--k", type=int, default=5)
     fa = fes.add_parser("add", help="수동 질문 추가")
     fa.add_argument("query")
@@ -147,7 +152,24 @@ def main(argv=None):
     pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)
 
-    if args.cmd == "find-eval":
+    if args.cmd == "find":
+        try:
+            result = find.search(args.query, roots=args.root, limit=args.n, spotlight=not args.no_spotlight)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        except OSError:
+            raise SystemExit("검색 범위의 메타데이터를 확인하지 못했습니다.") from None
+        def show(rows):
+            for number, row in enumerate(rows, 1):
+                details = " · ".join(row["reasons"] + row["flags"])
+                print(f"{number}. {findeval.display_path(row['path'])} — {details}")
+        show(result["results"])
+        for note in result["notes"]:
+            print(note)
+        for relaxed in result["relaxed"]:
+            print(relaxed["message"])
+            show(relaxed["results"])
+    elif args.cmd == "find-eval":
         try:
             roots = findeval.default_roots()
             if args.find_eval_cmd == "gen":
@@ -160,9 +182,10 @@ def main(argv=None):
                 questions = findeval.load_questions()
                 if not questions:
                     raise ValueError("평가 질문이 없습니다. 먼저 ro find-eval gen을 실행하세요.")
-                searchers = {"mdfind": findeval.mdfind_name, "scan": lambda q: findeval.scan_name(q, roots)}
+                searchers = {"mdfind": findeval.mdfind_name, "scan": lambda q: findeval.scan_name(q, roots),
+                             "find": find.searcher(roots)}
                 for name, searcher in searchers.items():
-                    if args.searcher in (name, "both"):
+                    if args.searcher in (name, "all") or args.searcher == "both" and name != "find":
                         print(name)
                         print(findeval.report(findeval.run(searcher, questions, args.k, roots=roots)))
         except ValueError as exc:

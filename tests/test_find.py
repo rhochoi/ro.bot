@@ -1,0 +1,269 @@
+import io
+import os
+import subprocess
+import tempfile
+import unicodedata
+import unittest
+from contextlib import redirect_stdout
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from ro import cli, find, findeval, log
+
+NOW = datetime(2026, 10, 26, 12)
+
+
+class FindTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name).resolve()
+        self.root = self.base / "Documents"
+        self.root.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def file(self, name, modified="2026-10-20T12:00:00"):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        stamp = datetime.fromisoformat(modified).timestamp()
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def search(self, query, **kwargs):
+        return find.search(query, roots=[self.root], now=NOW, spotlight=False, **kwargs)
+
+    def paths(self, result):
+        return [row["path"] for row in result["results"]]
+
+    def test_periods(self):
+        periods = {
+            "오늘": ("2026-10-26", "2026-10-26"),
+            "어제": ("2026-10-25", "2026-10-25"),
+            "이번주": ("2026-10-26", "2026-10-26"),
+            "지난 주": ("2026-10-19", "2026-10-25"),
+            "이번달": ("2026-10-01", "2026-10-31"),
+            "지난달": ("2026-09-01", "2026-09-30"),
+            "올해": ("2026-01-01", "2026-12-31"),
+            "작년": ("2025-01-01", "2025-12-31"),
+            "작년 12월": ("2025-12-01", "2025-12-31"),
+            "올해 3월": ("2026-03-01", "2026-03-31"),
+            "3월": ("2026-03-01", "2026-03-31"),
+            "2026-09 수정": ("2026-09-01", "2026-09-30"),
+            "2024년 2월에": ("2024-02-01", "2024-02-29"),
+        }
+        for query, expected in periods.items():
+            with self.subTest(query=query):
+                parsed = find.parse_query(query, NOW)
+                self.assertEqual((parsed["since"], parsed["until"]), expected)
+                self.assertEqual(parsed["terms"], [])
+        self.assertEqual(find.parse_query("지난달", datetime(2026, 1, 1))["since"], "2025-12-01")
+        self.assertEqual(find.parse_query("어제", NOW.timestamp())["since"], "2026-10-25")
+        with self.assertRaises(ValueError):
+            find.parse_query("2026-13", NOW)
+
+    def test_kinds_exclusions_stopwords(self):
+        for kind, (aliases, _) in find.KINDS.items():
+            for alias in aliases:
+                self.assertEqual(find.parse_query(alias.upper(), NOW)["kinds"], [kind])
+        parsed = find.parse_query("그 .pdf 파일 계약서 영수증 초안 말고 사본 제외 -백업 어디 있더라 찾아줘", NOW)
+        self.assertEqual(parsed, {"terms": ["계약서", "영수증"], "kinds": ["PDF"],
+                                  "since": None, "until": None,
+                                  "exclude": ["초안", "사본", "백업"], "raw_ok": True})
+        self.assertEqual(find.parse_query("계약서인데 초안 말고", NOW)["terms"], ["계약서"])
+        self.assertEqual(find.parse_query("invoice 2024", NOW)["terms"], ["invoice", "2024"])
+
+    def test_name_grades_nfd_casefold_and_multiple_terms(self):
+        exact = self.file("계약서.txt")
+        prefix = self.file("계약서검토.txt")
+        substring = self.file(unicodedata.normalize("NFD", "개인계약서.pdf"))
+        typo = self.file("계악서.txt")
+        result = self.search("계약서")
+        self.assertEqual(self.paths(result), [exact, prefix, substring, typo])
+        self.assertEqual(sorted([r["score"] for r in result["results"]], reverse=True),
+                         [r["score"] for r in result["results"]])
+        self.assertIn("이름에 '계약서' 포함", result["results"][2]["reasons"])
+        self.assertIn("오타 1자 허용", result["results"][3]["reasons"])
+        self.assertIn(substring, self.paths(self.search("계약")))
+        self.assertIn("초성 일치", self.search("ㄱㅇㄱㅇㅅ")["results"][0]["reasons"])
+        self.assertEqual(self.paths(self.search("계약서 검토"))[0], prefix)
+        latin = self.file("INVOICE.txt")
+        self.assertEqual(self.paths(self.search("invoice")), [latin])
+
+    def test_one_edit_insertion_deletion_substitution_and_short_stem(self):
+        for a, b in (("계약서", "계악서"), ("계약서", "계약"), ("계약서", "계약서류"), ("ab", "ac")):
+            self.assertTrue(find._one_edit(a, b))
+            self.assertTrue(find._one_edit(b, a))
+        for a, b in (("계약서", "예약소"), ("ab", "ba"), ("계약", "계약서류")):
+            self.assertFalse(find._one_edit(a, b))
+        short = self.file("계약.pdf")
+        self.assertEqual(self.paths(self.search("계악")), [short])
+
+    def test_hard_kind_period_boundaries_and_only_filters(self):
+        older = self.file("보고.pdf", "2026-09-01T00:00:00")
+        newer = self.file("매우긴보고.pdf", "2026-09-30T23:59:59")
+        self.file("다른보고.pdf", "2026-10-01T00:00:00")
+        self.file("보고.txt", "2026-09-20T00:00:00")
+        self.assertEqual(self.paths(self.search("PDF 2026-09 수정")), [newer, older])
+        self.assertEqual(self.paths(self.search("보고 PDF 2026-09 수정")), [older, newer])
+        sheet = self.file("매출.xlsx")
+        self.assertEqual(self.paths(self.search("지난주 엑셀")), [sheet])
+        self.assertIn("지난주 수정", self.search("지난주 엑셀")["results"][0]["reasons"])
+        screenshot = self.file("스크린샷 2026-10-20.png")
+        self.file("풍경.png")
+        self.assertEqual(self.paths(self.search("스크린샷")), [screenshot])
+
+    def test_versions_use_newest_keep_different_folders_and_extensions(self):
+        self.file("보고서.pdf", "2026-10-19T00:00:00")
+        self.file("보고서_final.pdf", "2026-10-20T00:00:00")
+        self.file("보고서_최종2.pdf", "2026-10-21T00:00:00")
+        self.file("보고서_2.pdf", "2026-10-22T00:00:00")
+        latest = self.file("보고서 (1).pdf", "2026-10-23T00:00:00")
+        other = self.file("other/보고서.pdf")
+        doc = self.file("보고서.docx")
+        result = self.search("보고서")
+        self.assertEqual(set(self.paths(result)), {latest, other, doc})
+        row = next(r for r in result["results"] if r["path"] == latest)
+        self.assertIn("다른 버전 4개", row["flags"])
+        self.assertEqual(len(self.search("보고서", limit=1)["results"]), 1)
+
+    def test_scope_secrets_links_and_git_project(self):
+        safe = self.file("project/계약.py")
+        (self.root / "project/.git").mkdir()
+        unsafe = [self.file(name) for name in (
+            "계약-secret.txt", "recovery-codes.txt", "credentials.txt", ".계약.txt", "~$계약.docx",
+            "secret-folder/계약.txt", "project/.git/계약.txt", "node_modules/계약.txt",
+            "sk-" + "a" * 20 + ".txt")]
+        outside = self.base / "계약.txt"
+        outside.touch()
+        link = self.root / "계약-link.txt"
+        link.symlink_to(outside)
+        directory = self.root / "linked"
+        directory.symlink_to(self.root / "project", target_is_directory=True)
+        unsafe += [outside, link, directory / safe.name]
+        self.assertEqual(self.paths(self.search("계약")), [safe])
+        for candidate in unsafe:
+            self.assertIsNone(find._safe_path(candidate, [self.root]))
+        self.assertEqual(find.search("계약", roots=[directory], spotlight=False)["results"], [])
+        self.assertEqual(find.search("계약", roots=[], spotlight=False)["results"], [])
+        with patch.object(findeval, "default_roots", return_value=[self.root]):
+            self.assertEqual(self.paths(find.search("계약", spotlight=False)), [safe])
+
+    def test_spotlight_candidates_are_checked_and_metadata_is_bounded(self):
+        safe = [self.file(f"계약문서{chr(65 + i)}.pdf") for i in range(9)]
+        secret = self.file("계약secret.pdf")
+        outside = self.base / "계약외부.pdf"
+        outside.touch()
+        link = self.root / "계약링크.pdf"
+        link.symlink_to(outside)
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(args)
+            self.assertEqual(kwargs, {"capture_output": True, "text": True, "timeout": 10})
+            output = "\0".join(map(str, [safe[0], secret, outside, link])) + "\0" if args[0] == "mdfind" else "2026-10-25 01:02:03 +0000"
+            return SimpleNamespace(returncode=0, stdout=output)
+        with patch.object(findeval, "walk", return_value=iter((p, p.stat()) for p in safe[1:])):
+            result = find.search("계약", roots=[self.root], runner=runner)
+        self.assertEqual(set(self.paths(result)), set(safe))
+        self.assertIn("Spotlight 확인", next(r for r in result["results"] if r["path"] == safe[0])["reasons"])
+        self.assertEqual(calls[0], ["mdfind", "-0", "-onlyin", str(self.root), "-name", "계약"])
+        metadata = [args for args in calls if args[0] == "mdls"]
+        self.assertEqual(len(metadata), 5)
+        self.assertTrue(all(Path(args[-1]) in safe for args in metadata))
+        self.assertTrue(any("마지막 열람" in reason for row in result["results"] for reason in row["reasons"]))
+
+    def test_spotlight_failure_and_null_metadata(self):
+        path = self.file("계약서.pdf")
+        for error in (OSError("private"), subprocess.TimeoutExpired("private", 10)):
+            with patch.object(find.subprocess, "run", side_effect=error) as runner:
+                result = find.search("계약서", roots=[self.root])
+            self.assertEqual(runner.call_count, 1)
+            self.assertEqual(self.paths(result), [path])
+            self.assertEqual(result["notes"], ["Spotlight 사용 불가"])
+        failed = lambda *a, **kw: SimpleNamespace(returncode=1, stdout="private")
+        self.assertIn("Spotlight 사용 불가", find.search("계약서", roots=[self.root], runner=failed)["notes"])
+        null = lambda *a, **kw: SimpleNamespace(returncode=0, stdout="(null)" if a[0][0] == "mdls" else "")
+        result = find.search("계약서", roots=[self.root], runner=null)
+        self.assertEqual(result["results"], self.search("계약서")["results"])
+        self.assertEqual(result["notes"], [])
+
+    def test_relaxation_never_drops_scope_exclusions_or_two_conditions(self):
+        good = self.file("계약서.docx")
+        self.file("계약서초안.docx")
+        self.file("계약서secret.docx")
+        outside = self.base / "계약서외부.docx"
+        outside.touch()
+        result = self.search("지난주 PDF 계약서 -초안")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(len(result["relaxed"]), 1)
+        relaxation = result["relaxed"][0]
+        self.assertEqual(relaxation["condition"], "kinds")
+        self.assertEqual(self.paths(relaxation), [good])
+        self.assertIn("PDF 조건을 빼면 1건", relaxation["message"])
+        self.assertEqual(self.search("작년 PDF 계약서 -초안")["relaxed"], [])
+        period = self.search("작년 워드 계약서 -초안")
+        self.assertEqual(period["relaxed"][0]["condition"], "period")
+        typo = self.search("계악 워드 -초안")
+        self.assertEqual(typo["results"], [])
+        self.assertEqual(typo["relaxed"][0]["condition"], "typo")
+        self.assertEqual(self.paths(typo["relaxed"][0]), [good])
+
+    def test_dataless_and_never_reads_contents(self):
+        path = self.file("계약서.pdf")
+        st = SimpleNamespace(st_mtime=path.stat().st_mtime, st_flags=0x40000000)
+        with patch.object(findeval, "walk", side_effect=lambda roots: iter([(path, st)])), \
+                patch.object(Path, "open", side_effect=AssertionError("content read")), \
+                patch("builtins.open", side_effect=AssertionError("content read")):
+            result = self.search("계약서")
+            self.assertEqual(result["results"][0]["flags"], ["내려받기 필요"])
+            zero = self.search("완전히없는이름")
+            self.assertIn("범위 내 조건에 맞는 파일 없음", zero["notes"])
+            self.assertIn("내려받기 필요 파일 존재", zero["notes"])
+
+    def test_cli_no_logs_no_subprocess_and_private_query_rejected(self):
+        self.file("계약서.pdf")
+        out = io.StringIO()
+        with patch.object(log, "append") as append, \
+                patch.object(find.subprocess, "run", side_effect=AssertionError("Spotlight called")), \
+                patch.object(Path, "home", return_value=self.base), redirect_stdout(out):
+            cli.main(["find", "계약서 찾아줘", "--n", "1", "--no-spotlight", "--root", str(self.root)])
+        append.assert_not_called()
+        self.assertIn("1. ~/Documents/", out.getvalue())
+        self.assertIn("이름 전체", out.getvalue())
+        self.assertNotIn("찾아줘", out.getvalue())
+        self.assertFalse((self.base / ".ro").exists())
+        secret_query = "sk-" + "a" * 20
+        with patch.object(findeval, "walk", side_effect=AssertionError("enumerated")):
+            result = self.search(secret_query)
+        self.assertFalse(result["parsed"]["raw_ok"])
+        self.assertNotIn(secret_query, str(result))
+        self.assertEqual(self.search("그 파일 어디 찾아줘")["results"], [])
+        with self.assertRaises(ValueError):
+            self.search("계약", limit=0)
+
+    def test_adapter_eval_and_existing_default(self):
+        path = self.file("계약서.pdf")
+        query = {"id": "q0001", "query": "계약서", "answers": [str(path)], "type": "name_part"}
+        runner = lambda *a, **kw: SimpleNamespace(returncode=0, stdout="")
+        with patch.object(find.subprocess, "run", side_effect=runner):
+            adapter = find.searcher([self.root])
+            measured = findeval.run(adapter, [query], roots=[self.root])
+        self.assertEqual(measured["total"]["hits"], 1)
+        with patch.object(findeval, "default_roots", return_value=[self.root]), \
+                patch.object(findeval, "load_questions", return_value=[query]), \
+                patch.object(findeval, "run", return_value=measured) as run, redirect_stdout(io.StringIO()):
+            cli.main(["find-eval", "run", "--searcher", "find"])
+            self.assertEqual(run.call_count, 1)
+            run.reset_mock()
+            cli.main(["find-eval", "run"])
+            self.assertEqual(run.call_count, 2)
+            run.reset_mock()
+            cli.main(["find-eval", "run", "--searcher", "all"])
+            self.assertEqual(run.call_count, 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
