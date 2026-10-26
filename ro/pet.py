@@ -2194,10 +2194,8 @@ PET_HTML = r"""<!DOCTYPE html>
     padding: 1px 6px; font-size: 10px; font-weight: 800;
   }
   /* A · 끌어다 놓기 */
-  .pet-wrap.drop-ready::before {
-    content: ""; position: absolute; inset: -4px; border-radius: 50%;
-    border: 2px solid var(--accent); animation: dropPulse 1s ease-in-out infinite; pointer-events: none;
-  }
+  /* 파일 먹기: 머리가 왼쪽 아래 경첩을 축으로 뚜껑처럼 열린다. 각도는 JS(Lid)가 rotate로 준다 */
+  .pet-wrap.lid-on #layerHead { transform-origin: 0 100%; }
   @keyframes dropPulse { 0%, 100% { opacity: 0.55; transform: scale(0.98); } 50% { opacity: 1; transform: scale(1.03); } }
   .toast {
     background: var(--panel-soft); border: 1px solid var(--panel-border); border-radius: 14px;
@@ -3251,6 +3249,7 @@ function beginDrag(e, fromPet) {
   if (e.target.closest("button") || e.target.closest("input")) return;
   if (fromPet) {
     if (currentAction === "pet") window.triggerAction(null);   // 쓰다듬기 호버와 겹치지 않게
+    Lid.reset();
     RoMotion.down(performance.now());
   }
   if (isNativeHost) {
@@ -4396,16 +4395,65 @@ async function handleDrop(dt) {
   }
   if (plain) return capture("text", "끌어다 놓은 텍스트", plain, plain.length);
 }
+/* 파일 먹기: 끌어온 파일을 펫 위에 두면 머리가 살짝 틀어지고, 2초 머무르면 뚜껑처럼 18°까지 열린다.
+   놓으면 입이 탁 닫히고(120ms) 눈을 깜빡인다. 중간에 벗어나면 되돌아간다. 줄이기 설정이면 각도 없이 눈만 깜빡인다. */
+const Lid = (() => {
+  const TILT = 6, OPEN = 18, DWELL_MS = 2000;
+  let angle = 0, raf = 0, dwell = 0, state = "idle";   // idle | tilt | open | chomp
+  const reduced = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  function paint(a) {
+    angle = a;
+    petWrap.classList.toggle("lid-on", a > 0);
+    layerHead.style.rotate = a > 0 ? `${-a.toFixed(2)}deg` : "";   // 오른쪽이 올라가야 하니 시계 반대 방향
+  }
+  function tween(to, ms, ease, done) {
+    cancelAnimationFrame(raf);
+    const from = angle, t0 = performance.now();
+    const step = (now) => {
+      const k = Math.min(1, (now - t0) / ms);
+      paint(from + (to - from) * ease(k));
+      if (k < 1) raf = requestAnimationFrame(step); else if (done) done();
+    };
+    raf = requestAnimationFrame(step);
+  }
+  const easeOut = (k) => 1 - Math.pow(1 - k, 3), easeIn = (k) => k * k;
+  function blink() {
+    eyeL.classList.add("blink"); eyeR.classList.add("blink");
+    setTimeout(() => { eyeL.classList.remove("blink"); eyeR.classList.remove("blink"); }, 300);
+  }
+  return {
+    hover() {
+      if (state !== "idle" || reduced() || RoMotion.busy()) return;
+      state = "tilt";
+      tween(TILT, 120, easeOut);
+      dwell = setTimeout(() => { if (state === "tilt") { state = "open"; tween(OPEN, 300, easeOut); } }, DWELL_MS);
+    },
+    leave() {
+      if (state === "chomp") return;
+      clearTimeout(dwell);
+      if (state === "idle") return;
+      state = "idle";
+      tween(0, 200, easeOut);
+    },
+    chomp() {
+      clearTimeout(dwell);
+      if (reduced() || state === "idle") { state = "idle"; blink(); return; }
+      state = "chomp";
+      tween(0, 120, easeIn, () => { state = "idle"; blink(); });
+    },
+    reset() { clearTimeout(dwell); cancelAnimationFrame(raf); state = "idle"; paint(0); },
+  };
+})();
 function setDropActive(on) {
   if (dropActive === on) return;
   dropActive = on;
   petWrap.classList.toggle("drop-ready", on);
-  if (on) petCaption.textContent = "놓으면 기록해요";
+  if (on) { petCaption.textContent = "놓으면 기록해요"; Lid.hover(); } else Lid.leave();
 }
 window.addEventListener("dragenter", (e) => { e.preventDefault(); setDropActive(true); });
 window.addEventListener("dragover", (e) => { e.preventDefault(); setDropActive(true); });
 window.addEventListener("dragleave", (e) => { if (!e.relatedTarget) setDropActive(false); });
-window.addEventListener("drop", (e) => { e.preventDefault(); setDropActive(false); handleDrop(e.dataTransfer); });
+window.addEventListener("drop", (e) => { e.preventDefault(); Lid.chomp(); setDropActive(false); handleDrop(e.dataTransfer); });
 
 /* C · 근거 붙은 답 */
 function openRecord(id, day) {
