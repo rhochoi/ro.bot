@@ -863,8 +863,6 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   /* 분필(Chalk) 다크 모드 */
   body.theme-chalk {
-    --bot-fill: var(--ink);
-    --bot-eye: var(--chalk);
     --panel-bg: #232220;
     --panel-fg: #F3EFE6;
     --panel-soft: #2E2C29;
@@ -875,6 +873,11 @@ PET_HTML = r"""<!DOCTYPE html>
     --accent-text: #FF6A42;
     --bubble-fill: #F3EFE6;
     --bubble-fg: #1A1917;
+  }
+  /* 펫 몸통은 상태창 테마와 따로: 설정의 "유리 색"(기본은 macOS 화면 모드)을 따른다 */
+  body.glass-dark {
+    --bot-fill: var(--ink);
+    --bot-eye: var(--chalk);
   }
   * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
   html, body {
@@ -1698,7 +1701,7 @@ PET_HTML = r"""<!DOCTYPE html>
       inset 0 -3px 6px rgba(26, 25, 23, 0.20),
       0 3px 7px rgba(15, 14, 13, 0.32);
   }
-  body.theme-chalk.material-clay .pill {
+  body.glass-dark.material-clay .pill {
     border: none;
     box-shadow:
       inset 0 2.5px 4px rgba(255, 255, 255, 0.22),
@@ -2803,7 +2806,7 @@ function updateThemeUI() {
 }
 
 function glassIsDark() {
-  return glassMode === "auto" ? document.body.classList.contains("theme-chalk") : glassMode === "dark";
+  return glassMode === "auto" ? systemDark : glassMode === "dark";
 }
 
 function relativeLuminance(hex) {

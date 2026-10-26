@@ -930,7 +930,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
 
         let lookMenu = NSMenu()
         let looks: [(String, String, [(String, String)])] = [
-            ("유리 색", "glass", [("테마 따라가기", "auto"), ("항상 밝게", "light"), ("항상 어둡게", "dark")]),
+            ("유리 색", "glass", [("시스템 따라가기", "auto"), ("항상 밝게", "light"), ("항상 어둡게", "dark")]),
             ("몸통 색", "tint", [("기본", "none"), ("코랄", "coral"), ("세이지", "sage"),
                                 ("하늘", "sky"), ("라일락", "lilac"), ("앰버", "amber")])
         ]

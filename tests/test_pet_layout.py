@@ -259,17 +259,17 @@ class PetLayoutTest(unittest.TestCase):
 
     def test_glass_eyes_have_no_box_outline_and_stay_visible_in_dark_mode(self):
         page = self.open_page()
-        page.evaluate("materialMode = 'glass'; updateMaterialUI(); themeMode = 'ink'; updateThemeUI();")
+        page.evaluate("materialMode = 'glass'; updateMaterialUI(); glassMode = 'light'; updateLookUI();")
         for shape in ("squint", "happy", "swirl"):  # 상자 테두리가 있으면 마름모·반원·원이 보였다
             page.evaluate(f"document.getElementById('petWrap').dataset.eyes = '{shape}'")
             self.assertEqual(page.evaluate("getComputedStyle(eyeL).boxShadow"), "none", shape)
         lum = "(c => { const [r, g, b] = c.match(/\\d+/g).map(Number); return (0.2126*r + 0.7152*g + 0.0722*b) / 255; })"
         dark_eye = page.evaluate(f"{lum}(getComputedStyle(document.body).getPropertyValue('--bot-eye').trim().replace('#','').match(/../g).map(h => parseInt(h,16)).join(','))")
-        page.evaluate("themeMode = 'chalk'; updateThemeUI();")
+        page.evaluate("glassMode = 'dark'; updateLookUI();")
         light_eye = page.evaluate(f"{lum}(getComputedStyle(document.body).getPropertyValue('--bot-eye').trim().replace('#','').match(/../g).map(h => parseInt(h,16)).join(','))")
         self.assertLess(dark_eye, 0.2)    # 밝은 유리엔 진한 눈
         self.assertGreater(light_eye, 0.8)  # 연기 유리(어두운 모드)엔 밝은 눈
-        page.evaluate("delete document.getElementById('petWrap').dataset.eyes; materialMode = 'clay'; updateMaterialUI(); themeMode = 'auto'; updateThemeUI();")
+        page.evaluate("delete document.getElementById('petWrap').dataset.eyes; materialMode = 'clay'; updateMaterialUI(); glassMode = 'auto'; updateLookUI();")
 
     def test_stats_toggle_stays_on_home(self):
         page = self.open_page()

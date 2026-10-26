@@ -70,8 +70,9 @@ SOURCE
     assert.equal(props.size, 0);
   }
   materialMode = 'glass';
-  for (const [theme, glass, dark] of [['chalk', 'light', false], ['ink', 'dark', true], ['chalk', 'auto', true], ['ink', 'auto', false]]) {
+  for (const [theme, glass, system, dark] of [['chalk', 'light', true, false], ['ink', 'dark', false, true], ['chalk', 'auto', false, false], ['ink', 'auto', true, true]]) {
     themeMode = theme;
+    systemDark = system;
     updateThemeUI();
     await window.setLookPref('glass', glass);
     nativeGlassTick = 1;
@@ -167,8 +168,8 @@ class LookWebTest(unittest.TestCase):
         self.assertEqual(msg["tint"], pet.TINT_PRESETS["sage"])
         self.assertEqual(page.evaluate("hostMessages.filter(m => m.type === 'look').at(-1)"),
                          {"type": "look", "glass": "light", "tint": "sage"})
-        for theme, glass, dark in (("ink", "dark", True), ("chalk", "auto", True), ("ink", "auto", False)):
-            page.evaluate("([theme, glass]) => {setThemeModeFromHost(theme); return setLookPref('glass', glass)}", [theme, glass])
+        for theme, glass, system, dark in (("ink", "dark", False, True), ("chalk", "auto", False, False), ("ink", "auto", True, True)):
+            page.evaluate("([theme, glass, system]) => {systemDark = system; setThemeModeFromHost(theme); return setLookPref('glass', glass)}", [theme, glass, system])
             page.wait_for_function("dark => hostMessages.filter(m => m.type === 'glass' && m.on).at(-1).dark === dark", arg=dark)
             self.assertEqual(page.evaluate("document.body.classList.contains('theme-chalk')"), theme == "chalk")
         page.evaluate("setLookPref('tint', 'none')")
