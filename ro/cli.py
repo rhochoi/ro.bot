@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (config, fixtures, fsutil, ambient, ask, bench, harden, learn, log, mapper, organize, pet, route,
+from . import (config, fixtures, fsutil, ambient, ask, bench, findeval, harden, learn, log, mapper, organize, pet, route,
                selfupdate, setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
@@ -55,6 +55,18 @@ def main(argv=None):
     au = sub.add_parser("audit", help="~/.ro 권한·비밀·무결성 점검")
     au.add_argument("--fix", action="store_true", help="권한만 0700/0600으로 조정")
     sub.add_parser("eval", help="안전 불변식 회귀 체크리스트")
+    fe = sub.add_parser("find-eval", help="파일명 검색 기준선 평가(이름·메타데이터만)")
+    fes = fe.add_subparsers(dest="find_eval_cmd", required=True)
+    fg = fes.add_parser("gen", help="자동 평가 질문 생성(기존 세트 교체)")
+    fg.add_argument("--n", type=int, default=40)
+    fg.add_argument("--seed", type=int, default=1)
+    fr = fes.add_parser("run", help="같은 질문으로 기준선 비교")
+    fr.add_argument("--searcher", choices=["mdfind", "scan", "both"], default="both")
+    fr.add_argument("--k", type=int, default=5)
+    fa = fes.add_parser("add", help="수동 질문 추가")
+    fa.add_argument("query")
+    fa.add_argument("path")
+    fa.add_argument("--type", choices=findeval.TYPES, required=True)
     am = sub.add_parser("ambient", help="장치·일정·알림 입력 채널")
     asub = am.add_subparsers(dest="amb_cmd", required=True)
     sr = asub.add_parser("serial", help="시리얼 장치 출력을 로그로 기록")
@@ -135,7 +147,29 @@ def main(argv=None):
     pt.add_argument("--build", action="store_true", help="macOS 네이티브 오버레이 바이너리만 컴파일")
     args = ap.parse_args(argv)
 
-    if args.cmd == "map":
+    if args.cmd == "find-eval":
+        try:
+            roots = findeval.default_roots()
+            if args.find_eval_cmd == "gen":
+                questions = findeval.gen(roots, args.n, args.seed)
+                print(f"질문 {len(questions)}개 저장: {findeval.display_path(findeval._file(config.HOME))}")
+            elif args.find_eval_cmd == "add":
+                q = findeval.add(args.query, args.path, args.type)
+                print(f"추가: {q['type']} / {q['id']}")
+            else:
+                questions = findeval.load_questions()
+                if not questions:
+                    raise ValueError("평가 질문이 없습니다. 먼저 ro find-eval gen을 실행하세요.")
+                searchers = {"mdfind": findeval.mdfind_name, "scan": lambda q: findeval.scan_name(q, roots)}
+                for name, searcher in searchers.items():
+                    if args.searcher in (name, "both"):
+                        print(name)
+                        print(findeval.report(findeval.run(searcher, questions, args.k, roots=roots)))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from None
+        except OSError:
+            raise SystemExit("평가 파일을 읽거나 저장하지 못했습니다.") from None
+    elif args.cmd == "map":
         data = mapper.build_map(args.roots or mapper.default_roots())
         out = mapper.save_map(data, args.out)
         print(f"프로젝트 {len(data['projects'])}개 → {out}")

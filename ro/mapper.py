@@ -35,6 +35,7 @@ SKIP_DIRS = {
 SECRET_PATTERNS = [
     ".env", ".env.*", "*.pem", "*.key", "*.p12", "id_rsa*", "id_ed25519*",
     "auth.json", "credentials*", "*secret*", "*token*", "*.keychain*",
+    "*recovery*code*", "*backup*code*", "*복구*코드*",
 ]
 MARKERS = {
     "package.json": "node", "pyproject.toml": "python", "requirements.txt": "python",
