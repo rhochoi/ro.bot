@@ -70,7 +70,8 @@ def test_prune_revoked_scope_clear_and_repository_rejection(setup, tmp_path):
         findindex.Index(alias, [root])
 
 
-def test_unsafe_paths_never_extracted(setup, tmp_path):
+@pytest.mark.parametrize('reuse_allowed', [False, True])
+def test_unsafe_paths_never_extracted(setup, tmp_path, reuse_allowed):
     root, home = setup
     paths = []
     for name in ('secret.txt', 'recovery-codes.txt', '.hidden.txt', 'node_modules/a.txt', 'password=hidden.txt'):
@@ -85,7 +86,7 @@ def test_unsafe_paths_never_extracted(setup, tmp_path):
     paths += [link, outside]
     extractor = Mock(side_effect=AssertionError('unsafe read'))
     with findindex.Index(home) as index:
-        index.ensure(paths, extractor=extractor)
+        index.ensure(paths, extractor=extractor, allowed=set(paths) if reuse_allowed else None)
         assert index.status()['files'] == 0
     extractor.assert_not_called()
 
@@ -112,7 +113,8 @@ def test_budget_counts_redaction_and_locations(setup):
         assert len(index.search(['_'])) == 1
 
 
-def test_dataless_cache_invalidation_and_size_guard(setup):
+@pytest.mark.parametrize('reuse_allowed', [False, True])
+def test_dataless_cache_invalidation_and_size_guard(setup, reuse_allowed):
     from types import SimpleNamespace
     root, home = setup
     p = root / 'sample.txt'
@@ -128,7 +130,7 @@ def test_dataless_cache_invalidation_and_size_guard(setup):
                                    st_flags=0x40000000)
         extractor = Mock(side_effect=AssertionError('dataless read'))
         with patch.object(Path, 'stat', metadata), patch.object(Path, 'open', side_effect=AssertionError('opened')):
-            assert index.ensure([p], extractor=extractor)['needs_download'] == 1
+            assert index.ensure([p], extractor=extractor, allowed={p} if reuse_allowed else None)['needs_download'] == 1
             assert not index.search(['검색구절'])
             assert index.status()['unsupported'] == {'내려받기 필요': 1}
         extractor.assert_not_called()
@@ -136,7 +138,7 @@ def test_dataless_cache_invalidation_and_size_guard(setup):
         assert index.search(['검색구절'])
         with patch.object(findindex, 'MAX_FILE_BYTES', 1):
             p.write_text('changed size')
-            assert index.ensure([p], extractor=extractor)['too_large'] == 1
+            assert index.ensure([p], extractor=extractor, allowed={p} if reuse_allowed else None)['too_large'] == 1
         extractor.assert_not_called()
 
 
@@ -164,3 +166,59 @@ def test_cache_link_swap_revocation_and_empty_scope(setup):
         a.symlink_to(b)
         assert not index.search(['검색구절'])
         assert index.prune() == 1
+
+
+def test_allowed_still_checks_current_scope_links_and_ocr(setup, tmp_path):
+    from ro import findeval, ocr
+    root, home = setup
+    good, image, swapped = [root / name for name in ('good.txt', 'image.png', 'swapped.txt')]
+    good.write_text('검색구절')
+    image.touch()
+    swapped.touch()
+    allowed = {good, image, swapped}
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('외부')
+    swapped.unlink()
+    swapped.symlink_to(outside)
+    with findindex.Index(home) as index, \
+            patch.object(findeval, 'walk', side_effect=AssertionError('re-enumerated')), \
+            patch.object(ocr, 'available', return_value=True), \
+            patch.object(ocr, 'safe_input', return_value=False) as safe, \
+            patch.object(ocr, 'ocr_batch', return_value={}) as batch:
+        counts = index.ensure(allowed, allowed=allowed)
+        assert counts['indexed'] == 1
+        safe.assert_called_once_with(image)
+        batch.assert_not_called()
+        assert [hit['path'] for hit in index.search(['검색구절'])] == [good]
+    with findindex.Index(home, roots=[]) as index:
+        extractor = Mock(side_effect=AssertionError('revoked scope read'))
+        assert not any(index.ensure(allowed, allowed=allowed, extractor=extractor).values())
+        extractor.assert_not_called()
+
+
+@pytest.mark.parametrize('expanding', [False, True])
+def test_casefold_offsets_match_reference_without_unneeded_list(setup, monkeypatch, expanding):
+    import re
+    root, home = setup
+    p = root / 'unicode.txt'
+    text = '[p.1]\n' + '가나다 ordinary ' * 3000 + '[p.3]\n계약 Straße İstanbul 끝' if expanding else (
+        '[p.1]\n' + '가나다 ordinary ' * 3000 + '[slide.4]\n계약 ALPHA beta 끝')
+    p.write_text(text)
+    phrases = ['계약', 'ss', 'i\u0307'] if expanding else ['계약', 'alpha', 'beta']
+    enumeration = Mock(wraps=enumerate)
+    monkeypatch.setattr(findindex, 'enumerate', enumeration, raising=False)
+    with findindex.Index(home) as index:
+        index.ensure([p])
+        hit, = index.search(phrases)
+    offsets = [i for i, c in enumerate(text) for _ in c.casefold()]
+    folded = text.casefold()
+    positions = [offsets[folded.index(phrase)] for phrase in phrases]
+    expected_locations = []
+    for position in positions:
+        markers = list(re.finditer(r'\[(p|slide)\.(\d+)\]', text[:position]))
+        expected_locations.append(f'{markers[-1][1]}.{markers[-1][2]}' if markers else '')
+    end = offsets[folded.index(phrases[0]) + len(phrases[0]) - 1] + 1
+    assert hit['snippet'] == text[max(0, positions[0] - 30):end + 30].replace('\n', ' ')
+    assert hit['locations'] == expected_locations
+    assert hit['phrases'] == phrases
+    assert enumeration.call_count == int(expanding)

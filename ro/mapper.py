@@ -37,6 +37,7 @@ SECRET_PATTERNS = [
     "auth.json", "credentials*", "*secret*", "*token*", "*.keychain*",
     "*recovery*code*", "*backup*code*", "*복구*코드*",
 ]
+SECRET_NAMES = re.compile('|'.join(fnmatch.translate(os.path.normcase(p)) for p in SECRET_PATTERNS))
 MARKERS = {
     "package.json": "node", "pyproject.toml": "python", "requirements.txt": "python",
     "Cargo.toml": "rust", "go.mod": "go", "platformio.ini": "platformio",
@@ -52,8 +53,7 @@ TOOLS = ["claude", "codex", "agy", "git", "gh", "python3", "node", "npm", "pio",
 
 
 def is_secret(name):
-    low = name.lower()
-    return any(fnmatch.fnmatch(low, p) for p in SECRET_PATTERNS)
+    return SECRET_NAMES.match(os.path.normcase(name.lower())) is not None
 
 
 def _git(path, *args):

@@ -73,15 +73,21 @@ def walk(roots):
     for root in _roots(roots):
         if root.is_symlink() or any(_blocked(p) for p in path_parts(root)):
             continue
+        try:
+            resolved_root = root.resolve()
+        except (OSError, RuntimeError):
+            continue
         for dp, dirs, files in os.walk(root, followlinks=False):
+            directory = Path(dp)
+            resolved_directory = resolved_root / directory.relative_to(root)
             dirs[:] = sorted(d for d in dirs if not _blocked(d) and not (Path(dp) / d).is_symlink())
             for name in sorted(files):
-                p = Path(dp) / name
+                p = directory / name
                 if _blocked(name) or p.is_symlink():
                     continue
                 try:
                     st = p.stat()
-                    p = p.resolve()
+                    p = resolved_directory / name
                 except OSError:
                     continue
                 if not stat.S_ISREG(st.st_mode) or p in seen:

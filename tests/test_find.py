@@ -1,5 +1,8 @@
 import io
+import json
 import os
+import random
+import stat
 import subprocess
 import tempfile
 import unicodedata
@@ -11,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from ro import cli, find, findeval, log
 
 NOW = datetime(2026, 10, 26, 12)
@@ -559,3 +563,237 @@ def test_icloud_drive_is_the_only_library_exception(tmp_path, monkeypatch):
     assert find._safe_path(drive / 'Archive' / 'Acme Model.pdf') is not None
     assert find._safe_path(mail / 'note.txt') is None
     assert find._safe_path(drive / 'Archive' / '.hidden.pdf') is None
+
+
+def f6_corpus(base):
+    root = base / 'Documents'
+    root.mkdir()
+    names = ['계약서.txt', '계악서.txt', '개인계약서.txt', '계약서_final.txt',
+             '계약서_2.txt', '계약서 (1).txt', 'other/계약서.txt',
+             unicodedata.normalize('NFD', '계약 검토.txt'), 'INVOICE.txt', 'invoice검토.txt',
+             '학습여정 보고서.txt', '학습여정_최종.txt', 'MTA.txt', '엠티에이.txt',
+             'sample.skill', 'README', 'alpha.txt', 'beta.txt', '외개어.txt',
+             '외개어_1.txt', 'ab.txt', 'xxacxx.txt', '길다' * 35 + '.txt',
+             '.hidden.txt', '~$계약.txt', 'secret-folder/계약.txt', 'credentials.txt',
+             'node_modules/계약.txt', 'password=/계약.txt', 'Bearer /계약.txt',
+             '계약\x01.txt', '계약\x7f.txt', 'sk-' + 'a' * 20 + '.txt']
+    for i, name in enumerate(names):
+        p = root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('외계어 은하수 MTA 월 구독료' if i % 3 == 0 else '일반 내용', encoding='utf-8')
+        stamp = datetime(2026, 10, 1 + i % 25, 12).timestamp()
+        os.utime(p, (stamp, stamp))
+    (root / 'linked.txt').symlink_to(root / 'alpha.txt')
+    (root / 'linked-dir').symlink_to(root / 'other', target_is_directory=True)
+    queries = ['계약서', '계약 검토', 'ㄱㅇㅅ', '계악서', '계악 텍스트', 'invoice',
+               '학습여정 뭐였더라 보고서', '학습여정 검토 초안 보고서 마지막',
+               '엠티에이', 'MTA', '확장자 없는 파일', '텍스트', '올해', '지난주 텍스트',
+               '계약서 -검토', '계약 PDF', '작년 계약서', 'ab', 'ad 텍스트',
+               '완전히없는이름', '외계어 은하수', 'skill', '"월 구독료"',
+               '계약서 "일반 내용"', '엠티에이 은하수', '길다', '계약서 초안 말고',
+               '그 파일 어디 찾아줘']
+    return root, queries
+
+
+def f6_results(base):
+    from ro import ocr
+    root, queries = f6_corpus(base)
+    with patch.object(ocr, 'available', return_value=False):
+        results = {q: find.search(q, roots=[root], now=NOW, spotlight=False,
+                                  home=base / 'state', budget=60) for q in queries}
+    return json.loads(json.dumps(results, ensure_ascii=False,
+                                 default=lambda p: p.relative_to(base).as_posix()))
+
+
+def test_f6_golden_results(tmp_path):
+    # F6 이전 구현에서 생성한 전체 반환값: 순서, 이유, flags, siblings, notes 포함.
+    expected = json.loads(Path(__file__).with_name('find_f6_golden.json').read_text())
+    assert f6_results(tmp_path) == expected
+
+
+# Frozen pre-F6 window scan; keep independent of the optimized matcher.
+def reference_match(term, name, stem, short_typo=False):
+    if term in (name, stem):
+        return 500, 0, f"이름 전체 '{term}' 일치"
+    if name.startswith(term):
+        return 400, 0, f"이름이 '{term}'로 시작"
+    position = name.find(term)
+    if position >= 0:
+        return 300, position, f"이름에 '{term}' 포함"
+    if any(c in findeval.CHOSEONG for c in term):
+        position = findeval.choseong(stem).find(term)
+        if position >= 0:
+            return 200, position, "초성 일치"
+    if find._one_edit(term, stem):
+        return 100, 0, "오타 1자 허용"
+    if len(term) >= 3 or (short_typo and len(term) >= 2):
+        for size in (len(term), len(term) + 1, len(term) - 1):
+            for position in range(len(stem) - size + 1):
+                if find._one_edit(term, stem[position:position + size]):
+                    return 100, position, "오타 1자 허용"
+    return None
+
+
+def reference_walk(roots):
+    """프로젝트 내부도 열거하되 숨김·비밀·링크·빌드 폴더는 제외한다."""
+    seen = set()
+    for root in findeval._roots(roots):
+        if root.is_symlink() or any(findeval._blocked(p) for p in findeval.path_parts(root)):
+            continue
+        for dp, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not findeval._blocked(d) and not (Path(dp) / d).is_symlink())
+            for name in sorted(files):
+                p = Path(dp) / name
+                if findeval._blocked(name) or p.is_symlink():
+                    continue
+                try:
+                    st = p.stat()
+                    p = p.resolve()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode) or p in seen:
+                    continue
+                seen.add(p)
+                yield p, st
+
+
+def test_f6_match_random_equivalence():
+    rng = random.Random(617)
+    alphabet = 'abcd가나다라ㄱㄴßİ'
+    for _ in range(12000):
+        term = ''.join(rng.choices(alphabet, k=rng.randint(1, 12)))
+        stem = ''.join(rng.choices(alphabet, k=rng.randint(1, 12)))
+        # Include near matches at every position, not only mostly negative pairs.
+        if rng.randrange(2):
+            i = rng.randrange(len(term))
+            edited = rng.choice((term[:i] + term[i + 1:], term[:i] + rng.choice(alphabet) + term[i:],
+                                 term[:i] + rng.choice(alphabet) + term[i + 1:]))
+            stem = stem[:rng.randrange(4)] + edited + stem[-rng.randrange(1, 4):]
+        for short in (False, True):
+            assert find._match(term, stem + '.txt', stem, short) == reference_match(term, stem + '.txt', stem, short)
+
+
+def test_f6_walk_and_candidates_equivalence(tmp_path, monkeypatch):
+    root, _ = f6_corpus(tmp_path)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    drive = tmp_path / 'Library' / 'Mobile Documents' / 'com~apple~CloudDocs'
+    drive.mkdir(parents=True)
+    (drive / '계약.txt').touch()
+    (drive / '.hidden.txt').touch()
+    alias = tmp_path / 'alias'
+    alias.symlink_to(root, target_is_directory=True)
+    roots = [root, root / 'other', alias, drive, tmp_path / 'Library']
+    old = list(reference_walk(roots))
+    assert list(findeval.walk(roots)) == old
+    expected = {p: (st, False) for p, st in old if log.redact(str(p)) == str(p)
+                and not any(ord(c) < 32 or ord(c) == 127 for c in str(p))}
+    assert find._candidates(roots) == expected
+    assert find.search('계약', roots=[alias], spotlight=False, body=False)['results'] == []
+
+
+def test_f6_redact_path_boundaries():
+    parents = ['normal', 'password=', 'password="', 'passwd: ', 'Bearer ', '암호는 ',
+               '비밀 번호:', '-----BEGIN CERTIFICATE-----', 'https:/', 'sk-' + 'a' * 20,
+               'authorization=[REDACTED]', 'Bearer [REDACTED]', 'token="[REDACTED]"']
+    names = ['safe.txt', '1234.txt', '[REDACTED]', 'x".txt', 'user:pass@example.test',
+             'ghp_' + 'a' * 20, 'line\n.txt']
+    paths = [Path('/synthetic') / parent / name for parent in parents for name in names]
+    st = SimpleNamespace(st_mtime=0)
+    with patch.object(findeval, 'walk', return_value=[(p, st) for p in paths]):
+        actual = find._candidates([])
+    assert actual == {p: (st, False) for p in paths if log.redact(str(p)) == str(p)
+                      and not any(ord(c) < 32 or ord(c) == 127 for c in str(p))}
+
+
+def test_f6_secret_pattern_equivalence():
+    import fnmatch
+    from ro import mapper
+    names = ['ordinary.txt', 'CREDENTIALS.JSON', 'mySecret.txt', 'AUTH.JSON', '.env.local',
+             'id_RSA.pub', '비밀.txt', '복구용코드.txt', 'abc\nsecret.txt', 'ß.TOKEN',
+             *mapper.SECRET_PATTERNS]
+    rng = random.Random(618)
+    names += [''.join(rng.choices('abcXYZ_.*\n', k=20)) for _ in range(1000)]
+    for name in names:
+        assert mapper.is_secret(name) == any(fnmatch.fnmatch(name.lower(), p) for p in mapper.SECRET_PATTERNS)
+
+
+def test_f6_single_walk_and_query_local_memo(tmp_path):
+    from ro import ocr
+    root, _ = f6_corpus(tmp_path)
+    for query in ('외계어 은하수', '"월 구독료"', '계약서', '계약 PDF'):
+        with patch.object(findeval, 'walk', wraps=findeval.walk) as walk, \
+                patch.object(find, '_match', wraps=find._match) as match, \
+                patch.object(ocr, 'available', return_value=False):
+            find.search(query, roots=[root], home=tmp_path / 'state', spotlight=False)
+        assert walk.call_count == 1
+        keys = [call.args for call in match.call_args_list]
+        assert len(keys) == len(set(keys))
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_f6_parallel_spotlight_order_and_failure(tmp_path, fail):
+    import threading
+    import time
+    paths = [tmp_path / name for name in ('alpha.txt', 'alpha_final.txt', 'alpha_2.txt')]
+    for p in paths:
+        p.touch()
+        os.utime(p, (1000, 1000))
+    terms = ['alpha', 'beta', 'gamma']
+    barrier = threading.Barrier(3)
+    active = peak = 0
+    lock = threading.Lock()
+    def runner(args, **kwargs):
+        nonlocal active, peak
+        if args[0] == 'mdls':
+            return SimpleNamespace(returncode=0, stdout='(null)')
+        i = terms.index(args[-1])
+        if threading.current_thread() is not threading.main_thread():
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            barrier.wait(timeout=5)
+            time.sleep((2 - i) * .01)
+            with lock:
+                active -= 1
+        return SimpleNamespace(returncode=int(fail and i == 1), stdout=str(paths[i]) + '\0')
+    with patch.object(findeval, 'walk', return_value=[]):
+        serial = find.search('alpha beta gamma', roots=[tmp_path], runner=runner, body=False)
+        with patch.object(find.subprocess, 'run', side_effect=runner):
+            parallel = find.search('alpha beta gamma', roots=[tmp_path], body=False)
+    assert parallel == serial
+    assert peak == 3
+    assert parallel['notes'].count('Spotlight 사용 불가') == int(fail)
+
+
+@pytest.mark.parametrize('batch', ['valid', 'malformed', 'failed'])
+def test_f6_mdls_batch_and_fallback(tmp_path, batch):
+    for name in ('sampleA.txt', 'sampleB.txt', 'sampleC.txt'):
+        (tmp_path / name).touch()
+    calls = []
+    def runner(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'mdfind':
+            return SimpleNamespace(returncode=0, stdout='')
+        values = ['(null)' if Path(p).name == 'sampleB.txt' else '2026-10-25 01:02:03 +0000' for p in args[4:]]
+        if len(values) > 1 and batch != 'valid':
+            return SimpleNamespace(returncode=int(batch == 'failed'), stdout='bad\0output')
+        return SimpleNamespace(returncode=0, stdout='\0'.join(values))
+    serial = find.search('sample', roots=[tmp_path], runner=runner, body=False)
+    calls.clear()
+    with patch.object(find.subprocess, 'run', side_effect=runner):
+        parallel = find.search('sample', roots=[tmp_path], body=False)
+    assert parallel == serial
+    assert len([args for args in calls if args[0] == 'mdls']) == (1 if batch == 'valid' else 4)
+    assert find._used_dates('(null)\0', 1) == [None]
+    assert find._used_dates('', 1) is None
+
+
+def test_f6_long_query_3000_files(tmp_path):
+    import time
+    for i in range(3000):
+        (tmp_path / f'record-{i:04}-ordinary-long-document-name.txt').touch()
+    start = time.monotonic()
+    result = find.search('학습여정 뭐였더라 보고서 마지막 작성본', roots=[tmp_path], spotlight=False, body=False)
+    elapsed = time.monotonic() - start
+    assert not result['results']
+    assert elapsed < 3, f'3000-file name search took {elapsed:.3f}s'

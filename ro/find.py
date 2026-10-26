@@ -5,10 +5,16 @@ import sqlite3
 import stat
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from functools import lru_cache, partial
 from pathlib import Path
 
 from . import findeval, log, recall
+
+CONTROL = re.compile(r'[\x00-\x1f\x7f]')
+# '/'를 가로지르는 redact 패턴의 문맥에서는 전체 경로 검사를 유지한다.
+REDACT_CONTEXT = re.compile(r'pass|secret|token|api[_-]?key|authorization|비밀|패스워드|암호|토큰|bearer|-----BEGIN|:', re.I)
 
 KINDS = {
     "PDF": ({"pdf"}, {".pdf"}),
@@ -157,7 +163,7 @@ def _safe_path(path, roots=None):
         return None
     if any(findeval._blocked(part) for part in findeval.path_parts(p)) or log.redact(str(p)) != str(p):
         return None
-    if any(ord(c) < 32 or ord(c) == 127 for c in str(p)):
+    if CONTROL.search(str(p)):
         return None
     try:
         if any(parent.is_symlink() for parent in (p, *p.parents)):
@@ -205,6 +211,9 @@ def _match(term, name, stem, short_typo=False):
     if _one_edit(term, stem):
         return 100, 0, "오타 1자 허용"
     if len(term) >= 3 or (short_typo and len(term) >= 2):
+        middle = len(term) // 2
+        if term[:middle] not in stem and term[middle:] not in stem:
+            return None
         for size in (len(term), len(term) + 1, len(term) - 1):
             for position in range(len(stem) - size + 1):
                 if _one_edit(term, stem[position:position + size]):
@@ -225,12 +234,13 @@ def _family(path):
     return path.parent, stem, path.suffix.casefold()
 
 
-def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=True, strict=False):
+def _score(candidates, parsed, period_label, drop=None, short_typo=False, strict=False, matcher=_match):
     since = datetime.fromisoformat(parsed["since"]).timestamp() if parsed["since"] else None
     until = (datetime.fromisoformat(parsed["until"]) + timedelta(days=1)).timestamp() if parsed["until"] else None
-    groups = {}
+    scored = []
     for path, (st, confirmed) in candidates.items():
         name = findeval.nfc(path.name).casefold()
+        stem = findeval.nfc(path.stem).casefold()
         if any(word in findeval.nfc(str(path)).casefold() for word in parsed["exclude"]):
             continue
         if parsed["no_extension"] and path.suffix:
@@ -250,8 +260,8 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=T
             for variant in variants:
                 match = ((300, 0, "확장자 일치") if re.fullmatch(r"[a-z0-9]{1,10}", variant)
                          and variant == path.suffix.lstrip('.').casefold()
-                         and variant not in findeval.nfc(path.stem).casefold()
-                         else _match(variant, name, findeval.nfc(path.stem).casefold(), short_typo))
+                         and variant not in stem
+                         else matcher(variant, name, stem, short_typo))
                 if match and (best is None or (match[0], -match[1]) > (best[0], -best[1])):
                     best, matched = match, variant
             if best:
@@ -274,8 +284,16 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=T
         position = min((m[1] for m in matches), default=0)
         # 종류·기간만 있으면 이름 길이보다 수정일을 우선한다.
         key = (-score, position, len(name) if matches else 0, -st.st_mtime, str(path))
-        family = _family(path) if group else path
-        groups.setdefault(family, []).append((key, row, st.st_mtime))
+        scored.append((key, row, st.st_mtime))
+    return scored
+
+
+def _group(scored, group=True):
+    groups = {}
+    for key, original, modified in scored:
+        row = {**original, 'reasons': original['reasons'][:], 'flags': original['flags'][:]}
+        family = _family(row['path']) if group else row['path']
+        groups.setdefault(family, []).append((key, row, modified))
     representatives = []
     for members in groups.values():
         members = sorted(reversed(members), key=lambda item: -item[2])
@@ -289,17 +307,21 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=T
     return ranked
 
 
-def _body_search(candidates, parsed, label, allowed, budget, home):
+def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=True, strict=False, matcher=_match):
+    return _group(_score(candidates, parsed, period_label, drop, short_typo, strict, matcher), group)
+
+
+def _body_search(candidates, parsed, label, allowed, budget, home, matcher=_match):
     result = {"results": [], "notes": []}
     from .findindex import Index
-    rows = _rank(candidates, parsed, label, group=False, strict=True)
+    rows = _rank(candidates, parsed, label, group=False, strict=True, matcher=matcher)
     paths = [row["path"] for row in rows]
     by_path = {row["path"]: row for row in rows}
     phrase_groups = [[phrase, translated] if (translated := " ".join(parsed["aliases"].get(w, w).casefold() for w in phrase.split())) != phrase
                      else [phrase] for phrase in parsed["phrases"]]
     phrases = list(dict.fromkeys(p for group in phrase_groups for p in group))
     with Index(home, allowed) as index:
-        counts = index.ensure(paths, budget_s=budget)
+        counts = index.ensure(paths, budget_s=budget, allowed=candidates)
         hits = index.search(phrases, paths=paths, limit=max(1, len(paths)))
         unsupported = ", ".join(sorted(index.unsupported_formats)) or "없음"
         truncated = index.truncated
@@ -335,6 +357,50 @@ def _body_search(candidates, parsed, label, allowed, budget, home):
     return result
 
 
+def _candidates(roots):
+    directories, candidates = {}, {}
+    for p, st in findeval.walk(roots):
+        parent = p.parent
+        if parent not in directories:
+            directory = str(parent)
+            directories[parent] = (bool(REDACT_CONTEXT.search(directory)), log.redact(directory) != directory)
+        context, redacted = directories[parent]
+        if CONTROL.search(str(p)):
+            continue
+        if context:
+            if log.redact(str(p)) != str(p):
+                continue
+        elif redacted or log.redact(p.name) != p.name:
+            continue
+        candidates[p] = (st, False)
+    return candidates
+
+
+def _run(args, runner):
+    try:
+        output = runner(args, capture_output=True, text=True, timeout=10)
+        if not output.returncode:
+            return output.stdout
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        pass
+    return None
+
+
+def _used_dates(output, count):
+    if output is None:
+        return None
+    fields = output.split('\0')
+    if len(fields) == count + 1 and fields[-1] == '':
+        fields.pop()
+    if len(fields) != count:
+        return None
+    try:
+        return [None if value.strip() == '(null)' else datetime.strptime(value.strip(), '%Y-%m-%d %H:%M:%S %z')
+                for value in fields]
+    except ValueError:
+        return None
+
+
 def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
            body=None, budget=20, home=findeval.HOME):
     if not math.isfinite(budget) or budget < 0:
@@ -364,8 +430,8 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
         safe = _safe_path(Path(root).expanduser().absolute())
         if safe is not None and safe.is_dir() and safe not in allowed:
             allowed.append(safe)
-    candidates = {p: (st, False) for p, st in findeval.walk(allowed)
-                  if log.redact(str(p)) == str(p) and not any(ord(c) < 32 or ord(c) == 127 for c in str(p))}
+    candidates = _candidates(allowed)
+    parallel = runner is None
     runner = subprocess.run if runner is None else runner
     spotlight_available = True
 
@@ -373,38 +439,45 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
         nonlocal spotlight_available
         if not spotlight_available:
             return None
-        try:
-            output = runner(args, capture_output=True, text=True, timeout=10)
-            if not output.returncode:
-                return output.stdout
-        except (OSError, subprocess.TimeoutExpired, UnicodeError):
-            pass
+        output = _run(args, runner)
+        if output is not None:
+            return output
         spotlight_available = False
         result["notes"].append("Spotlight 사용 불가")
         return None
 
     if spotlight:
-        for root in allowed:
-            for term in parsed["terms"]:
-                output = command(["mdfind", "-0", "-onlyin", str(root), "-name", term])
-                if output is None:
-                    break
-                for raw_path in output.split("\0"):
-                    if not raw_path:
-                        continue
-                    safe = _safe_path(raw_path, allowed)
-                    if safe is None:
-                        continue
-                    try:
-                        st = safe.stat()
-                    except OSError:
-                        continue
-                    if stat.S_ISREG(st.st_mode):
-                        candidates[safe] = (st, True)
+        jobs = [["mdfind", "-0", "-onlyin", str(root), "-name", term]
+                for root in allowed for term in parsed["terms"]]
+        if parallel and len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                outputs = list(pool.map(partial(_run, runner=runner), jobs))
+        else:
+            outputs = (command(job) for job in jobs)
+        for output in outputs:
+            if output is None:
+                if spotlight_available:
+                    spotlight_available = False
+                    result["notes"].append("Spotlight 사용 불가")
+                break
+            for raw_path in output.split("\0"):
+                if not raw_path:
+                    continue
+                safe = _safe_path(raw_path, allowed)
+                if safe is None:
+                    continue
+                try:
+                    st = safe.stat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    candidates[safe] = (st, True)
     label = " · ".join(m[0].removesuffix("에") for m in PERIOD.finditer(findeval.nfc(text)))
-    ranked = _rank(candidates, parsed, label)
+    matcher = lru_cache(maxsize=None)(_match)
+    scored = [] if use_body else _score(candidates, parsed, label, matcher=matcher)
+    ranked = _group(scored)
     automatic = body is None and not use_body and bool(parsed["terms"]) and not any(
-        row["name_exact"] for row in _rank(candidates, parsed, label, group=False))
+        row["name_exact"] for _, row, _ in scored)
     if automatic:
         parsed["phrases"] = [term for term in parsed["terms"] if len(term) > 1 and term not in BODY_STOP]
         automatic = bool(parsed["phrases"])
@@ -415,7 +488,7 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
             result["notes"].append("이름에 없어 본문까지 확인: 이름 일치가 없거나 약해 자동 확대")
         started = time.monotonic()
         try:
-            found = _body_search(candidates, body_parsed, label, allowed, budget, home)
+            found = _body_search(candidates, body_parsed, label, allowed, budget, home, matcher)
             result["notes"].extend(found["notes"])
             if automatic and time.monotonic() - started >= budget:
                 result["notes"].append("본문 시간 예산 초과: 이름 검색 결과 유지")
@@ -425,7 +498,7 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
                 # 본문 적중 대표를 먼저 두고, 같은 계열의 이름 후보는 형제로 합친다.
                 families = {_family(row["path"]): {} for row in found["results"]}
                 remaining = [row for row in ranked if _family(row["path"]) not in families]
-                for row in found["results"] + _rank(candidates, parsed, label, group=False):
+                for row in found["results"] + _group(scored, group=False):
                     if _family(row["path"]) not in families:
                         continue
                     members = families.setdefault(_family(row["path"]), {})
@@ -451,7 +524,16 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
     result["results"] = ranked[:limit]
     if spotlight:
         # shortcut: 열람 신호는 최상위 5개에만 표시, 실측 효용이 입증되면 조회 범위를 조정한다.
-        for row in result["results"][:5]:
+        rows = result["results"][:5]
+        dates = None
+        if parallel and spotlight_available and len(rows) > 1:
+            output = _run(["mdls", "-raw", "-name", "kMDItemLastUsedDate", *[str(row["path"]) for row in rows]], runner)
+            dates = _used_dates(output, len(rows))
+        for i, row in enumerate(rows):
+            if dates is not None:
+                if dates[i] is not None:
+                    row["reasons"].append(f"마지막 열람 {dates[i].astimezone().date().isoformat()}")
+                continue
             output = command(["mdls", "-raw", "-name", "kMDItemLastUsedDate", str(row["path"])])
             if output:
                 try:
@@ -468,7 +550,7 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
                               ("period", "기간 조건을 빼면"), ("typo", "짧은 검색어도 오타 1자 허용 시")):
             if drop == "kinds" and not parsed["kinds"] or drop == "period" and not parsed["since"]:
                 continue
-            relaxed = _rank(candidates, parsed, label, drop, short_typo=drop == "typo")
+            relaxed = _rank(candidates, parsed, label, drop, short_typo=drop == "typo", matcher=matcher)
             if relaxed:
                 result["relaxed"].append({"condition": drop, "message": f"{message} {len(relaxed)}건",
                                           "results": relaxed[:limit]})

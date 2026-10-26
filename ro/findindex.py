@@ -58,7 +58,7 @@ class Index:
             return None
         return p
 
-    def ensure(self, paths, budget_s=20, extractor=extract_text):
+    def ensure(self, paths, budget_s=20, extractor=extract_text, *, allowed=None):
         if not math.isfinite(budget_s) or budget_s < 0:
             raise ValueError('budget은 0 이상이어야 합니다.')
         counts = dict.fromkeys(('indexed', 'ocr', 'skipped_unsupported', 'needs_download', 'too_large', 'pending'), 0)
@@ -67,7 +67,7 @@ class Index:
         self.notes = []
         self.truncated = self.failures = 0
         # walk의 허용 목록과 현재 경로 검사를 모두 통과해야 읽거나 캐시한다.
-        allowed = {p for p, _ in findeval.walk(self.roots)}
+        allowed = {p for p, _ in findeval.walk(self.roots)} if allowed is None else set(allowed)
         prepared, candidates = {}, []
         for raw in dict.fromkeys(paths):
             p = self._safe(raw)
@@ -198,7 +198,8 @@ class Index:
             if not matched:
                 continue
             # casefold가 글자 수를 바꾸는 경우에도 문맥의 원문 위치를 유지한다.
-            offsets = [i for i, c in enumerate(row[6]) for _ in c.casefold()]
+            offsets = (range(len(row[6])) if len(folded) == len(row[6]) else
+                       [i for i, c in enumerate(row[6]) for _ in c.casefold()])
             locations = []
             for phrase in matched:
                 position = offsets[folded.index(phrase)]
@@ -242,9 +243,9 @@ class Index:
                 'unsupported': dict(self.db.execute("SELECT unsupported,count(*) FROM files WHERE unsupported != '' GROUP BY unsupported"))}
 
 
-def ensure(paths, budget_s=20, extractor=extract_text, *, home=config.HOME, roots=None):
+def ensure(paths, budget_s=20, extractor=extract_text, *, home=config.HOME, roots=None, allowed=None):
     with Index(home, roots) as index:
-        return index.ensure(paths, budget_s, extractor)
+        return index.ensure(paths, budget_s, extractor, allowed=allowed)
 
 
 def search(phrases, paths=None, limit=20, *, home=config.HOME, roots=None):
