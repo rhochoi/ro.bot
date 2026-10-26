@@ -4535,6 +4535,7 @@ async function runFind(q, body) {
   fill(findCard, h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: "찾는 중…" }),
     h("div", { class: "block-sub", text: "이름·종류·기간을 먼저 보고, 없으면 내용까지 봐요." }));
   findCard.style.display = "flex";
+  findCard.scrollIntoView({ block: "start" });  // 홈 위쪽 통계 대신 결과가 먼저 보이게
   let r = null;
   try { r = await apiPost("/api/find", body === undefined ? { question: q } : { question: q, body }); } catch (err) { r = null; }
   findBusy = false;
@@ -4543,6 +4544,7 @@ async function runFind(q, body) {
   else if (findRes.ok && findRes.relaxed.length) findSel = findRes.relaxed[0].items[0].rank;
   findMissing = !!(findRes.ok && !findRes.items.length);
   renderFind();
+  findCard.scrollIntoView({ block: "start" });  // 결과가 길어도 맨 위(제목·첫 결과)부터
 }
 function renderFind() {
   const r = findRes;
