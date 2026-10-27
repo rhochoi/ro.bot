@@ -55,7 +55,7 @@ sys.exit(int(os.environ.get("DELEGATE_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Usage:", result.stdout)
         for engine, expected in (("codex", "codex exec -s workspace-write -"),
-                                 ("agy", "agy -p"), ("auto", "codex exec")):
+                                 ("agy", "agy -p")):
             result = self.run_delegate("--dry-run", engine, self.brief)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(expected, result.stdout)

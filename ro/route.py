@@ -30,7 +30,7 @@ def routing_path():
 # routing.toml을 읽지 못할 때의 기본값: (카테고리, 키워드, 엔진)
 BUILTIN_RULES = [
     ("design", ("설계", "리뷰", "검토", "설명", "분석", "design", "review", "explain", "plan"), "claude"),
-    ("implement", ("구현", "수정", "고쳐", "테스트", "리팩터", "버그", "fix", "implement", "test", "refactor"), "codex"),
+    ("implement", ("구현", "수정", "고쳐", "테스트", "리팩터", "버그", "fix", "implement", "test", "refactor"), "claude"),
     ("ui", ("브라우저", "에디터", "화면", "ui", "browser", "editor"), "agy"),
 ]
 

@@ -21,6 +21,7 @@ class ReviseTest(unittest.TestCase):
         self.home = self.tmp.name
         self.toml = Path(self.home) / "routing.toml"
         shutil.copy(route.ROUTING_PATH, self.toml)
+        self.toml.write_text(self.toml.read_text().replace('engine = "claude"\nmodel = "claude-sonnet-5-5"\nkeywords = ["구현"', 'engine = "codex"\nmodel = ""\nkeywords = ["구현"'))  # 기본이 codex였던 시나리오 고정
         self.routing = route.load_routing(self.toml)
 
     def tearDown(self):

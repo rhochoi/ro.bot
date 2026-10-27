@@ -61,7 +61,7 @@ class RoutingTest(unittest.TestCase):
     def test_repo_routing_toml_valid_and_matches_builtin_behavior(self):
         r = route.load_routing(REPO / "routing.toml")
         self.assertEqual([x[0] for x in r["rules"]], ["design", "implement", "ui"])
-        for task, want in [("이 코드 리뷰해줘", "claude"), ("버그 수정하고 테스트", "codex"),
+        for task, want in [("이 코드 리뷰해줘", "claude"), ("버그 수정하고 테스트", "claude"),
                            ("브라우저 화면 확인", "agy"), ("안녕", "claude")]:
             self.assertEqual(route.choose(task, routing=r)[0], want)
 
@@ -75,7 +75,7 @@ class RoutingTest(unittest.TestCase):
             with contextlib.redirect_stderr(err):
                 r = route.load_routing(bad)
             self.assertIn("경고", err.getvalue())
-            self.assertEqual(route.choose("버그 수정", routing=r)[0], "codex")  # 내장 기본값
+            self.assertEqual(route.choose("버그 수정", routing=r)[0], "claude")  # 내장 기본값
             with contextlib.redirect_stderr(io.StringIO()):  # 의도한 경고
                 self.assertEqual(route.load_routing(Path(d) / "없음.toml")["fallback"][0], "claude")
 

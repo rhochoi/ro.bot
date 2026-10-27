@@ -6,4 +6,4 @@
 
 @identity/principles.md
 
-구현·탐색·테스트는 scripts/delegate.sh codex로, 브라우저·UI는 agy로 위임한다. Claude는 조율·검토만 한다.
+codex는 더 이상 쓰지 않는다(사용자 지시, 2026-10-27). 구현·탐색·테스트는 Claude가 직접 하고, 브라우저·UI는 scripts/delegate.sh agy로 위임한다.

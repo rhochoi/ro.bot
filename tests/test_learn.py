@@ -97,7 +97,7 @@ class LearnTest(unittest.TestCase):
 
     def test_default_engine_not_proposed(self):
         with tempfile.TemporaryDirectory() as h:
-            cands = learn.propose([ev("codex", True)] * 3, h)
+            cands = learn.propose([ev("claude", True)] * 3, h)
             self.assertEqual([c for c in cands if c["kind"] == "route"], [])
 
     def test_unknown_id(self):
