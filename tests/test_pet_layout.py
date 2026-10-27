@@ -82,21 +82,16 @@ class PetLayoutTest(unittest.TestCase):
             self.assertGreaterEqual(m["minFont"], 11, m)
             self.assertEqual(m["small"], [], m)
 
-    def test_clear_notice_is_not_a_preview_control(self):
+    def test_no_clear_notice_control(self):
         page = self.open_page()
         page.evaluate("window.setMoodPreview('idle', 8000); applyState({mood: 'idle'})")
-        self.assertFalse(page.locator("#clearBtn").is_visible())
-        page.evaluate("askNotice = {q: '질문', msg: '안내'}; askNoticeUntil = Infinity; applyState({mood: 'idle'})")
-        self.assertEqual(page.inner_text("#clearBtn"), "알림 지우기")
-        page.click("#clearBtn")
-        page.wait_for_selector("#clearBtn", state="hidden")
-
+        self.assertEqual(page.locator("#clearBtn").count(), 0)   # 알림을 닫는 버튼과 답변 카드는 질문 흐름과 함께 없어졌다
+        self.assertEqual(page.locator("#answerCard").count(), 0)
     def test_panel_and_palette_fit_window(self):
         page = self.open_page()
         page.evaluate("""async () => {
             await runRecall('오늘 뭐 했지?');
-            askNotice = { q: '긴 답변', msg: '패널 높이 확인 '.repeat(120) };
-            askNoticeUntil = Infinity;
+            showGuide('패널 높이 확인 '.repeat(120));
             await refreshState();
         }""")
         self.assertGreaterEqual(page.locator("#bubble").bounding_box()["y"], 0)
@@ -118,39 +113,33 @@ class PetLayoutTest(unittest.TestCase):
         rect, sel = toast.bounding_box(), select.bounding_box()
         self.assertLessEqual(sel["y"] + sel["height"], rect["y"] + rect["height"] + 1)
 
-    def test_main_input_recall_and_external_preview(self):
+    def test_main_input_recall_and_guide_card(self):
         page = self.open_page()
-        paths, asks = [], []
-
-        def record(request):
-            path = urlsplit(request.url).path
-            paths.append(path)
-            if path == "/api/ask" and request.method == "POST":
-                asks.append(request.post_data_json)
-
-        page.on("request", record)
-        with mock.patch("ro.route.run", return_value={"ok": True, "output": "답", "code": 0, "duration": 0.1}) as run:
+        paths = []
+        page.on("request", lambda r: paths.append(urlsplit(r.url).path))
+        with mock.patch("ro.route.run", side_effect=AssertionError("엔진 실행")) as run:
             page.fill("#askInput", "오늘 뭐 했지?")
             with page.expect_response(lambda r: urlsplit(r.url).path == "/api/recall"):
                 page.press("#askInput", "Enter")
             page.wait_for_selector("#recallCard", state="visible")
-            self.assertNotIn("/api/ask/preview", paths)
-            self.assertNotIn("/api/ask", paths)
 
             page.click('[data-tab="settings"]')
             page.fill("#askInput", "2 더하기 2는?")
             page.press("#askInput", "Enter")
-            page.wait_for_selector("#sendCard", state="visible")  # 확인 카드는 탭 밖이라 설정 탭에서도 보인다
-            self.assertIn("/api/ask/preview", paths)
-            self.assertEqual(asks, [])
-            run.assert_not_called()
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/ask"):
-                page.click("#sendApproveBtn")
-            page.wait_for_function("document.querySelector('#roMainBubble').innerText === '답'")
-            self.assertEqual(len(asks), 1)
-            self.assertTrue(asks[0].get("preview_id"))
-            run.assert_called_once()
+            page.wait_for_selector("#sendCard", state="visible")  # 안내 카드는 탭 밖이라 설정 탭에서도 보인다
+            self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
+            self.assertEqual(page.locator("#sendApproveBtn").count(), 0)   # 엔진으로 보내는 버튼은 없다
+            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):   # 남은 선택지 1: 기록으로만 남기기
+                page.click("#sendRecordBtn")
+            page.wait_for_selector("#sendCard", state="hidden")
 
+            page.fill("#askInput", "2 더하기 2는?")
+            page.press("#askInput", "Enter")
+            page.wait_for_selector("#sendCard", state="visible")
+            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/find"):      # 남은 선택지 2: 내 파일에서 찾기
+                page.click("#sendFindBtn")
+            self.assertEqual([p for p in paths if p.startswith("/api/ask")], [])
+            run.assert_not_called()
     def test_main_input_record_and_preview_cancel(self):
         page = self.open_page()
         asks = []
@@ -205,14 +194,11 @@ class PetLayoutTest(unittest.TestCase):
         paths = []
         page.on("request", lambda r: paths.append(urlsplit(r.url).path))
         page.fill("#askInput", "오늘 ro.bot 구조를 설명해줘")
-        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/ask/preview"):
-            page.press("#askInput", "Enter")
+        page.press("#askInput", "Enter")
+        page.wait_for_selector("#sendCard", state="visible")   # '오늘'만 붙은 일반 요청은 회상으로 새지 않고 안내 카드로 간다
         self.assertNotIn("/api/recall", paths)
-        page.wait_for_selector("#sendCard", state="visible")
-        page.click("#sendCard summary")
-        self.assertIn("[질문]", page.inner_text("#sendCard .send-ctx"))      # 보낼 프롬프트 전체가 보인다
+        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
         page.click("#sendCancelBtn")
-
     def test_failed_prefs_save_reverts_the_screen(self):
         page = self.open_page()
         before = page.evaluate("document.body.className")
@@ -223,7 +209,7 @@ class PetLayoutTest(unittest.TestCase):
         page.wait_for_function("document.querySelector('#toast').innerText.includes('되돌렸어요')")
         self.assertEqual(set(page.evaluate("document.body.className").split()), set(before.split()))
 
-    def test_setup_card_explains_next_step_without_map(self):
+    def test_no_setup_card_without_map(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
             srv = pet.start_server(rt)
@@ -234,15 +220,12 @@ class PetLayoutTest(unittest.TestCase):
                 page.goto("http://127.0.0.1:%d/" % srv.server_address[1])
                 page.wait_for_selector("#stage")
                 page.evaluate("setBubbleOpen(true)")
-                page.wait_for_selector("#setupCard", state="visible")
-                self.assertNotIn("ro map", page.inner_text("#setupCard"))
-                self.assertIn("기록은 지금도 됩니다", page.inner_text("#setupCard"))
-                page.click("#setupCard summary")
-                self.assertIn("ro map", page.inner_text("#setupCard"))
+                page.wait_for_selector("#metricProjects", state="visible")
+                self.assertEqual(page.locator("#setupCard").count(), 0)   # 질문 준비(지도·엔진) 안내는 질문과 함께 없어졌다
+                self.assertEqual(page.inner_text("#metricProjects"), "0")
             finally:
                 srv.shutdown()
                 srv.server_close()
-
     def test_reopened_panel_stays_inside_after_dragging_pet(self):
         page = self.open_page()
         page.click("#closeBtn")
@@ -295,7 +278,7 @@ let now = 1000, hidden = true, blur;
 const performance = {now: () => now};
 const bubble = {classList: {contains: () => hidden, toggle: (_, v) => {hidden = v;}}};
 const window = {addEventListener: (name, fn) => {assert.equal(name, 'blur'); blur = fn;}};
-const askInput = {value: '', disabled: false};
+const askInput = {value: ''};
 const writeCard = {style: {display: 'none'}}, sendCard = {style: {display: 'none'}};
 const ambient = {focus: false}, palette = {hidden: true};
 const isNativeHost = true, notifyHost = () => {};
@@ -303,15 +286,13 @@ const latestState = null;
 let bubbleOpenedAt = 0;
 SOURCE
 function reset() {
-  hidden = true; askInput.value = ''; askInput.disabled = false; questionBusy = false;
+  hidden = true; askInput.value = '';
   writeCard.style.display = sendCard.style.display = 'none'; ambient.focus = false; palette.hidden = true;
   setBubbleOpen(true); now += 301;
 }
 for (const [name, protect] of [
   ['draft', () => {askInput.value = '초안';}],
   ['whitespace', () => {askInput.value = ' ';}],
-  ['busy', () => {questionBusy = true;}],
-  ['sending', () => {askInput.disabled = true;}],
   ['write', () => {writeCard.style.display = 'flex';}],
   ['send', () => {sendCard.style.display = 'flex';}],
   ['focus', () => {ambient.focus = true;}],

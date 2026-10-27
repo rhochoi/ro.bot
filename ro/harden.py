@@ -320,7 +320,7 @@ def _checks():
     def pet_safety_invariants():
         with tempfile.TemporaryDirectory() as h:
             rt = pet.PetRuntime(home=h, log_dir=h, map_path=str(Path(h) / "map.json"))
-            rt.queue_write_approval("배포 token=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            rt._queue({"kind": "organize_apply", "task": "배포 token=" + "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"})
             st = rt.snapshot()
             try:
                 pet.start_server(rt, host="0.0.0.0")

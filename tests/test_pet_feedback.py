@@ -8,7 +8,6 @@ import unicodedata
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.request import Request, urlopen
 
 from ro import ask, detect, log, mapper, organize, pet, recall, route
 
@@ -17,67 +16,11 @@ try:
 except ImportError:  # 선택 의존성
     sync_playwright = None
 
-OK = {"ok": True, "code": 0, "duration": 0.1, "output": "답", "reason": ""}
-
 
 def write_map(d, projects=()):
     mp = Path(d) / "map.json"
     mapper.save_map({"projects": list(projects), "tools": {}}, mp)
     return str(mp)
-
-
-class AskPreviewTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        d = self.tmp.name
-        self.rt = pet.PetRuntime(home=d, log_dir=d, map_path=write_map(d))
-        self.server = pet.start_server(self.rt)
-        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
-
-    def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.tmp.cleanup()
-
-    def post(self, path, body=None):
-        req = Request(self.base + path, data=json.dumps(body or {}).encode(),
-                      headers={"X-Ro-Token": self.rt.token, "Content-Type": "application/json"})
-        return json.loads(urlopen(req).read())
-
-    def test_panel_never_sends_without_preview(self):
-        with mock.patch.object(pet.route, "run", return_value=OK) as run:
-            r = self.post("/api/ask", {"question": "구조 설명해줘"})
-            self.assertEqual((r["ok"], r["reason"]), (False, "needs_preview"))
-            run.assert_not_called()
-            pv = self.post("/api/ask/preview", {"question": "구조 설명해줘"})
-            self.assertTrue(pv["ok"])
-            self.assertIn("engine", pv)
-            run.assert_not_called()                                    # 미리보기만으로는 보내지 않는다
-            r = self.post("/api/ask", {"question": "다른 질문", "preview_id": pv["id"]})
-            self.assertEqual(r["reason"], "needs_preview")             # 확인받은 질문과 다르면 거절
-            r = self.post("/api/ask", {"question": "구조 설명해줘", "preview_id": pv["id"]})
-            self.assertTrue(r["ok"])
-            self.assertEqual(run.call_count, 1)
-            r = self.post("/api/ask", {"question": "구조 설명해줘", "preview_id": pv["id"]})
-            self.assertEqual(r["reason"], "needs_preview")             # 한 번 확인은 한 번만 보낸다
-
-    def test_pet_does_not_use_launch_folder_as_context(self):
-        with mock.patch.object(pet.ask, "plan", wraps=ask.plan) as plan, \
-                mock.patch.object(pet.route, "run", return_value=OK) as run:
-            self.rt.ask_question("안녕")
-        self.assertIsNone(plan.call_args.kwargs["cwd"])
-        self.assertEqual(run.call_args.kwargs["cwd"], str(Path.home()))
-
-    def test_failed_answer_is_explained_and_not_rated(self):
-        fail = {"ok": False, "code": 1, "duration": 0.1, "output": "Not logged in · Please run /login",
-                "reason": "auth_required"}
-        with mock.patch.object(pet.route, "run", return_value=fail):
-            r = self.rt.ask_question("안녕")
-        self.assertFalse(r["ok"])
-        self.assertIn("로그인", r["output"])
-        self.assertNotIn("Not logged in", r["output"])
-        self.assertFalse(self.rt.snapshot()["last_answer"]["ok"])
-        self.assertFalse(self.rt.record_feedback(True)["ok"])
 
 
 class CancelTest(unittest.TestCase):
@@ -273,22 +216,21 @@ class CopyTest(unittest.TestCase):
 
 @unittest.skipUnless(sync_playwright, "playwright 필요")
 class OverlayFitTest(unittest.TestCase):
-    """오버레이 창 크기(360×530)에서 답변·토스트가 떠도 상단 바와 입력창이 창 안에 남는다."""
+    """오버레이 창 크기(360×530)에서 안내 카드·토스트가 떠도 상단 바와 입력창이 창 안에 남는다."""
 
     def test_top_bar_and_toast_stay_visible(self):
         with tempfile.TemporaryDirectory() as d:
             for i in range(6):
                 log.append("note", f"기록 {i}", log_dir=d)
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=write_map(d, [{"name": "ro.bot", "path": d}]))
-            rt.last_answer = {"question": "q", "output": "긴 답\n" * 60, "engine": "claude", "reason": "",
-                              "projects": [], "ok": True, "plan": {"category": "x"}}
             server = pet.start_server(rt)
             try:
                 with sync_playwright() as pw:
                     browser = pw.chromium.launch()
                     page = browser.new_context(viewport={"width": 360, "height": 530}, reduced_motion="reduce").new_page()
                     page.goto("http://127.0.0.1:%d/" % server.server_address[1])
-                    page.wait_for_selector("#answerCard", state="visible")
+                    page.evaluate("setBubbleOpen(true); showGuide('긴 질문\\n'.repeat(60))")   # 가장 키가 큰 카드(안내)를 띄운다
+                    page.wait_for_selector("#sendCard", state="visible")
                     top = page.evaluate("document.getElementById('bubbleTop').getBoundingClientRect().top")
                     self.assertGreaterEqual(top, 0)
                     page.fill("#askInput", "/기록 ro.bot 토스트")

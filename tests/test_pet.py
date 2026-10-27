@@ -11,7 +11,7 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import learn, log, pet, organize
+from ro import log, pet, organize
 
 
 class PetTest(unittest.TestCase):
@@ -34,32 +34,29 @@ class PetTest(unittest.TestCase):
             self.assertEqual(st_after["mood"], "idle")
             self.assertEqual(st_after["layers"], st["layers"])
 
-            # 3. 발견 (discovery) — 반복 성공 로그로 학습 후보가 생기면
+            # 3. 반복 성공 로그가 쌓여도 학습 후보·발견 표정은 만들지 않는다(학습 루프 제거)
             for _ in range(3):
-                log.append("route", "화면 고쳐", {"engine": "codex", "category": "ui", "ok": True}, log_dir=d)
+                log.append("route", "화면 고쳐", {"engine": "claude", "category": "ui", "ok": True}, log_dir=d)
             st_disc = rt.snapshot(now=t0 + 30.0)
-            self.assertEqual(st_disc["mood"], "discovery")
-            self.assertTrue(st_disc["pending_rules"])
+            self.assertNotEqual(st_disc["mood"], "discovery")
+            self.assertNotIn("pending_rules", st_disc)
+            self.assertNotIn("pending_rules", st_disc["counts"])
 
-            # 4. 풀어냄 (resolved) — 모든 후보를 승인/거절해 해결한 직후
-            for cand in list(st_disc["pending_rules"]):
-                res = rt.decide_rule("approve", cand["id"])
-                self.assertTrue(res["ok"])
+            # 4. 풀어냄 (resolved) — 해결 창 안에서
+            rt.resolved_until = time.time() + 5
             st_res = rt.snapshot(now=time.time())
             self.assertEqual(st_res["mood"], "resolved")
 
             # 5. 불안 (anxious) — 쓰기 작업 승인 대기
-            rt.queue_write_approval("파일 수정 작업")
+            rt._queue({"kind": "organize_apply", "task": "파일 정리 작업"})
             st_anx = rt.snapshot()
             self.assertEqual(st_anx["mood"], "anxious")
             self.assertIsNotNone(st_anx["write_pending"])
 
-            # 6. 집중 (focus) — 작업 실행 중일 때 최우선
-            rt.busy = True
-            rt.busy_task = "구조 분석"
-            st_foc = rt.snapshot()
-            self.assertEqual(st_foc["mood"], "focus")
-            self.assertEqual(st_foc["layers"]["base_u"], 23)
+            # 6. 질문 흐름이 없으니 '집중' 표정(작업 실행 중)은 상태에서 나오지 않는다. 층 크기는 그대로다
+            st_last = rt.snapshot()
+            self.assertNotEqual(st_last["mood"], "focus")
+            self.assertEqual(st_last["layers"]["base_u"], 23)
 
     def test_construction_proportions_and_offsets(self):
         # CONSTRUCTION: 몸(16x) < 머리(20x) < 바닥(24x) 비례 유지
@@ -91,45 +88,20 @@ class PetTest(unittest.TestCase):
         self.assertLess(body_w, head_w)
         self.assertLess(head_w, base_w)
 
-    def test_ask_is_read_only_and_redacts_secrets(self):
-        with tempfile.TemporaryDirectory() as d:
-            map_path = Path(d) / "map.json"
-            map_path.write_text(json.dumps({"projects": [], "tools": {}}))
-            os.chmod(map_path, 0o600)
-            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(map_path))
-            with mock.patch("ro.route.run") as run:
-                run.return_value = {
-                    "ok": True, "code": 0, "duration": 0.2,
-                    "output": "답변입니다 token=sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                }
-                ans = rt.ask_question("rog.bot 구조 설명해줘")
-                self.assertTrue(ans["ok"])
-                # 반드시 write=False (읽기 모드)로만 호출되어야 한다
-                self.assertEqual(run.call_args.kwargs.get("write"), False)
-                self.assertNotIn("ABCDEFGH", ans["output"])
-                self.assertIn(log.MASK, ans["output"])
-
-            fb = rt.record_feedback(True)
-            self.assertTrue(fb["ok"])
-
-    def test_write_gate_requires_explicit_approval(self):
+    def test_write_gate_never_runs_an_engine(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
             with mock.patch("ro.route.run") as run:
-                rt.queue_write_approval("코드 수정")
-                run.assert_not_called()
-
-                # 거절 시 실행하지 않음
+                rt._queue({"kind": "organize_apply", "task": "파일 정리"})
                 rej = rt.resolve_write_approval(False, rt.write_pending["id"])
                 self.assertFalse(rej["approved"])
-                run.assert_not_called()
 
-                # 승인 시에만 write=True로 실행
-                rt.queue_write_approval("코드 수정")
-                run.return_value = {"ok": True, "code": 0, "duration": 0.1, "output": "완료"}
+                # 정리 외의 쓰기 요청(예전 엔진 쓰기)은 승인해도 실행하지 않는다
+                rt._queue({"kind": "engine_write", "task": "코드 수정"})
                 app = rt.resolve_write_approval(True, rt.write_pending["id"])
-                self.assertTrue(app["approved"])
-                self.assertEqual(run.call_args.kwargs.get("write"), True)
+                self.assertEqual((app["ok"], app["approved"]), (False, False))
+                self.assertIsNone(rt.write_pending)
+                run.assert_not_called()
 
     def test_organize_summary_counts_only_move_items(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
@@ -248,21 +220,6 @@ class PetTest(unittest.TestCase):
             self.assertIsNone(rt.snapshot()["organize"]["undo"])
             self.assertFalse(rt.queue_organize_undo()["ok"])
 
-    def test_clear_notice_is_only_available_for_dismissible_content(self):
-        with tempfile.TemporaryDirectory() as d:
-            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
-            self.assertFalse(rt.snapshot()["can_clear_notice"])
-            rt.queue_write_approval("파일 수정 작업")
-            self.assertFalse(rt.snapshot()["can_clear_notice"])
-            log.append("route", "실패한 질문", {"ok": False}, log_dir=d)
-            self.assertTrue(rt.snapshot()["can_clear_notice"])
-            rt.clear_notice()
-            self.assertFalse(rt.snapshot()["can_clear_notice"])
-            rt.last_answer = {"question": "q", "output": "답", "engine": "codex", "reason": "", "projects": []}
-            self.assertTrue(rt.snapshot()["can_clear_notice"])
-            rt.clear_notice()
-            self.assertFalse(rt.snapshot()["can_clear_notice"])
-
     def test_bubble_fits_overlay_window(self):
         # 오버레이 창(388px × 화면 높이의 80%, 최대 760px)을 넘지 않게: 상단 바·승인 카드·입력창은 고정, 탭 내용만 스크롤된다
         # 쓰기 승인 카드는 탭 밖(입력창 위)에 있어 어느 탭에서도 보인다
@@ -303,8 +260,8 @@ class PetTest(unittest.TestCase):
                     self.assertIn(rt.token, resp_l.read().decode("utf-8"))
 
                 # 토큰 없이 POST 시 403 거부
-                req_bad = Request(f"http://127.0.0.1:{port}/api/feedback",
-                                  data=b'{"accepted": true}',
+                req_bad = Request(f"http://127.0.0.1:{port}/api/focus",
+                                  data=b'{"on": false}',
                                   headers={"Content-Type": "application/json"},
                                   method="POST")
                 with self.assertRaises(HTTPError) as ctx:
@@ -312,8 +269,8 @@ class PetTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 403)
 
                 # 올바른 세션 토큰 포함 시 정상 처리
-                req_ok = Request(f"http://127.0.0.1:{port}/api/feedback",
-                                 data=b'{"accepted": true}',
+                req_ok = Request(f"http://127.0.0.1:{port}/api/focus",
+                                 data=b'{"on": false}',
                                  headers={"Content-Type": "application/json", "X-Ro-Token": rt.token},
                                  method="POST")
                 with urlopen(req_ok, timeout=3) as resp2:
@@ -419,13 +376,17 @@ class PetTest(unittest.TestCase):
         self.assertIn("setBubbleOpen(true);", init)  # 대화창을 처음부터 연다
         self.assertIn("body.web { background:", html)
         self.assertIn("else moveStageBy(dx, dy);", html)  # 웹 드래그는 페이지 안에서 옮긴다
-        self.assertIn("max-height: min(240px, 42vh);", html)
 
-    def test_rule_counter_and_feedback_ack(self):
+    def test_ask_learn_and_notice_ui_are_gone_and_input_shows_the_guide(self):
         html = pet.PET_HTML
-        self.assertIn("ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total}", html)
-        self.assertIn('id="ruleText" class="gate-body gate-text"', html)
-        self.assertIn('"수용 반영 ✓"', html)
+        for gone in ("ruleCard", "ruleText", "ruleApproveBtn", "/api/learn", "currentRuleId",   # 학습 승인
+                     "answerCard", "feedbackBtns", "sendFeedback", "fbYes", "/api/feedback",      # 답변·평가
+                     "previewAsk", "sendAsk", "sendApproveBtn", "/api/ask", "askCancelBtn",       # 엔진 질문
+                     "setupCard", "clearBtn", "/api/clear"):                                      # 준비 안내·알림 닫기
+            self.assertNotIn(gone, html)
+        self.assertIn("ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.", html)
+        for kept in ("sendRecordBtn", "sendFindBtn", "sendCancelBtn"):                            # 안내 카드의 남은 선택지
+            self.assertIn(f'id="{kept}"', html)
 
     def test_menubar_icon_is_template_and_permission_hint(self):
         src = (Path(pet.__file__).parent / "pet_mac.swift").read_text(encoding="utf-8")
@@ -573,12 +534,8 @@ class PetTest(unittest.TestCase):
         self.assertIn("selftest passed", r.stdout)
         self.assertNotIn("FAIL", r.stdout)
 
-    def test_ask_form_keeps_question_on_failure(self):
+    def test_input_esc_clears_input_first_and_lists_do_not_rebuild_on_poll(self):
         html = pet.PET_HTML
-        submit = html[html.index('async function sendAsk()'):]
-        self.assertIn("askInput.disabled = true;", submit)
-        self.assertIn("if (!res || !res.ok) {", submit)  # 엔진 실패(ok: false)도 질문을 되돌린다
-        self.assertIn("if (!askInput.value) askInput.value = q;", submit)
         keydown = html[html.index('window.addEventListener("keydown"'):]
         self.assertLess(keydown.index("document.activeElement === askInput"), keydown.index("setBubbleOpen(false)"))
         self.assertIn("lastActKey", html)  # 폴링마다 목록 DOM을 다시 만들지 않는다
@@ -592,27 +549,16 @@ class PetTest(unittest.TestCase):
                  mock.patch.object(pet.harden, "audit", wraps=pet.harden.audit) as audit:
                 rt.snapshot()
                 rt.snapshot()
-                self.assertEqual((read_all.call_count, audit.call_count), (1, 1))
+                self.assertEqual(audit.call_count, 1)
                 log.append("note", "두 번째", log_dir=d)
                 self.assertEqual(rt.snapshot()["counts"]["today_events"], 2)
-                self.assertEqual(read_all.call_count, 2)
-                # 파일이 그대로여도 감사는 TTL이 지나면 다시 돈다(로그 재파싱은 없음)
+                self.assertEqual(audit.call_count, 2)
+                # 파일이 그대로여도 감사는 TTL이 지나면 다시 돈다
                 with mock.patch.object(pet.time, "monotonic", return_value=time.monotonic() + pet.AUDIT_TTL_SEC + 1):
                     rt.snapshot()
-                self.assertEqual((read_all.call_count, audit.call_count), (2, 3))
-
-    def test_ask_rejects_while_busy(self):
-        with tempfile.TemporaryDirectory() as d:
-            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
-            rt.busy = True
-            with mock.patch.object(pet.ask, "load_map", return_value={"projects": []}), \
-                 mock.patch.object(pet.ask, "plan", return_value={"engine": "codex", "prompt": "q", "cwd": d}), \
-                 mock.patch.object(pet.route, "run") as run:
-                res = rt.ask_question("두 번째 질문")
-            self.assertFalse(res["ok"])
-            self.assertTrue(res["busy"])
-            run.assert_not_called()
-            self.assertTrue(rt.busy)  # 먼저 돌던 질문의 busy를 풀지 않는다
+                self.assertEqual(audit.call_count, 3)
+                # 학습 후보 계산이 없으니 전체 로그를 다시 읽는 일은 없다
+                self.assertEqual(read_all.call_count, 0)
 
     def test_stop_existing_pets_skips_reused_pid(self):
         with tempfile.TemporaryDirectory() as d:
@@ -628,27 +574,6 @@ class PetTest(unittest.TestCase):
                 other.wait()
         self.assertFalse(pet._is_pet_process(1, "py_pid"))
 
-
-    def test_ask_without_map_does_not_scan(self):
-        with tempfile.TemporaryDirectory() as d:
-            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
-            with mock.patch("ro.route.run") as run, mock.patch("ro.mapper.build_map") as build:
-                res = rt.ask_question("질문")
-            self.assertEqual((res["ok"], res["reason"]), (False, "needs_setup"))
-            run.assert_not_called()
-            build.assert_not_called()
-            self.assertFalse((Path(d) / "map.json").exists())
-
-    def test_ask_uses_preferred_engine_and_model(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "map.json").write_text(json.dumps({"projects": [], "tools": {}}))
-            (Path(d) / "config.json").write_text(json.dumps({"engine": "codex"}))
-            rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
-            with mock.patch("ro.route.run", return_value={"ok": True, "code": 0, "duration": 0, "output": "x"}) as run, \
-                    mock.patch("ro.route.model_for", return_value="m-1"):
-                rt.ask_question("안녕")
-            self.assertEqual(run.call_args.args[0], "codex")
-            self.assertEqual(run.call_args.kwargs.get("model"), "m-1")
 
 
 if __name__ == "__main__":
