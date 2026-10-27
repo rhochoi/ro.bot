@@ -261,6 +261,7 @@ def _checks():
         with tempfile.TemporaryDirectory() as h:
             toml = Path(h) / "routing.toml"
             shutil.copy(route.routing_path(), toml)
+            toml.write_text(toml.read_text().replace('engine = "claude"\nmodel = "claude-sonnet-5-5"\nkeywords = ["구현"', 'engine = "codex"\nmodel = ""\nkeywords = ["구현"'))  # 기본 엔진이 나쁜 시나리오
             before = toml.read_text()
             base = datetime.datetime.now() - datetime.timedelta(hours=40)
             evs = []

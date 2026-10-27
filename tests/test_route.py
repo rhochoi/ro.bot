@@ -11,7 +11,7 @@ from ro import route
 class RouteTest(unittest.TestCase):
     def test_rules(self):
         self.assertEqual(route.choose("이 코드 리뷰해줘")[0], "claude")
-        self.assertEqual(route.choose("버그 수정하고 테스트")[0], "codex")
+        self.assertEqual(route.choose("버그 수정하고 테스트")[0], "claude")
         self.assertEqual(route.choose("브라우저 화면 확인")[0], "agy")
         self.assertEqual(route.choose("안녕")[0], "claude")
 
@@ -23,7 +23,7 @@ class RouteTest(unittest.TestCase):
 
     def test_unrelated_rule_ignored(self):
         rules = [{"id": "x", "kind": "route", "category": "ui", "engine": "claude"}]
-        self.assertEqual(route.choose("버그 수정", rules)[0], "codex")
+        self.assertEqual(route.choose("버그 수정", rules)[0], "claude")
 
     def test_read_mode_is_default_and_write_is_explicit(self):
         self.assertIn("plan", route.build_command("claude", "x"))
