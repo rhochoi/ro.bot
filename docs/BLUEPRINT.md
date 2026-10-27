@@ -1,5 +1,7 @@
 # ro (rogbot) 설계 청사진 v0
 
+> **상태(2026-10-27):** 이 문서는 설계 이력입니다. 질문(`ask`)·학습(`learn`·`distill`)·라우팅(`route`·`revise`)·활동 수집(`collect`)·컨텍스트 평가(`bench`)·장치 입력(`ambient`)은 제거됐습니다. 현재 구조는 `README.md`를 보세요.
+
 > 층 셋, 눈 둘. 기록하고, 풀어낸다.
 > 에이전트는 **하나(ro)**. Claude·Codex·agy는 ro가 상황에 따라 부르는 **엔진**이다.
 

@@ -78,7 +78,7 @@ def main(argv=None):
     sub.add_parser("organize", add_help=False,
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
     sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 체크아웃은 git pull)")
-    sub.add_parser("doctor", help="설치 상태·엔진 점검")
+    sub.add_parser("doctor", help="설치 상태·도구(claude·agy) 점검")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정 상태")
