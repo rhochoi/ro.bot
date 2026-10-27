@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ro import adapters, route
+from ro import adapters
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -36,49 +36,6 @@ class AdaptersTest(unittest.TestCase):
         text = adapters.render("claude", REPO)
         self.assertNotIn("def ", text)
         self.assertLess(len(text), 600)  # claude 어댑터는 포인터만
-
-    def test_repo_routing_toml_valid_and_matches_builtin_behavior(self):
-        r = route.load_routing(REPO / "routing.toml")
-        self.assertEqual([x[0] for x in r["rules"]], ["design", "implement", "ui"])
-        for task, want in [("이 코드 리뷰해줘", "claude"), ("버그 수정하고 테스트", "claude"),
-                           ("브라우저 화면 확인", "agy"), ("안녕", "claude")]:
-            self.assertEqual(route.choose(task, routing=r)[0], want)
-
-    def test_invalid_toml_falls_back_with_warning(self):
-        import contextlib
-        import io
-        with tempfile.TemporaryDirectory() as d:
-            bad = Path(d) / "routing.toml"
-            bad.write_text('[routes.x]\nengine = "evil"\nkeywords = ["a"]\n')
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                r = route.load_routing(bad)
-            self.assertIn("경고", err.getvalue())
-            self.assertEqual(route.choose("버그 수정", routing=r)[0], "claude")  # 내장 기본값
-            with contextlib.redirect_stderr(io.StringIO()):  # 의도한 경고
-                self.assertEqual(route.load_routing(Path(d) / "없음.toml")["fallback"][0], "claude")
-
-    def test_edit_in_file_changes_routing(self):
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "routing.toml"
-            f.write_text('[routes.implement]\nengine = "agy"\nmodel = "m1"\nkeywords = ["버그"]\n')
-            r = route.load_routing(f)
-            self.assertEqual(route.choose("버그 수정", routing=r)[0], "agy")
-            self.assertEqual(route.model_for("implement", "agy", r), "m1")
-            self.assertEqual(route.model_for("implement", "codex", r), "")  # 수동 엔진 변경 시 모델 미적용
-
-    def test_model_flag_per_engine(self):
-        self.assertIn("-m", route.build_command("codex", "x", model="m1"))
-        self.assertEqual(route.build_command("claude", "x", model="m1")[-2:], ["--model", "m1"])
-        self.assertEqual(route.build_command("agy", "x", model="m1")[-2:], ["--model", "m1"])
-        for e in route.ENGINES:
-            self.assertNotIn("m1", " ".join(route.build_command(e, "x")))  # 기본은 모델 미지정
-            self.assertTrue(any(k in " ".join(route.build_command(e, "x"))
-                                for k in ("plan", "read-only")))  # 읽기 기본값 유지
-
-    def test_approved_rule_still_overrides(self):
-        rules = [{"id": "ab", "kind": "route", "category": "implement", "engine": "agy"}]
-        self.assertEqual(route.choose("버그 수정", rules)[0], "agy")
 
 
 if __name__ == "__main__":

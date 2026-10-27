@@ -117,47 +117,44 @@ class PetLayoutTest(unittest.TestCase):
         page = self.open_page()
         paths = []
         page.on("request", lambda r: paths.append(urlsplit(r.url).path))
-        with mock.patch("ro.route.run", side_effect=AssertionError("엔진 실행")) as run:
-            page.fill("#askInput", "오늘 뭐 했지?")
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/recall"):
-                page.press("#askInput", "Enter")
-            page.wait_for_selector("#recallCard", state="visible")
-
-            page.click('[data-tab="settings"]')
-            page.fill("#askInput", "2 더하기 2는?")
+        page.fill("#askInput", "오늘 뭐 했지?")
+        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/recall"):
             page.press("#askInput", "Enter")
-            page.wait_for_selector("#sendCard", state="visible")  # 안내 카드는 탭 밖이라 설정 탭에서도 보인다
-            self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
-            self.assertEqual(page.locator("#sendApproveBtn").count(), 0)   # 엔진으로 보내는 버튼은 없다
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):   # 남은 선택지 1: 기록으로만 남기기
-                page.click("#sendRecordBtn")
-            page.wait_for_selector("#sendCard", state="hidden")
+        page.wait_for_selector("#recallCard", state="visible")
 
-            page.fill("#askInput", "2 더하기 2는?")
-            page.press("#askInput", "Enter")
-            page.wait_for_selector("#sendCard", state="visible")
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/find"):      # 남은 선택지 2: 내 파일에서 찾기
-                page.click("#sendFindBtn")
-            self.assertEqual([p for p in paths if p.startswith("/api/ask")], [])
-            run.assert_not_called()
+        page.click('[data-tab="settings"]')
+        page.fill("#askInput", "2 더하기 2는?")
+        page.press("#askInput", "Enter")
+        page.wait_for_selector("#sendCard", state="visible")  # 안내 카드는 탭 밖이라 설정 탭에서도 보인다
+        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
+        self.assertEqual(page.locator("#sendApproveBtn").count(), 0)   # 엔진으로 보내는 버튼은 없다
+        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):   # 남은 선택지 1: 기록으로만 남기기
+            page.click("#sendRecordBtn")
+        page.wait_for_selector("#sendCard", state="hidden")
+
+        page.fill("#askInput", "2 더하기 2는?")
+        page.press("#askInput", "Enter")
+        page.wait_for_selector("#sendCard", state="visible")
+        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/find"):      # 남은 선택지 2: 내 파일에서 찾기
+            page.click("#sendFindBtn")
+        self.assertEqual([p for p in paths if p.startswith("/api/ask")], [])
+
     def test_main_input_record_and_preview_cancel(self):
         page = self.open_page()
         asks = []
         page.on("request", lambda r: asks.append(r.post_data_json)
                 if urlsplit(r.url).path == "/api/ask" and r.method == "POST" else None)
-        with mock.patch("ro.route.run", side_effect=AssertionError("미승인 외부 실행")) as run:
-            page.fill("#askInput", "/기록 직접 남긴 메모")
-            with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):
-                page.press("#askInput", "Enter")
-            page.wait_for_selector("#toast select", state="visible")
-            page.fill("#askInput", "2 더하기 3은?")
+        page.fill("#askInput", "/기록 직접 남긴 메모")
+        with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):
             page.press("#askInput", "Enter")
-            page.wait_for_selector("#sendCard", state="visible")
-            page.click("#sendCancelBtn")
-            self.assertEqual(page.input_value("#askInput"), "2 더하기 3은?")
-            self.assertFalse(page.locator("#sendCard").is_visible())
-            self.assertEqual(asks, [])
-            run.assert_not_called()
+        page.wait_for_selector("#toast select", state="visible")
+        page.fill("#askInput", "2 더하기 3은?")
+        page.press("#askInput", "Enter")
+        page.wait_for_selector("#sendCard", state="visible")
+        page.click("#sendCancelBtn")
+        self.assertEqual(page.input_value("#askInput"), "2 더하기 3은?")
+        self.assertFalse(page.locator("#sendCard").is_visible())
+        self.assertEqual(asks, [])
 
     def test_organize_approval_visible_in_organize_tab(self):
         # 서버가 보는 HOME만 임시 경로로 바꾼다. 승인하지 않은 파일은 그대로 둔다

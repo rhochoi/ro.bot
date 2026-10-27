@@ -9,7 +9,7 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import ask, config, log, mapper, pet
+from ro import config, log, mapper, pet
 
 
 class AmbientTest(unittest.TestCase):
@@ -129,35 +129,30 @@ class ApiFlowTest(unittest.TestCase):
                       headers={"X-Ro-Token": token or self.rt.token, "Content-Type": "application/json"})
         return json.loads(urlopen(req).read())
 
-    def test_removed_ask_endpoints_are_404_and_never_run_an_engine(self):
-        with mock.patch("ro.route.run", side_effect=AssertionError("엔진 실행")) as run:
-            for path in ("/api/ask/preview", "/api/ask", "/api/ask/cancel", "/api/feedback", "/api/learn", "/api/clear"):
-                req = Request(self.base + path, data=json.dumps({"question": "q"}).encode(),
-                              headers={"X-Ro-Token": self.rt.token, "Content-Type": "application/json"})
-                with self.assertRaises(HTTPError) as ctx:
-                    urlopen(req)
-                self.assertEqual(ctx.exception.code, 404, path)
-            run.assert_not_called()
-
-    def test_empty_roots_hide_old_map_projects(self):
-        config.update(self.tmp.name, roots=[])
-        self.assertEqual(ask.load_map(self.rt.map_path, self.tmp.name)["projects"], [])
-        self.assertEqual(mapper.default_roots(self.tmp.name), [])  # 다음 지도도 기본 폴더를 훑지 않는다
-
-    def test_write_gate_needs_the_shown_request_id_and_a_real_boolean(self):
-        with mock.patch("ro.route.run") as run:
-            first = self.rt._queue({"kind": "organize_apply", "task": "A 작업"})["pending"]
-            second = self.rt._queue({"kind": "organize_apply", "task": "B 작업"})["pending"]
-            r = self.post("/api/write_gate", {"approve": True, "id": first["id"]})  # 예전 카드의 승인
-            self.assertEqual((r["ok"], r["reason"]), (False, "stale"))
-            run.assert_not_called()
-            req = Request(self.base + "/api/write_gate", data=json.dumps({"approve": "false", "id": second["id"]}).encode(),
+    def test_removed_ask_endpoints_are_404(self):
+        for path in ("/api/ask/preview", "/api/ask", "/api/ask/cancel", "/api/feedback", "/api/learn", "/api/clear"):
+            req = Request(self.base + path, data=json.dumps({"question": "q"}).encode(),
                           headers={"X-Ro-Token": self.rt.token, "Content-Type": "application/json"})
             with self.assertRaises(HTTPError) as ctx:
                 urlopen(req)
-            self.assertEqual(ctx.exception.code, 400)
-            run.assert_not_called()
-            self.assertEqual(self.rt.write_pending["id"], second["id"])  # 대기 중인 요청은 그대로
+            self.assertEqual(ctx.exception.code, 404, path)
+
+    def test_empty_roots_hide_old_map_projects(self):
+        config.update(self.tmp.name, roots=[])
+        self.assertEqual(mapper.load_map(self.rt.map_path, self.tmp.name)["projects"], [])
+        self.assertEqual(mapper.default_roots(self.tmp.name), [])  # 다음 지도도 기본 폴더를 훑지 않는다
+
+    def test_write_gate_needs_the_shown_request_id_and_a_real_boolean(self):
+        first = self.rt._queue({"kind": "organize_apply", "task": "A 작업"})["pending"]
+        second = self.rt._queue({"kind": "organize_apply", "task": "B 작업"})["pending"]
+        r = self.post("/api/write_gate", {"approve": True, "id": first["id"]})  # 예전 카드의 승인
+        self.assertEqual((r["ok"], r["reason"]), (False, "stale"))
+        req = Request(self.base + "/api/write_gate", data=json.dumps({"approve": "false", "id": second["id"]}).encode(),
+                      headers={"X-Ro-Token": self.rt.token, "Content-Type": "application/json"})
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(req)
+        self.assertEqual(ctx.exception.code, 400)
+        self.assertEqual(self.rt.write_pending["id"], second["id"])  # 대기 중인 요청은 그대로
 
     def test_stats_counts_today_kinds(self):
         log.append("note", "메모 하나", log_dir=self.tmp.name)

@@ -88,20 +88,18 @@ class PetTest(unittest.TestCase):
         self.assertLess(body_w, head_w)
         self.assertLess(head_w, base_w)
 
-    def test_write_gate_never_runs_an_engine(self):
+    def test_write_gate_refuses_unsupported_requests(self):
         with tempfile.TemporaryDirectory() as d:
             rt = pet.PetRuntime(home=d, log_dir=d, map_path=str(Path(d) / "map.json"))
-            with mock.patch("ro.route.run") as run:
-                rt._queue({"kind": "organize_apply", "task": "파일 정리"})
-                rej = rt.resolve_write_approval(False, rt.write_pending["id"])
-                self.assertFalse(rej["approved"])
+            rt._queue({"kind": "organize_apply", "task": "파일 정리"})
+            rej = rt.resolve_write_approval(False, rt.write_pending["id"])
+            self.assertFalse(rej["approved"])
 
-                # 정리 외의 쓰기 요청(예전 엔진 쓰기)은 승인해도 실행하지 않는다
-                rt._queue({"kind": "engine_write", "task": "코드 수정"})
-                app = rt.resolve_write_approval(True, rt.write_pending["id"])
-                self.assertEqual((app["ok"], app["approved"]), (False, False))
-                self.assertIsNone(rt.write_pending)
-                run.assert_not_called()
+            # 정리 외의 쓰기 요청(예전 엔진 쓰기)은 승인해도 실행하지 않는다
+            rt._queue({"kind": "engine_write", "task": "코드 수정"})
+            app = rt.resolve_write_approval(True, rt.write_pending["id"])
+            self.assertEqual((app["ok"], app["approved"]), (False, False))
+            self.assertIsNone(rt.write_pending)
 
     def test_organize_summary_counts_only_move_items(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"HOME": str(Path(d).resolve())}):
@@ -153,9 +151,7 @@ class PetTest(unittest.TestCase):
             self.assertTrue(z.exists())  # 거절하면 그대로
 
             rt.queue_organize_apply(kind="extracted")
-            with mock.patch("ro.route.run") as run:
-                out = rt.resolve_write_approval(True, rt.write_pending["id"])
-                run.assert_not_called()
+            out = rt.resolve_write_approval(True, rt.write_pending["id"])
             self.assertTrue(out["ok"], out)
             self.assertIn("풀린 압축 1건 격리", out["output"])
             self.assertFalse(z.exists())
@@ -201,9 +197,7 @@ class PetTest(unittest.TestCase):
 
             # 승인해야 이동
             rt.queue_organize_apply("재무")
-            with mock.patch("ro.route.run") as run:
-                res = rt.resolve_write_approval(True, rt.write_pending["id"])
-                run.assert_not_called()  # 정리는 엔진을 부르지 않는다
+            res = rt.resolve_write_approval(True, rt.write_pending["id"])
             self.assertTrue(res["ok"], res)
             self.assertTrue(moved.exists())
             self.assertFalse(f.exists())

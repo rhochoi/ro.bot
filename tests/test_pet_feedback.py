@@ -2,14 +2,13 @@
 import json
 import os
 import tempfile
-import threading
 import time
 import unicodedata
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from ro import ask, detect, log, mapper, organize, pet, recall, route
+from ro import detect, log, mapper, organize, pet, recall
 
 try:
     from playwright.sync_api import sync_playwright
@@ -21,18 +20,6 @@ def write_map(d, projects=()):
     mp = Path(d) / "map.json"
     mapper.save_map({"projects": list(projects), "tools": {}}, mp)
     return str(mp)
-
-
-class CancelTest(unittest.TestCase):
-    def test_cancel_event_stops_engine(self):
-        cancel = threading.Event()
-        with mock.patch.object(route.shutil, "which", return_value="/bin/sleep"), \
-                mock.patch.object(route, "build_command", return_value=["sleep", "30"]):
-            threading.Timer(0.3, cancel.set).start()
-            start = time.time()
-            res = route.run("claude", "q", cancel=cancel)
-        self.assertEqual(res["reason"], "cancelled")
-        self.assertLess(time.time() - start, 5)
 
 
 class CountsTest(unittest.TestCase):
@@ -189,16 +176,16 @@ class PrefsAndMapTest(unittest.TestCase):
             mp = write_map(d, [
                 {"name": unicodedata.normalize("NFD", "장투"), "path": str(base / "dev" / "a")},
                 {"name": "b", "path": str(base / "dl" / "b")}])
-            self.assertEqual(len(ask.load_map(mp, home=d)["projects"]), 2)   # 스캔 폴더를 안 정했으면 그대로
+            self.assertEqual(len(mapper.load_map(mp, home=d)["projects"]), 2)   # 스캔 폴더를 안 정했으면 그대로
             (base / "config.json").write_text(json.dumps({"roots": [str(base / "dev")]}))
-            projects = ask.load_map(mp, home=d)["projects"]
+            projects = mapper.load_map(mp, home=d)["projects"]
         self.assertEqual([p["name"] for p in projects], ["장투"])
         self.assertEqual(projects[0]["name"], unicodedata.normalize("NFC", "장투"))
 
     def test_map_age(self):
-        self.assertEqual(ask.map_age_days({"generated_at": "2026-10-20T10:00:00+0900"},
+        self.assertEqual(mapper.map_age_days({"generated_at": "2026-10-20T10:00:00+0900"},
                                           now=time.mktime(time.strptime("2026-10-24T11:00:00", "%Y-%m-%dT%H:%M:%S"))), 4)
-        self.assertIsNone(ask.map_age_days({}))
+        self.assertIsNone(mapper.map_age_days({}))
 
 
 class CopyTest(unittest.TestCase):

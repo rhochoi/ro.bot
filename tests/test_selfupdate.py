@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ro import route, selfupdate
+from ro import selfupdate
 
 
 class SelfUpdateTest(unittest.TestCase):
@@ -47,13 +47,6 @@ class SelfUpdateTest(unittest.TestCase):
             text = " ".join(str(c.args[0]) for c in out.call_args_list)
             self.assertNotIn("라우팅표", text)
             self.assertNotIn("codex", text)
-
-    def test_user_routing_overrides(self):
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "routing.toml"
-            f.write_text("x")
-            with mock.patch.object(route, "USER_ROUTING", f):
-                self.assertEqual(route.routing_path(), f)
 
 
 if __name__ == "__main__":
