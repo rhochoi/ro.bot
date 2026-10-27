@@ -299,6 +299,7 @@ const askInput = {value: '', disabled: false};
 const writeCard = {style: {display: 'none'}}, sendCard = {style: {display: 'none'}};
 const ambient = {focus: false}, palette = {hidden: true};
 const isNativeHost = true, notifyHost = () => {};
+const latestState = null;
 let bubbleOpenedAt = 0;
 SOURCE
 function reset() {
@@ -320,6 +321,56 @@ reset(); blur(); assert.equal(hidden, true, 'empty input closes');
 reset(); now = bubbleOpenedAt + 299; blur(); assert.equal(hidden, false, 'opening grace');
 now = bubbleOpenedAt + 300; blur(); assert.equal(hidden, true, 'grace ends');
 reset(); setBubbleOpen(true); blur(); assert.equal(hidden, true, 'already open does not renew grace');
+""".replace("SOURCE", source)
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_polling_serializes_requests_and_ignores_old_generation(self):
+        source = "let pollGeneration" + pet.PET_HTML.split("let pollGeneration", 1)[1].split("/* 입력창:", 1)[0]
+        script = r"""
+const assert = require('node:assert/strict');
+let hidden = true, timerId = 0;
+const window = {}, TOKEN = 'test', requests = [], applied = [], timers = new Map();
+const bubble = {classList: {contains: () => hidden}};
+const staleBanner = {hidden: true};
+const applyState = st => applied.push(st.version);
+const setTimeout = (fn, delay) => {timers.set(++timerId, {fn, delay}); return timerId;};
+const clearTimeout = id => timers.delete(id);
+const fetch = (url, options) => new Promise((resolve, reject) => requests.push({url, options, resolve, reject}));
+const respond = (index, version) => requests[index].resolve({ok: true, json: async () => ({version})});
+SOURCE
+(async () => {
+  const first = setPollRate(false);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, '/api/state');
+  respond(0, 'v1'); await first;
+  assert.equal(timers.get(window._poll).delay, 0);
+  const waiting = timers.get(window._poll).fn();
+  assert.equal(requests[1].url, '/api/state?wait=v1');
+  assert.equal(timers.size, 0, 'no second request while waiting');
+
+  hidden = false;
+  const opened = setPollRate(true);
+  assert.equal(requests[1].options.signal.aborted, true);
+  assert.equal(requests[2].url, '/api/state', 'opening immediately fetches without wait');
+  respond(2, 'v2'); await opened;
+  assert.equal(timers.get(window._poll).delay, 450);
+  respond(1, 'old'); await waiting;
+  assert.deepEqual(applied, ['v1', 'v2'], 'late response cannot overwrite new state');
+  assert.equal(timers.size, 1, 'old loop cannot schedule another request');
+
+  hidden = true;
+  const closed = setPollRate(false);
+  assert.equal(requests[3].url, '/api/state?wait=v2');
+  requests[3].reject(new Error('offline')); await closed;
+  assert.equal(timers.get(window._poll).delay, 2000);
+  assert.equal(staleBanner.hidden, false);
+  const retry = timers.get(window._poll).fn();
+  respond(4, 'v3'); await retry;
+  assert.equal(staleBanner.hidden, true);
+  assert.equal(timers.size, 1);
+  assert.equal(timers.get(window._poll).delay, 0);
+})().catch(err => {console.error(err); process.exitCode = 1;});
 """.replace("SOURCE", source)
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)

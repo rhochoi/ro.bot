@@ -1,8 +1,10 @@
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -22,6 +24,87 @@ class AmbientTest(unittest.TestCase):
         a = pet.ambient_state(3, 10, focus=True, held=7, attention=True)
         self.assertEqual((a["focus"], a["held"], a["attention"]), (True, 7, True))
         self.assertEqual(pet.ambient_state(3, 10, focus=False, held=7)["held"], 0)
+
+
+class StateWaitTest(unittest.TestCase):
+    def setUp(self):
+        self.rt = mock.Mock(token="test-token", snapshot=mock.Mock(return_value={"mood": "idle"}))
+
+    def request_state(self, query="", token=True, host="127.0.0.1:12345"):
+        # 실제 GET 핸들러를 호출하되 소켓만 생략한다.
+        handler_class = pet.make_handler(self.rt)
+        handler = handler_class.__new__(handler_class)
+        handler.path = "/api/state" + query
+        handler.headers = {"Host": host, "X-Ro-Token": self.rt.token if token else ""}
+        handler.server = SimpleNamespace(server_address=("127.0.0.1", 12345))
+        handler._send_json = mock.Mock()
+        handler.do_GET()
+        return handler._send_json.call_args.args
+
+    def get_state(self, query=""):
+        status, state = self.request_state(query)
+        self.assertEqual(status, 200)
+        return state
+
+    def test_state_version_and_immediate_responses(self):
+        with mock.patch.object(self.rt, "snapshot", return_value={"mood": "idle", "counts": {}}), \
+                mock.patch("ro.pet.time.sleep") as sleep:
+            first = self.get_state()
+            self.assertEqual(len(first["version"]), 16)
+            self.assertEqual(self.get_state("?wait=old"), first)
+            # 삽입 순서가 달라도 정렬한 snapshot의 버전은 같다.
+            self.rt.snapshot.return_value = {"counts": {}, "mood": "idle"}
+            self.assertEqual(self.get_state(), first)
+            sleep.assert_not_called()
+        self.assertTrue(pet.ThreadingHTTPServer.daemon_threads)
+
+    def test_state_wait_returns_changed_snapshot(self):
+        with mock.patch.object(self.rt, "snapshot", return_value={"mood": "idle"}) as snapshot, \
+                mock.patch.object(pet, "STATE_WAIT_INTERVAL", 0.02), \
+                mock.patch.object(pet, "STATE_WAIT_TIMEOUT", 1.0):
+            first = self.get_state()
+            timer = threading.Timer(0.08, lambda: setattr(snapshot, "return_value", {"mood": "recording"}))
+            start = time.monotonic()
+            timer.start()
+            try:
+                changed = self.get_state("?wait=" + first["version"])
+            finally:
+                timer.join()
+            self.assertLess(time.monotonic() - start, 0.7)
+            self.assertGreaterEqual(snapshot.call_count, 3)
+            self.assertEqual(changed["mood"], "recording")
+            self.assertNotEqual(changed["version"], first["version"])
+
+    def test_state_wait_timeout_returns_current_snapshot(self):
+        with mock.patch.object(self.rt, "snapshot", return_value={"mood": "idle"}), \
+                mock.patch.object(pet, "STATE_WAIT_INTERVAL", 0.02), \
+                mock.patch.object(pet, "STATE_WAIT_TIMEOUT", 0.12):
+            first = self.get_state()
+            start = time.monotonic()
+            self.assertEqual(self.get_state("?wait=" + first["version"]), first)
+            elapsed = time.monotonic() - start
+            self.assertGreaterEqual(elapsed, 0.12)
+            self.assertLess(elapsed, 0.7)
+
+    def test_cancelled_state_response_does_not_log_an_error(self):
+        with mock.patch("ro.pet.log.append") as append:
+            handler_class = pet.make_handler(self.rt)
+            handler = handler_class.__new__(handler_class)
+            handler.path = "/api/state"
+            handler.headers = {"Host": "127.0.0.1:12345", "X-Ro-Token": self.rt.token}
+            handler.server = SimpleNamespace(server_address=("127.0.0.1", 12345))
+            for error in (BrokenPipeError, ConnectionResetError):
+                handler._send_json = mock.Mock(side_effect=error)
+                handler.do_GET()
+            append.assert_not_called()
+
+    def test_state_wait_still_requires_token_and_host(self):
+        first = self.get_state()
+        with mock.patch.object(self.rt, "snapshot") as snapshot:
+            query = "?wait=" + first["version"]
+            self.assertEqual(self.request_state(query, token=False)[0], 403)
+            self.assertEqual(self.request_state(query, host="evil.example")[0], 403)
+            snapshot.assert_not_called()
 
 
 class ApiFlowTest(unittest.TestCase):

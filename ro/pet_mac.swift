@@ -25,6 +25,17 @@ final class FlippedView: NSView {
 }
 
 enum NativeGlass {
+    private final class Geometry: NSObject {
+        let frame: NSRect
+        let rotation: CGFloat
+        init(frame: NSRect, rotation: CGFloat) {
+            self.frame = frame
+            self.rotation = rotation
+        }
+    }
+    // 회전된 뷰의 frame은 테두리 상자다. 적용한 원본을 보관하고 뷰가 없어지면 함께 해제한다.
+    private static let geometry = NSMapTable<NSView, Geometry>.weakToStrongObjects()
+
     /// `defaults write ro.pet ro.glass blur` 로 굴절 유리 대신 흐림 유리를 강제할 수 있다(되돌리기: defaults delete ro.pet ro.glass)
     static var forceBlur = false
 
@@ -65,23 +76,30 @@ enum NativeGlass {
     /// 알약 모양(높이의 절반 반지름)으로 frame에 맞추고, 중심을 축으로 rotation도(웹 화면의 시계 방향)만큼 돌린다.
     /// 부모가 뒤집힌 좌표(아래로 +y)라 양수 회전이 화면에서 시계 방향이 되어 CSS rotate와 같은 방향이다. dark면 연기 낀 유리
     static func shape(_ v: NSView, frame: NSRect, rotation: CGFloat, alpha: CGFloat, dark: Bool, tint: NSColor?) {
-        v.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        v.frameCenterRotation = 0  // 돌린 채로 frame을 바꾸면 테두리 상자 기준으로 바뀐다
-        let sizeChanged = v.frame.size != frame.size
-        v.frame = frame
-        v.frameCenterRotation = rotation
-        v.alphaValue = alpha
+        let appearance: NSAppearance.Name = dark ? .darkAqua : .aqua
+        if v.appearance?.name != appearance { v.appearance = NSAppearance(named: appearance) }
+        let previous = geometry.object(forKey: v)
+        let sizeChanged = previous?.frame.size != frame.size
+        if previous?.frame != frame || previous?.rotation != rotation {
+            v.frameCenterRotation = 0  // 돌린 채로 frame을 바꾸면 테두리 상자 기준으로 바뀐다
+            v.frame = frame
+            v.frameCenterRotation = rotation
+            geometry.setObject(Geometry(frame: frame, rotation: rotation), forKey: v)
+        }
+        if v.alphaValue != alpha { v.alphaValue = alpha }
         #if compiler(>=6.2)
         if #available(macOS 26.0, *), let g = v as? NSGlassEffectView {
-            g.style = .clear  // 뒤가 또렷이 비치고 가장자리에서 휘는 투명 유리(기본 .regular는 뿌옇다)
-            g.cornerRadius = frame.height / 2
-            g.tintColor = tint?.withAlphaComponent(0.32) ?? (dark ? NSColor.black.withAlphaComponent(0.28) : nil)
+            if g.style != .clear { g.style = .clear }  // 뒤가 또렷이 비치고 가장자리에서 휘는 투명 유리
+            if g.cornerRadius != frame.height / 2 { g.cornerRadius = frame.height / 2 }
+            let color = tint?.withAlphaComponent(0.32) ?? (dark ? NSColor.black.withAlphaComponent(0.28) : nil)
+            if g.tintColor != color { g.tintColor = color }
             return
         }
         #endif
         guard let e = v as? NSVisualEffectView else { return }
         // 구형 NSVisualEffectView는 몸통 tint를 지원하지 않으므로 기존 material을 유지한다.
-        e.material = dark ? .hudWindow : .popover
+        let material: NSVisualEffectView.Material = dark ? .hudWindow : .popover
+        if e.material != material { e.material = material }
         if sizeChanged || e.maskImage == nil { e.maskImage = pillMask(frame.size) }
     }
 
@@ -320,7 +338,7 @@ func shouldAlertOverheat(app: String?, today: String, memoDay: String?, muted: B
     return !alerted.contains(app ?? "")
 }
 
-// GUI 없이 계산만 확인한다. 실패 항목을 출력하고 실패 수를 돌려준다
+// 창을 띄우지 않고 계산과 유리 갱신을 확인한다. 실패 항목을 출력하고 실패 수를 돌려준다
 func runCPUSelfTest() -> Int {
     var failures = 0
     func check(_ ok: Bool, _ name: String) {
@@ -411,6 +429,40 @@ func runCPUSelfTest() -> Int {
     check(!shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: true, alerted: []), "'오늘은 그만'이면 그날은 없다")
     check(!shouldAlertOverheat(app: "Chrome", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "같은 앱은 하루 한 번")
     check(shouldAlertOverheat(app: "Xcode", today: "d1", memoDay: "d1", muted: false, alerted: ["Chrome"]), "다른 앱은 알린다")
+    class GlassProbe: NSVisualEffectView {
+        var writes = 0
+        override var frame: NSRect { didSet { writes += 1 } }
+        override var frameCenterRotation: CGFloat { didSet { writes += 1 } }
+        override var appearance: NSAppearance? { didSet { writes += 1 } }
+        override var alphaValue: CGFloat { didSet { writes += 1 } }
+        override var material: NSVisualEffectView.Material { didSet { writes += 1 } }
+        override var maskImage: NSImage? { didSet { writes += 1 } }
+    }
+    let glass = GlassProbe()
+    var glassFrame = NSRect(x: 10, y: 20, width: 80, height: 20)
+    func shapeGlass(_ rotation: CGFloat = 15, dark: Bool = false, alpha: CGFloat = 0.8) {
+        NativeGlass.shape(glass, frame: glassFrame, rotation: rotation, alpha: alpha, dark: dark, tint: nil)
+    }
+    shapeGlass()
+    let mask = glass.maskImage
+    glass.writes = 0
+    shapeGlass()
+    check(glass.writes == 0, "회전된 동일 자세에서는 유리 속성을 재설정하지 않는다")
+    glassFrame.origin.x += 5
+    shapeGlass()
+    check(glass.writes > 0 && glass.maskImage === mask, "유리 위치만 바꾸면 마스크를 재사용한다")
+    glass.writes = 0
+    shapeGlass(25)
+    check(glass.writes > 0 && glass.frameCenterRotation == 25 && glass.maskImage === mask, "유리 회전만 바뀌어도 적용한다")
+    glass.writes = 0
+    shapeGlass(25)
+    check(glass.writes == 0, "새 회전도 반복 적용하지 않는다")
+    shapeGlass(25, dark: true, alpha: 0.6)
+    check(glass.appearance?.name == .darkAqua && glass.alphaValue == 0.6 && glass.material == .hudWindow,
+          "유리 외관과 투명도 변경은 반영한다")
+    glassFrame.size.height += 2
+    shapeGlass(25, dark: true, alpha: 0.6)
+    check(glass.maskImage !== mask && glass.maskImage?.size == glassFrame.size, "유리 크기가 바뀌면 마스크를 갱신한다")
     print(failures == 0 ? "selftest passed" : "selftest failed: \(failures)")
     return failures
 }
