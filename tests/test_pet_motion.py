@@ -620,5 +620,52 @@ class LiveInputTest(MotionBase):
         pg.evaluate("RoMotion.reset(); RoMotion.clearStyles()")
 
 
+class IdleTest(MotionBase):
+    def test_drowsy_has_no_infinite_animation_and_wakes(self):
+        pg = self.page()
+        pg.evaluate("""() => {
+          setBubbleOpen(false);
+          applyState({mood: 'idle'});
+          isDrowsy = true;
+          triggerAction('drowsy', 0);
+        }""")
+        self.assertEqual(pg.evaluate("document.getAnimations().filter(a => a.effect.getTiming().iterations === Infinity).length"), 0)
+        self.assertEqual(pg.evaluate("getComputedStyle(layerHead).animationName"), "none")
+        self.assertNotEqual(pg.evaluate("getComputedStyle(layerHead).transform"), "none")
+        self.assertEqual(pg.evaluate("getComputedStyle(document.getElementById('roBot')).animationIterationCount"), "3")
+        pg.evaluate("document.getAnimations().forEach(a => a.finish())")
+        self.assertEqual(pg.evaluate("document.getAnimations().filter(a => a.playState === 'running').length"), 0)
+        pg.evaluate("wakeUpFromSleep(); triggerAction(null)")
+        self.assertFalse(pg.evaluate("isDrowsy"))
+        self.assertEqual(pg.evaluate("getComputedStyle(layerHead).animationName"), "breatheHead")
+        pg.context.close()
+
+    def test_closed_bubble_defers_render_until_open(self):
+        pg = self.page()
+        result = pg.evaluate("""() => {
+          setBubbleOpen(false);
+          const before = bubble.innerHTML;
+          applyState({mood: 'recording', counts: {today_records: 7, today_events: 9},
+            project_names: ['idle-test'], ambient: {focus: true, held: 2, attention: true, label: '7건'},
+            recent_logs: [{summary: '새 기록', ts: '12:34'}],
+            timeline: [{summary: '새 타임라인', kind_label: '기록', ts: '12:34'}]});
+          const unchanged = bubble.innerHTML === before;
+          const petUpdated = petWrap.classList.contains('mood-recording') && !attnDot.hidden;
+          const paletteReady = projectNames.includes('idle-test') && ambient.focus;
+          setBubbleOpen(true);
+          return {unchanged, petUpdated, paletteReady, title: greetingTitle.textContent,
+            records: metricEvents.textContent, timeline: timelineList.textContent,
+            focus: focusBtn.getAttribute('aria-pressed')};
+        }""")
+        self.assertTrue(result['unchanged'])
+        self.assertTrue(result['petUpdated'])
+        self.assertTrue(result['paletteReady'])
+        self.assertEqual(result['title'], '오늘 7건 기록했어요.')
+        self.assertEqual(result['records'], '7')
+        self.assertIn('새 타임라인', result['timeline'])
+        self.assertEqual(result['focus'], 'true')
+        pg.context.close()
+
+
 if __name__ == "__main__":
     unittest.main()

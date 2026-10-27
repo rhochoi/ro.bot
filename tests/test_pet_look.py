@@ -29,13 +29,16 @@ const window = {};
 const document = {
   body: {classList: {contains: c => classes.has(c), toggle: (c, on) => on ? classes.add(c) : classes.delete(c)}},
   querySelectorAll: () => [],
+  getAnimations: () => [],
   getElementById: () => ({style: {removeProperty: k => props.delete(k), setProperty: (k, v) => props.set(k, v)}}),
 };
 const getComputedStyle = () => ({getPropertyValue: k => ({'--ink': '#1A1917', '--chalk': '#F5F2EB'})[k]});
 const notifyHost = m => messages.push(m);
 const kickNativeGlass = () => {}, requestAnimationFrame = () => {}, showToast = () => {}, h = () => {};
+const setTimeout = () => {}, clearTimeout = () => {};
 const updateMaterialUI = () => updateLookUI();
-let nativeGlassKind = 'liquid', nativeGlassSent = '', nativeGlassLoop = false, nativeGlassTick = 0;
+let nativeGlassKind = 'liquid', nativeGlassSent = '', nativeGlassPoseAt = -Infinity;
+let nativeGlassFrame, nativeGlassTimer, nativeGlassActiveAt = performance.now();
 const layerHead = {}, layerBody = {}, layerBase = {};
 const glassPose = () => [0, 0, 80, 20, 0, 1];
 const THEME_CHOICES = ['ink', 'chalk', 'auto'];
@@ -76,7 +79,7 @@ SOURCE
     systemDark = system;
     updateThemeUI();
     await window.setLookPref('glass', glass);
-    nativeGlassTick = 1;
+    nativeGlassPoseAt = -Infinity;
     syncNativeGlass();
     const msg = messages.filter(m => m.type === 'glass').at(-1);
     assert.equal(msg.dark, dark);
@@ -85,11 +88,11 @@ SOURCE
     assert.equal('tint' in msg, false);
   }
   await window.setLookPref('tint', 'sage');
-  nativeGlassTick = 1; syncNativeGlass();
+  nativeGlassPoseAt = -Infinity; syncNativeGlass();
   assert.equal(messages.at(-1).tint, TINT_PRESETS.sage);
   assert.equal(props.size, 0);
   const count = messages.length;
-  nativeGlassTick = 1; syncNativeGlass();
+  nativeGlassPoseAt = -Infinity; syncNativeGlass();
   assert.equal(messages.length, count);
   for (const [key, value] of [['glass', 'bogus'], ['tint', '__proto__'], ['theme', 'bogus']]) {
     await window.setLookPref(key, value);

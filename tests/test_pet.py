@@ -546,9 +546,10 @@ class PetTest(unittest.TestCase):
             self.assertNotIn(leak, scan)
 
     def test_self_load_fixes(self):
-        # 9단계 실측: 말풍선이 닫혀 있으면 상태 폴링을 2초로 늦춘다 (데스크톱 6.3% → 3.8%, 코어 하나 기준)
+        # 닫힌 말풍선은 롱폴링, 열린 말풍선은 450ms. 응답 뒤에만 다음 요청을 예약한다.
         html = pet.PET_HTML
-        self.assertIn("window._poll = setInterval(refreshState, fast ? 450 : 2000);", html)
+        self.assertIn("ok ? (closed ? 0 : 450) : 2000", html)
+        self.assertIn("pollController.abort()", html)
         self.assertIn("if (window._poll !== undefined) setPollRate(open);", html)
         self.assertIn('setPollRate(!bubble.classList.contains("hidden"));', html)
         self.assertNotIn("setInterval(refreshState, 450);", html)

@@ -28,9 +28,12 @@ import time
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import ask, config, findui, fsutil, harden, learn, log, mapper, organize, recall, records, route
+
+STATE_WAIT_TIMEOUT = 20.0
+STATE_WAIT_INTERVAL = 2.0
 
 BLACK = "#1A1917"   # 먹 (Ink)
 CREAM = "#F3EFE6"   # 분필 (Chalk)
@@ -2009,9 +2012,10 @@ PET_HTML = r"""<!DOCTYPE html>
     100% { transform: translateY(0) scaleY(1); }
   }
 
+  .action-drowsy .pill-head, .action-drowsy .pill-body, .action-drowsy .pill-base { animation: none; }
   .action-drowsy .pill-head { transform: translateY(calc(1.2 * var(--u))); }
   .action-drowsy .eye-l, .action-drowsy .eye-r { height: 2px !important; border-radius: 999px; }
-  .action-drowsy .ro-bot { animation: drowsySway 4.8s infinite ease-in-out; }
+  .action-drowsy .ro-bot { animation: drowsySway 4.8s 3 ease-in-out forwards; }
   @keyframes drowsySway {
     0%, 100% { transform: translateY(0) rotate(0deg); }
     50%      { transform: translateY(2px) rotate(1.2deg); }
@@ -2797,6 +2801,10 @@ function updateMaterialUI() {
     btn.setAttribute("aria-pressed", String(btn.dataset.mat === materialMode));
   });
   updateLookUI();
+  updatePetCaption();
+}
+
+function updatePetCaption() {
   const moodMeta = MOOD_META[currentMood] || MOOD_META.idle;
   if (dockCaption !== null) return;
   petCaption.textContent = currentAction ? (ACTION_META[currentAction]?.label || currentAction) : moodMeta.label;
@@ -2910,6 +2918,7 @@ let questionBusy = false;
 function setBubbleOpen(open) {
   if (open && bubble.classList.contains("hidden")) bubbleOpenedAt = performance.now();
   bubble.classList.toggle("hidden", !open);
+  if (open && latestState) renderBubbleState(latestState);
   if (open && !isNativeHost) fitStage();  // 닫힌 채로 펫을 옮겼다면 다시 연 말풍선이 화면 밖으로 잘리지 않게
   notifyHost({ type: "bubble", open: !!open });
   if (window._poll !== undefined) setPollRate(open);
@@ -2935,7 +2944,9 @@ window.setBubblePlacement = function(isTop, isLeft) {
 
 /* 6가지 표정 프리뷰 */
 function setMoodClass(mood) {
+  const before = petWrap.className;
   for (const m of MOOD_ORDER) petWrap.classList.toggle(`mood-${m}`, m === mood);
+  if (petWrap.className !== before) kickNativeGlass();
 }
 
 window.setMoodPreview = function(mood, durationMs) {
@@ -3027,6 +3038,7 @@ const MOTION_DEMOS = ["press", "drag", "shake", "drop"];
 
 /* 모션 상호작용 컨트롤러 */
 window.triggerAction = function(name, durationMs) {
+  kickNativeGlass();
   if (actionTimer) {
     clearTimeout(actionTimer);
     actionTimer = null;
@@ -3115,6 +3127,7 @@ window.addEventListener("mousemove", (e) => {
   if (currentMood === "resolved" || currentMood === "recording" || currentMood === "focus") {
     eyesWrap.style.transform = "";
     layerHead.style.transform = "";
+    kickNativeGlass();
     return;
   }
   if (isPetHover || currentAction || RoMotion.busy()) return;
@@ -3125,6 +3138,7 @@ window.addEventListener("mousemove", (e) => {
   const dy = Math.max(-1.8, Math.min(2.0, (e.clientY - cy) / 32));
   eyesWrap.style.transform = `translate(${dx}px, calc(-50% + ${dy}px))`;
   layerHead.style.transform = `translate(${dx * 0.28}px, ${dy * 0.28}px)`;
+  kickNativeGlass();
 });
 
 /* 눈 깜빡임 */
@@ -3174,26 +3188,40 @@ const isNativeHost = !!(window.webkit && window.webkit.messageHandlers && window
 /* 네이티브 유리(Mac 앱): 몸통 세 층 아래에 층마다 시스템 유리를 하나씩 깐다. macOS 26 이상은 굴절하는 유리("liquid"),
    그보다 낮으면 뒤 화면을 실제로 흐리는 유리("blur") — 어느 쪽인지는 Mac 앱이 setNativeGlass로 알려 준다.
    웹 화면은 층마다 자리·기울기·불투명도를 알려 주고, Mac 앱은 유리를 그대로 옮기고 돌린다.
-   들거나 흔드는 동안에도 같은 유리가 따라오도록 움직이는 중에는 매 프레임, 가만히 있을 때는 초당 30번(바뀔 때만) 보낸다.
+   들거나 흔들 때만 매 프레임, CSS 움직임은 100ms 타이머로 확인해 대기 중 매 프레임 깨어나지 않는다.
+   0.5초간 정지하면 1초마다 확인한다. 호스트 사본 숨쉬기 실험(사용자 측정): WebContent 4.9~7.8% → 2.2~2.6%.
    updateMaterialUI가 이 선언보다 먼저 불리므로 var로 둔다(let이면 선언 전 접근 오류). */
 var nativeGlassKind = "";
-var nativeGlassSent = "";
-var nativeGlassLoop = false;
-var nativeGlassTick = 0;
+var nativeGlassSent;
+var nativeGlassFrame;
+var nativeGlassTimer;
+var nativeGlassActiveAt;
+var nativeGlassPoseAt = -Infinity;
 window.setNativeGlass = function(kind) {
   nativeGlassKind = (kind === "liquid" || kind === "blur") ? kind : "";
   nativeGlassSent = "";
   kickNativeGlass();
 };
 function kickNativeGlass() {
-  if (nativeGlassLoop) return;
-  nativeGlassLoop = true;
-  requestAnimationFrame(syncNativeGlass);
+  clearTimeout(nativeGlassTimer);
+  nativeGlassTimer = null;
+  nativeGlassActiveAt = performance.now();
+  nativeGlassPoseAt = -Infinity;
+  if (!nativeGlassKind || materialMode !== "glass") {
+    cancelAnimationFrame(nativeGlassFrame);
+    syncNativeGlass();
+  } else if (nativeGlassFrame == null) {
+    nativeGlassFrame = requestAnimationFrame(syncNativeGlass);
+  }
 }
+for (const event of ["animationstart", "transitionrun"]) {
+  document.addEventListener(event, e => { if (petWrap.contains(e.target)) kickNativeGlass(); }, true);
+}
+window.addEventListener("resize", kickNativeGlass);
 /* 층 하나의 [x, y, 너비, 높이, 기울기(도, 시계 방향), 불투명도]. x·y·너비·높이는 돌리기 전 상자.
    돌린 사각형의 테두리 상자 중심은 원래 중심과 같으므로 중심은 getBoundingClientRect에서, 크기는 레이아웃 크기 × 배율로 구한다.
    층 자신과 조상의 transform(숨쉬기·두리번 등 CSS 애니메이션)과 rotate·scale(모션 엔진)을 모두 합친다. */
-function glassPose(el) {
+function glassPose(el, moving) {
   let rot = 0, sx = 1, sy = 1, op = 1;
   for (let n = el; n && n !== document.body; n = n.parentElement) {
     const cs = getComputedStyle(n);
@@ -3213,31 +3241,47 @@ function glassPose(el) {
   const r = el.getBoundingClientRect();
   const w = el.offsetWidth * sx, h = el.offsetHeight * sy;
   const q = (v, k) => Math.round(v * k) / k;
-  return [q(r.left + r.width / 2 - w / 2, 4), q(r.top + r.height / 2 - h / 2, 4), q(w, 4), q(h, 4), q(rot, 10), q(op, 50)];
+  const k = moving ? 4 : 2;
+  return [q(r.left + r.width / 2 - w / 2, k), q(r.top + r.height / 2 - h / 2, k), q(w, k), q(h, k), q(rot, 10), q(op, 50)];
 }
 function setNativeGlassClass(on) {
   for (const k of ["liquid", "blur"]) document.body.classList.toggle(`native-glass-${k}`, on && nativeGlassKind === k);
 }
-function syncNativeGlass() {
+function syncNativeGlass(now = performance.now()) {
+  nativeGlassFrame = null;
+  nativeGlassTimer = null;
   if (!nativeGlassKind || materialMode !== "glass") {
-    nativeGlassLoop = false;
     setNativeGlassClass(false);
     if (nativeGlassSent !== "off") { nativeGlassSent = "off"; notifyHost({ type: "glass", on: false }); }
     return;
   }
-  requestAnimationFrame(syncNativeGlass);
   const moving = typeof RoMotion !== "undefined" && RoMotion.busy();
-  nativeGlassTick = (nativeGlassTick + 1) % 2;
-  if (nativeGlassTick && !moving) return;
-  let rects = [layerHead, layerBody, layerBase].map(glassPose);
+  // 정지 판정 직전에는 간격 제한 없이 마지막 위치까지 확인한다.
+  if (!moving && now - nativeGlassPoseAt < 100 && now - nativeGlassActiveAt < 500) {
+    nativeGlassTimer = setTimeout(syncNativeGlass, 100 - (now - nativeGlassPoseAt));
+    return;
+  }
+  nativeGlassPoseAt = now;
+  let rects = [layerHead, layerBody, layerBase].map(el => glassPose(el, moving));
   if (!rects.every(r => r[2] >= 1 && r[3] >= 1 && r[5] > 0.02)) rects = null;  // 숨은 펫
   setNativeGlassClass(!!rects);
   const dark = glassIsDark();
   const tint = TINT_PRESETS[tintMode];
   const key = rects ? JSON.stringify(rects) + dark + (tint || "") : "off";
-  if (key === nativeGlassSent) return;
-  nativeGlassSent = key;
-  notifyHost(rects ? { type: "glass", on: true, rects, dark, ...(tint ? { tint } : {}) } : { type: "glass", on: false });
+  const changed = key !== nativeGlassSent;
+  if (changed) {
+    nativeGlassSent = key;
+    notifyHost(rects ? { type: "glass", on: true, rects, dark, ...(tint ? { tint } : {}) } : { type: "glass", on: false });
+  }
+  const animating = document.getAnimations().some(a => a.playState === "running" && petWrap.contains(a.effect?.target));
+  if (moving || animating || changed) nativeGlassActiveAt = now;
+  if (moving) {
+    nativeGlassFrame = requestAnimationFrame(syncNativeGlass);
+  } else if (now - nativeGlassActiveAt < 500) {
+    nativeGlassTimer = setTimeout(syncNativeGlass, 100);
+  } else {
+    nativeGlassTimer = setTimeout(syncNativeGlass, 1000);
+  }
 }
 let webDragStart = null;
 let webDidDrag = false;
@@ -3354,7 +3398,9 @@ askInput.addEventListener("input", () => {
 
 /* 상태 렌더링 */
 let lastHostStatus = "";
+let latestState = null;
 function applyState(st) {
+  latestState = st;
   questionBusy = !!st.busy;
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
   const hostStatus = { type: "status", today: (st.counts && st.counts.today_records) || 0 };
@@ -3370,7 +3416,7 @@ function applyState(st) {
     }
     setMoodClass(st.mood);  // 다른 클래스(끌기·집중·메뉴 막대로 보내기 등)는 건드리지 않는다
 
-    updateMaterialUI();
+    updatePetCaption();
 
     if (RoMotion.busy()) {
       // 잡고 흔드는 중에는 상태 폴링이 다른 동작을 끼워 넣지 않는다(모션이 끊기지 않게)
@@ -3387,6 +3433,16 @@ function applyState(st) {
     }
   }
 
+  applyAmbient(st);
+  if (!bubble.classList.contains("hidden")) renderBubbleState(st);
+}
+
+function renderBubbleState(st) {
+  if (st.ambient) {
+    focusBtn.setAttribute("aria-pressed", st.ambient.focus ? "true" : "false");
+    focusBtn.textContent = st.ambient.focus ? "집중 모드 끄기" : "집중 모드 켜기";
+    focusBtn.classList.toggle("active", !!st.ambient.focus);
+  }
   const showClear = !!(st.can_clear_notice || (askNotice && Date.now() < askNoticeUntil && !st.busy && !askInput.disabled));
   clearBtn.style.display = showClear ? "inline-block" : "none";
 
@@ -3564,15 +3620,15 @@ function applyState(st) {
     timelineMore.style.display = hidden > 0 ? "block" : "none";
     timelineMore.textContent = `이전 ${hidden}건은 터미널의 ro log에서 볼 수 있어요`;
   }
-  applyAmbient(st);
 }
 
-/* 상태 폴링: 말풍선이 열려 있을 때만 0.45초, 닫혀 있으면 2초.
-   펫만 떠 있을 때 0.45초 폴링이 파이썬·WebKit 네트워킹·WebContent에 코어 하나의 약 4%를 썼다 (9단계 실측) */
+/* 상태 폴링: 말풍선이 열려 있을 때만 0.45초. 닫혀 있으면 롱폴링으로 덜 깨운다.
+   서버는 2초마다 변화를 확인하고, 같은 상태의 응답·숨은 말풍선 렌더링은 줄인다. */
+let pollGeneration = 0;
+let pollController = null;
+let stateVersion = null;
 function setPollRate(fast) {
-  clearInterval(window._poll);
-  window._poll = setInterval(refreshState, fast ? 450 : 2000);
-  if (fast) refreshState();
+  return refreshState(!fast);
 }
 
 /* 상태를 못 받으면 마지막으로 받은 내용을 그대로 두고 '업데이트 실패'만 표시한다(0건 화면으로 바꾸지 않음) */
@@ -3582,22 +3638,39 @@ function markStale(why) {
   staleBanner.textContent = `업데이트하지 못했어요 · ${at} 기준 내용이에요. ${why || "잠시 뒤 다시 시도합니다."}`;
   staleBanner.hidden = false;
 }
-async function refreshState() {
-  let st;
+async function refreshState(wait = false) {
+  clearTimeout(window._poll);
+  window._poll = null;
+  const generation = ++pollGeneration;
+  if (pollController) pollController.abort();
+  pollController = new AbortController();
+  let ok = false;
   try {
-    const res = await fetch("/api/state", { headers: { "X-Ro-Token": TOKEN } });
+    const query = wait && stateVersion ? `?wait=${encodeURIComponent(stateVersion)}` : "";
+    const res = await fetch("/api/state" + query, {
+      headers: { "X-Ro-Token": TOKEN }, signal: pollController.signal
+    });
+    if (generation !== pollGeneration) return;
     if (!res.ok) {
       markStale(res.status === 403 ? "펫을 다시 열어 주세요(서버가 다시 시작됐을 수 있어요)." : `서버 오류 ${res.status}`);
       return;
     }
-    st = await res.json();
+    const st = await res.json();
+    if (generation !== pollGeneration) return;
+    stateVersion = st.version;
+    lastStateOk = Date.now();
+    staleBanner.hidden = true;
+    applyState(st);
+    ok = true;
   } catch (err) {
+    if (generation !== pollGeneration || err.name === "AbortError") return;
     markStale("로컬 서버에 연결하지 못했어요.");
-    return;
+  } finally {
+    if (generation === pollGeneration) {
+      const closed = bubble.classList.contains("hidden");
+      window._poll = setTimeout(() => refreshState(closed), ok ? (closed ? 0 : 450) : 2000);
+    }
   }
-  lastStateOk = Date.now();
-  staleBanner.hidden = true;
-  applyState(st);
 }
 
 /* 입력창: 기록 회상은 로컬에서, 그 밖의 질문은 보내기 전 확인을 거쳐 엔진으로. '/기록 …'은 바로 기록 */
@@ -3852,6 +3925,7 @@ document.documentElement.addEventListener("mouseleave", () => {
   if (currentAction || RoMotion.busy()) return;
   eyesWrap.style.transform = "";
   layerHead.style.transform = "";
+  kickNativeGlass();
 });
 
 /* ===== 모션 엔진: 07 누름 · 08 잡기·끌기 · 09 흔들기 · 10 놓기 =====
@@ -4225,6 +4299,7 @@ const RoMotion = (() => {
     petWrap.dataset.eyes = P.eyes.shape;
     eyesWrap.style.translate = (P.eyes.lx || P.eyes.ly) ? `${P.eyes.lx.toFixed(2)}px ${P.eyes.ly.toFixed(2)}px` : "";
     petWrap.dataset.motion = S.phase;
+    kickNativeGlass();
   }
 
   function clearStyles() {
@@ -4239,6 +4314,7 @@ const RoMotion = (() => {
     eyesWrap.style.translate = "";
     delete petWrap.dataset.eyes;
     delete petWrap.dataset.motion;
+    kickNativeGlass();
   }
 
   function loop() {
@@ -4248,7 +4324,10 @@ const RoMotion = (() => {
     if (S.phase !== "idle") raf = requestAnimationFrame(loop);
     else { raf = null; clearStyles(); if (api.onIdle) api.onIdle(); }
   }
-  function ensureLoop() { if (!manual && raf == null) raf = requestAnimationFrame(loop); }
+  function ensureLoop() {
+    kickNativeGlass();
+    if (!manual && raf == null) raf = requestAnimationFrame(loop);
+  }
 
   /* 네이티브 메뉴의 미리보기용 합성 입력 */
   let demoTimer = null;
@@ -4328,9 +4407,6 @@ function applyAmbient(st) {
   muteBadge.hidden = !(ambient.focus && ambient.held > 0);
   muteBadge.querySelector("span").textContent = ambient.held;
   muteBadge.setAttribute("aria-label", `알림 ${ambient.held}건 모아둠`);
-  focusBtn.setAttribute("aria-pressed", ambient.focus ? "true" : "false");
-  focusBtn.textContent = ambient.focus ? "집중 모드 끄기" : "집중 모드 켜기";
-  focusBtn.classList.toggle("active", !!ambient.focus);
   petWrap.setAttribute("aria-label", `ro · ${ambient.focus ? "집중 모드" : ambient.label}${ambient.attention ? " · 확인 필요" : ""}`);
   if (!currentAction && Date.now() >= previewLockUntil) {
     petCaption.textContent = dropActive ? "놓으면 기록해요" : (ambient.focus ? "집중 모드" : ambient.label);
@@ -4439,6 +4515,7 @@ const Lid = (() => {
     angle = a;
     petWrap.classList.toggle("lid-on", a > 0);
     layerHead.style.rotate = a > 0 ? `${-a.toFixed(2)}deg` : "";   // 오른쪽이 올라가야 하니 시계 반대 방향
+    kickNativeGlass();
   }
   function tween(to, ms, ease, done) {
     cancelAnimationFrame(raf);
@@ -4842,7 +4919,6 @@ if (!isNativeHost) {
   document.body.classList.add("web");
   setBubbleOpen(true);
 }
-refreshState();
 setPollRate(!bubble.classList.contains("hidden"));
 </script>
 </body>
@@ -4920,7 +4996,19 @@ def make_handler(runtime):
                 self.wfile.write(body)
             elif parsed.path == "/api/state":
                 if self._token_ok():
-                    self._send_json(200, runtime.snapshot())
+                    wait = parse_qs(parsed.query).get("wait", [None])[0]
+                    deadline = time.monotonic() + STATE_WAIT_TIMEOUT
+                    while True:
+                        snapshot = runtime.snapshot()
+                        version = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+                        remaining = deadline - time.monotonic()
+                        if wait != version or remaining <= 0:
+                            try:
+                                self._send_json(200, {**snapshot, "version": version})
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass  # 말풍선 전환으로 취소된 롱폴링은 오류 기록을 만들지 않는다.
+                            break
+                        time.sleep(min(STATE_WAIT_INTERVAL, remaining))
             else:
                 self._send_json(404, {"error": "not found"})
 
@@ -5013,6 +5101,7 @@ def start_server(runtime, host="127.0.0.1", port=0):
     """로컬 루프백(127.0.0.1)에만 바인딩하는 HTTP 서버를 시작한다."""
     if host not in ("127.0.0.1", "localhost"):
         raise ValueError("pet 서버는 127.0.0.1(로컬 전용)에만 바인딩할 수 있습니다.")
+    # ThreadingHTTPServer.daemon_threads=True: 롱폴링이 종료를 붙잡지 않는다.
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(runtime))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
