@@ -127,7 +127,6 @@ class CliTest(unittest.TestCase):
         (self.home / "Developer" / "blog" / "package.json").write_text("{}")
         self.bin = self.d / "bin"
         self.bin.mkdir()
-        fake_engine(self.bin, "echo 답변입니다")
         env = mock.patch.dict(os.environ, {"HOME": str(self.home), "PATH": f"{self.bin}:/bin:/usr/bin"})
         env.start()
         self.addCleanup(env.stop)
@@ -146,54 +145,12 @@ class CliTest(unittest.TestCase):
                     err.write(e.code)
         return code, out.getvalue(), err.getvalue()
 
-    def test_ask_never_scans_without_map(self):
-        code, out, err = self.call("ask", "블로그 배포?")
-        self.assertEqual(code, 2)
-        self.assertIn("ro map", err)
-        self.assertFalse((self.home / ".ro" / "map.json").exists())
-        code, out, _ = self.call("ask", "블로그 배포?", "--json")
-        self.assertEqual(json.loads(out)["reason"], "needs_setup")
-
-    def test_confirmation_is_default(self):
-        self.call("map")
-        code, out, err = self.call("ask", "블로그 배포?")  # 비대화형 + --yes 없음
-        self.assertNotEqual(code, 0)
-        self.assertIn("--yes", err)
-        self.assertNotIn("답변입니다", out)
-        code, out, _ = self.call("ask", "블로그 배포?", "--json")  # 앱 1단계: 미리보기만
-        ev = json.loads(out)
-        self.assertEqual((code, ev["event"], ev["projects"]), (0, "preview", ["blog"]))
-        self.assertNotIn(str(self.home), ev["prompt"])
-        self.assertEqual(log.read_all(), [e for e in log.read_all() if e["kind"] == "map"])  # 전송 기록 없음
-
-    def test_yes_json_flow_followup_and_feedback(self):
-        self.call("map")
-        code, out, _ = self.call("ask", "블로그 배포?", "--json", "--yes")
-        events = [json.loads(x) for x in out.splitlines()]
-        self.assertEqual([e["event"] for e in events], ["line", "done"])
-        done = events[-1]
-        self.assertTrue(done["ok"])
-        self.assertEqual(done["feedback_args"]["projects"], ["blog"])
-        self.assertEqual(self.call("feedback", "y", "--engine", "claude", "--category", "design",
-                                   "--projects", "blog")[0], 0)
-        self.assertEqual(log.read_all()[-1]["kind"], "feedback")
-        code, out, _ = self.call("ask", "그럼?", "--json", "--yes", "--continue")  # 후속 질문
-        self.assertTrue(json.loads(out.splitlines()[-1])["ok"])
-        _, out, _ = self.call("ask", "그럼?", "--json", "--continue")
-        self.assertIn("답변입니다", json.loads(out)["prompt"])
-
-    def test_login_expired_message_and_log_delete_and_collect(self):
-        self.call("map")
-        fake_engine(self.bin, 'echo "Please run /login" >&2; exit 1')
-        code, _, err = self.call("ask", "블로그 배포?", "--yes")
-        self.assertEqual(code, 1)
-        self.assertIn("로그인", err)
+    def test_log_delete_needs_yes(self):
+        self.call("map")  # 기록이 하나라도 있어야 지울 것이 있다
         self.assertEqual(self.call("log", "delete")[0], 1)  # --yes 없으면 삭제 안 함
         self.assertTrue(list((self.home / ".ro" / "log").glob("*.jsonl")))
         self.call("log", "delete", "--yes")
         self.assertFalse(list((self.home / ".ro" / "log").glob("*.jsonl")))
-        _, out, _ = self.call("collect", "status", "--json")
-        self.assertFalse(json.loads(out)["shell"])
 
     def test_setup_flow_and_config(self):
         code, out, _ = self.call("setup", "status", "--json")
@@ -215,12 +172,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads(self.call("setup", "status", "--json")[1])["map_exists"], True)
         self.call("setup", "roots", "remove", "~/Developer")
         self.assertEqual(json.loads((self.home / ".ro" / "config.json").read_text())["roots"], [])
-
-    def test_legacy_collect_json_still_read(self):
-        (self.home / ".ro").mkdir()
-        (self.home / ".ro" / "collect.json").write_text(json.dumps({"shell": True}))
-        _, out, _ = self.call("collect", "status", "--json")
-        self.assertTrue(json.loads(out)["shell"])
 
 
 if __name__ == "__main__":

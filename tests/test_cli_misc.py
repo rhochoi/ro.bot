@@ -38,13 +38,11 @@ class CliMiscTest(unittest.TestCase):
         self.assertIn("- a  [-]  -  /p/a", r.stdout)
 
 
-    def test_ask_rejects_empty_question_before_engine(self):
-        (self.home / ".ro").mkdir()
-        (self.home / ".ro" / "map.json").write_text(json.dumps({"projects": [], "tools": {}}))
-        r = self.ro("ask", "  ", "--yes")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("질문을 입력", r.stderr)
-
+    def test_removed_engine_and_learning_commands_are_rejected(self):
+        for cmd in ("ask", "route", "learn", "collect", "bench", "ambient", "feedback"):
+            r = self.ro(cmd)
+            self.assertEqual(r.returncode, 2, cmd)
+            self.assertIn("invalid choice", r.stderr, cmd)
     def test_setup_without_subcommand_shows_status(self):
         r = self.ro("setup")
         self.assertEqual(r.returncode, 0, r.stderr)
