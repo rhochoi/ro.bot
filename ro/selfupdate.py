@@ -8,10 +8,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import route
-
 PACKAGE = "rog-bot"
 ROOT = Path(__file__).resolve().parent.parent
+TOOLS = ("claude", "agy")  # ro doctor가 설치 여부만 보는 도구
 
 
 def update_command():
@@ -35,10 +34,10 @@ def update(runner=subprocess.run):
 
 
 def doctor():
-    print(f"python {sys.version.split()[0]} / 라우팅표: {route.routing_path()}")
+    print(f"python {sys.version.split()[0]}")
     missing = 0
-    for e in route.ENGINES:
+    for e in TOOLS:
         found = shutil.which(e)
         missing += not found
-        print(f"- {e}: {found or '미설치 (이 엔진이 필요한 작업은 실패합니다)'}")
-    return 0 if missing < len(route.ENGINES) else 1
+        print(f"- {e}: {found or '미설치'}")
+    return 0 if missing < len(TOOLS) else 1

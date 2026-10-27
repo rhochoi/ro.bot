@@ -200,10 +200,10 @@ class CliTest(unittest.TestCase):
         st = json.loads(out)
         self.assertFalse(st["roots_configured"])
         self.assertIn("~/Developer", [c["path"] for c in st["root_candidates"] if c["exists"]])
-        self.assertTrue(st["engines"]["claude"]["installed"])
-        self.assertFalse(st["collect"]["shell"])
-        self.assertTrue(st["not_collected"])
-        self.assertIn("화면 캡처", self.call("setup", "status")[1])
+        for gone in ("engines", "engine_preference", "collect", "not_collected"):  # 엔진·수집 설정은 없어졌다
+            self.assertNotIn(gone, st)
+        self.assertIn("스캔 폴더", self.call("setup", "status")[1])
+        self.assertNotEqual(self.call("setup", "engine", "agy")[0], 0)
         # 폴더 선택: 너무 넓은 폴더·없는 폴더는 거절
         self.assertNotEqual(self.call("setup", "roots", "add", str(self.home))[0], 0)
         self.assertNotEqual(self.call("setup", "roots", "add", str(self.home / "없음"))[0], 0)
@@ -215,19 +215,6 @@ class CliTest(unittest.TestCase):
         self.assertEqual(json.loads(self.call("setup", "status", "--json")[1])["map_exists"], True)
         self.call("setup", "roots", "remove", "~/Developer")
         self.assertEqual(json.loads((self.home / ".ro" / "config.json").read_text())["roots"], [])
-
-    def test_engine_preference_and_collect_in_config(self):
-        self.call("map")
-        self.assertNotEqual(self.call("setup", "engine", "gpt")[0], 0)
-        self.call("setup", "engine", "agy")
-        _, out, _ = self.call("ask", "블로그 배포?", "--json")
-        self.assertEqual(json.loads(out)["engine"], "agy")
-        self.call("setup", "engine", "auto")
-        self.call("collect", "allow", "shell")
-        cfg = json.loads((self.home / ".ro" / "config.json").read_text())
-        self.assertTrue(cfg["collect"]["shell"])
-        self.assertEqual(cfg["engine"], "")
-        self.assertFalse((self.home / ".ro" / "collect.json").exists())
 
     def test_legacy_collect_json_still_read(self):
         (self.home / ".ro").mkdir()

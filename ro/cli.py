@@ -122,15 +122,13 @@ def main(argv=None):
     fb.add_argument("--category", required=True)
     fb.add_argument("--projects", default="", help="쉼표로 구분")
     fb.add_argument("--answer", default=None, help="답변 ID(ask --json의 feedback_args). 같은 답변은 한 번만 센다")
-    su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더, 선호 엔진")
+    su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
-    ss = ssub.add_parser("status", help="현재 설정·엔진·수집 상태")
+    ss = ssub.add_parser("status", help="현재 설정 상태")
     ss.add_argument("--json", action="store_true")
     sr = ssub.add_parser("roots", help="스캔 폴더 관리")
     sr.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])  # 생략하면 목록
     sr.add_argument("paths", nargs="*")
-    se = ssub.add_parser("engine", help="선호 엔진 지정(auto=자동 라우팅)")
-    se.add_argument("name")
     co = sub.add_parser("collect", help="활동 수집기(allow|deny|status|run) — 허용한 소스만 읽음")
     co.add_argument("rest", nargs=argparse.REMAINDER)
     bn = sub.add_parser("bench", help="컨텍스트 있을 때/없을 때 답변 품질 비교")
@@ -463,8 +461,6 @@ def main(argv=None):
                 else:
                     roots = mapper.default_roots()
                 print("\n".join(roots) or "(없음)")
-            else:
-                print(f"선호 엔진: {setup_mod.set_engine(args.name)}")
         except ValueError as e:
             raise SystemExit(str(e))
     elif args.cmd == "feedback":

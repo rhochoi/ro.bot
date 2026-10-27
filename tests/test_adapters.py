@@ -37,27 +37,6 @@ class AdaptersTest(unittest.TestCase):
         self.assertNotIn("def ", text)
         self.assertLess(len(text), 600)  # claude 어댑터는 포인터만
 
-    def test_probe_passes_only_if_repo_hit_and_neutral_miss(self):
-        def fake(engine, prompt, write=False, cwd=None, skip_git_check=False):
-            hit = str(cwd) == str(REPO)
-            return {"ok": True, "code": 0, "duration": 1.0, "output": adapters.CANARY if hit else "모름"}
-
-        import os
-        with tempfile.TemporaryDirectory() as h:
-            from unittest import mock
-            with mock.patch.dict(os.environ, {"HOME": h}):
-                self.assertTrue(adapters.probe("codex", runner=fake, root=REPO)["passed"])
-
-        def always(engine, prompt, write=False, cwd=None, skip_git_check=False):
-            return {"ok": True, "code": 0, "duration": 1.0, "output": adapters.CANARY}
-
-        with tempfile.TemporaryDirectory() as h:
-            from unittest import mock
-            with mock.patch.dict(os.environ, {"HOME": h}):
-                self.assertFalse(adapters.probe("codex", runner=always, root=REPO)["passed"])
-
-
-class RoutingTest(unittest.TestCase):
     def test_repo_routing_toml_valid_and_matches_builtin_behavior(self):
         r = route.load_routing(REPO / "routing.toml")
         self.assertEqual([x[0] for x in r["rules"]], ["design", "implement", "ui"])
