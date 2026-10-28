@@ -219,3 +219,40 @@ def save_map(data, out):
     out = Path(out).expanduser()
     fsutil.atomic_write(out, json.dumps(data, ensure_ascii=False, indent=2))
     return out
+
+
+MAP_STALE_DAYS = 3
+
+
+def _under(path, roots):
+    try:
+        p = Path(path).expanduser().resolve()
+    except OSError:
+        return False
+    return any(p == r or r in p.parents for r in roots)
+
+
+def load_map(path="~/.ro/map.json", home="~/.ro"):
+    """지도를 읽는다. 이름은 NFC로 맞추고(macOS 폴더 이름은 자모 분해형일 수 있다), 스캔 폴더를 직접 정해 두었다면
+    그 밖의 프로젝트(예: 예전에 스캔한 ~/Downloads 아래)는 빼고 돌려준다."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        return None
+    data = json.loads(p.read_text())
+    projects = data.get("projects", [])
+    for proj in projects:
+        proj["name"] = unicodedata.normalize("NFC", proj.get("name", ""))
+    roots = config.load(home).get("roots")
+    if isinstance(roots, list):  # 빈 목록 = 모든 폴더를 허용 범위에서 뺐다: 예전 지도의 프로젝트도 보내지 않는다
+        rs = [Path(r).expanduser().resolve() for r in roots]
+        data["projects"] = [proj for proj in projects if _under(proj.get("path", ""), rs)]
+    return data
+
+
+def map_age_days(mapdata, now=None):
+    """지도를 만든 지 며칠 지났는지. 알 수 없으면 None."""
+    try:
+        t = time.mktime(time.strptime((mapdata or {}).get("generated_at", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return None
+    return int(((now or time.time()) - t) // 86400)

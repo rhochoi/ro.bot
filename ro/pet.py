@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import ask, config, findui, fsutil, harden, learn, log, mapper, organize, recall, records, route
+from . import config, findui, fsutil, harden, log, mapper, organize, recall, records
 
 STATE_WAIT_TIMEOUT = 20.0
 STATE_WAIT_INTERVAL = 2.0
@@ -114,7 +114,6 @@ PREF_CHOICES = {"material": ("clay", "glass"), "theme": ("auto", "ink", "chalk")
 RECENT_MAX = 10
 TIMELINE_MAX = 60
 MAX_ACTION_SEC = 60.0  # 상호작용 한 번이 이어지는 최대 시간
-PREVIEW_TTL_SEC = 600.0  # 보내기 전 확인을 받은 계획이 이보다 오래되면 다시 확인받는다
 
 
 # 정밀 그리드 기본 단위 (23u 만폭 기준 상대 비율: 19/23, 15/23, 23/23)
@@ -198,20 +197,16 @@ def icon_16px_grid():
 class PetRuntime:
     """펫의 실시간 상태(집중·풀어냄·쓰기 승인 대기)와 ~/.ro 상태를 결합한다."""
 
-    def __init__(self, home=learn.HOME, log_dir=log.LOG_DIR, map_path="~/.ro/map.json"):
+    def __init__(self, home=config.HOME, log_dir=log.LOG_DIR, map_path="~/.ro/map.json"):
         self.home = home
         self.log_dir = log_dir
         self.map_path = map_path
         self.token = secrets.token_hex(16)
         self._lock = threading.Lock()
-        self.busy = False
-        self.busy_task = ""
-        self.last_answer = None
         self.resolved_until = 0.0
         self.recording_until = 0.0
         self.write_pending = None
         self._last_event_count = None
-        self._dismissed_fail_ts = None
         self._disk_cache = None
         self.organize_root = organize.ROOT
         self.organize_dest = organize.DEST_ROOT
@@ -219,8 +214,6 @@ class PetRuntime:
         self.action_until = 0.0
         self.focus_on = False
         self._focus_base = 0
-        self._preview = None
-        self._cancel = threading.Event()
         self.finder = findui.FindSession(self.home)  # 파일 찾기: 결과 경로는 서버만 쥐고 화면에는 번호만 준다
         self.focus_on = bool(self.prefs().get("focus"))  # 재시작해도 집중 모드를 이어 간다
 
@@ -252,7 +245,7 @@ class PetRuntime:
             self.recording_until = now + RECORDING_WINDOW_SEC
 
     def _projects(self):
-        return (ask.load_map(self.map_path, self.home) or {}).get("projects", [])
+        return (mapper.load_map(self.map_path, self.home) or {}).get("projects", [])
 
     def prefs(self):
         """펫 화면 설정(재질·색상·집중). ~/.ro/config.json의 "pet" 항목."""
@@ -306,34 +299,6 @@ class PetRuntime:
     def records_undo(self):
         return records.undo(home=self.home)
 
-    def clear_notice(self):
-        """직전 답변 표시나 실패 알림을 닫고 기본 상태 화면으로 돌아간다."""
-        day = time.strftime("%Y-%m-%d")
-        today_events = log.read(day, self.log_dir)
-        last_ts = today_events[-1].get("ts") if today_events else None
-        with self._lock:
-            self.last_answer = None
-            if last_ts:
-                self._dismissed_fail_ts = last_ts
-        return {"ok": True}
-
-    def queue_write_approval(self, task, engine=None, cwd=None):
-        """쓰기 작업을 즉시 실행하지 않고 사용자 승인 대기열에 올린다."""
-        eng, category, reason = route.choose(task, learn.load_rules(self.home))
-        if engine:
-            eng, reason = engine, "수동 지정"
-        item = {
-            "id": secrets.token_hex(4),
-            "task": log.redact(task[:200]),
-            "engine": eng,
-            "category": category,
-            "reason": reason,
-            "cwd": cwd,
-        }
-        with self._lock:
-            self.write_pending = item
-        return item
-
     def resolve_write_approval(self, approve_write, pending_id=None):
         """pending_id가 지금 대기 중인 요청과 같을 때만 그 요청을 소비한다(다른 창에서 바뀐 요청을 실행하지 않는다)."""
         with self._lock:
@@ -350,15 +315,7 @@ class PetRuntime:
             return {"ok": True, "approved": False, "output": "쓰기 작업을 취소했습니다."}
         if item.get("kind") in ("organize_apply", "organize_undo"):
             return self._run_organize(item)
-        res = route.run(item["engine"], item["task"], write=True, cwd=item["cwd"])
-        log.append("route", item["task"][:80], {
-            "engine": item["engine"], "category": item["category"], "mode": "write",
-            "ok": res["ok"], "code": res["code"], "duration": res["duration"], "via": "pet_write_gate",
-        }, engine=item["engine"], log_dir=self.log_dir)
-        with self._lock:
-            if res["ok"]:
-                self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
-        return {"ok": res["ok"], "approved": True, "output": log.redact(res["output"])}
+        return {"ok": False, "approved": False, "output": "지원하지 않는 쓰기 요청이라 실행하지 않았어요."}
 
     # ---------- 파일 정리(organize): scan은 바로, 이동·되돌리기는 쓰기 승인 게이트를 거친다 ----------
     def organize_summary(self):
@@ -530,60 +487,35 @@ class PetRuntime:
         if cached and cached[0] == (day, sig) and mono - cached[1] < AUDIT_TTL_SEC:
             return cached[2]
         today_events = records.live(log.read(day, self.log_dir))
-        if cached and cached[0] == (day, sig):
-            cands = cached[2][1]  # 로그·학습 파일이 그대로면 감사만 TTL마다 다시 돈다
-        else:
-            all_events = log.read_all(self.log_dir)
-            cands = learn.propose(all_events, self.home) if all_events else learn.pending(self.home)
         findings, _ = harden.audit(self.home, fix=False)
-        state = (today_events, cands, findings)
-        # propose가 pending.json을 다시 쓰므로 서명은 계산이 끝난 뒤에 잡는다
+        state = (today_events, findings)
         self._disk_cache = ((day, self._disk_signature()), mono, state)
         return state
 
     def snapshot(self, now=None):
-        """현재 ~/.ro 로그·학습 후보·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
+        """현재 ~/.ro 로그·감사 결과와 런타임 상태를 종합해 펫 상태를 계산한다."""
         now = now or time.time()
         day = time.strftime("%Y-%m-%d", time.localtime(now))
-        today_events, cands, findings = self._disk_state(day)
+        today_events, findings = self._disk_state(day)
         user_today = [e for e in today_events if records.is_user_record(e)]  # 펫 시작·스캔·질문은 기록이 아니다
-        mapdata = ask.load_map(self.map_path, self.home)
+        mapdata = mapper.load_map(self.map_path, self.home)
         projects = (mapdata or {}).get("projects", [])
 
         with self._lock:
             if self._last_event_count is not None and len(user_today) > self._last_event_count:
                 self.recording_until = max(self.recording_until, now + RECORDING_WINDOW_SEC)
             self._last_event_count = len(user_today)
-            busy = self.busy
-            busy_task = self.busy_task
             write_pending = self.write_pending
             resolved_until = self.resolved_until
             recording_until = self.recording_until
-            last_answer = self.last_answer
-            dismissed_ts = self._dismissed_fail_ts
             active_action = self.current_action if now < self.action_until else None
 
-        # 가장 마지막 이벤트가 실패한 route이고 아직 확인(닫기)하지 않았을 때만 실패 경고 표시
-        last_route_failed = False
-        if today_events:
-            last_ev = today_events[-1]
-            if (last_ev.get("kind") == "route"
-                    and not bool((last_ev.get("data") or {}).get("ok", True))
-                    and last_ev.get("ts") != dismissed_ts):
-                last_route_failed = True
-
-        if busy:
-            mood = "focus"
-            status_line = f"집중 중: {busy_task or '기록을 살피며 풀어내는 중...'}"
-        elif write_pending:
+        if write_pending:
             mood = "anxious"
             status_line = f"실행 전 확인이 필요해요: {write_pending['task']}"
-        elif findings or last_route_failed:
+        elif findings:
             mood = "anxious"
-            status_line = findings[0] if findings else "직전 작업이 실패해 확인이 필요해요."
-        elif cands:
-            mood = "discovery"
-            status_line = f"새 규칙 후보 발견: {cands[0]['text']} ({cands[0]['evidence']})"
+            status_line = findings[0]
         elif now < resolved_until:
             mood = "resolved"
             status_line = "기록하고, 풀어냈습니다."
@@ -609,18 +541,6 @@ class PetRuntime:
         recent_logs = [row(e) for e in user_today[-RECENT_MAX:]]
         timeline = [row(e) for e in today_events[-TIMELINE_MAX:]]
         stats = Counter(records.kind_label(e.get("kind", "")) for e in today_events).most_common()
-        safe_answer = None
-        if last_answer:
-            safe_answer = {
-                "question": log.redact(last_answer["question"]),
-                "output": log.redact(last_answer["output"]),
-                "engine": last_answer["engine"],
-                "reason": last_answer["reason"],
-                "projects": last_answer["projects"],
-                "ok": last_answer.get("ok", True),
-                "feedback_given": last_answer.get("feedback_given", False),
-            }
-
         material = self.prefs().get("material", "clay")
         material = material if material in MATERIALS else "clay"
         return {
@@ -637,19 +557,16 @@ class PetRuntime:
             "ambient": ambient_state(
                 len(user_today), time.localtime(now).tm_hour, focus=self.focus_on,
                 held=max(0, len(user_today) - self._focus_base),
-                attention=bool(write_pending or findings or last_route_failed or cands)),
+                attention=bool(write_pending or findings)),
             "offsets": layer_offsets(mood),
-            "health": "attention" if (findings or last_route_failed) else "ok",
+            "health": "attention" if findings else "ok",
             "counts": {
                 "today_events": len(today_events),
                 "today_records": len(user_today),
                 "projects": len(projects),
-                "pending_rules": len(cands),
                 "audit_findings": len(findings),
             },
             "project_names": [p["name"] for p in projects][:40],
-            "map_age_days": ask.map_age_days(mapdata),
-            "pending_rules": [log.redact(c) for c in cands[:3]],
             "write_pending": log.redact(write_pending) if write_pending else None,
             "organize": self.organize_summary(),
             "audit_findings": [log.redact(f) for f in findings[:3]],
@@ -657,189 +574,18 @@ class PetRuntime:
             "timeline": timeline,
             "prefs": self.prefs(),
             "stats": stats,
-            "last_answer": safe_answer,
-            "can_clear_notice": bool(last_answer or last_route_failed),
-            "busy": busy,  # 새로고침해도 '답을 기다리는 중'과 취소 버튼을 되살린다
-            "busy_question": log.redact(busy_task) if busy else "",
-            "setup": self._setup_state(mapdata),
-            "attention_items": self._attention_items(findings, last_route_failed),
+            "attention_items": self._attention_items(findings),
             "colors": {"black": BLACK, "cream": CREAM},
         }
 
-    def _setup_state(self, mapdata):
-        """첫 질문에 필요한 준비(지도·엔진). 다 됐으면 None. 폴더를 훑지 않고 설정·파일만 본다."""
-        engines = [e for e in route.ENGINES if shutil.which(e)]
-        steps = []
-        if mapdata is None:
-            roots = mapper.default_roots(self.home)
-            steps.append({"what": "프로젝트 지도가 없어요", "do": "ro map",
-                          "why": f"스캔 폴더: {', '.join(roots) or '없음'} (바꾸기: ro setup roots add 폴더)"})
-        elif not mapdata.get("projects"):
-            steps.append({"what": "허용한 폴더에 프로젝트가 없어요", "do": "ro setup roots add ~/Developer",
-                          "why": "프로젝트가 모인 상위 폴더를 추가한 뒤 ro map을 다시 실행하세요"})
-        if not engines:
-            steps.append({"what": "질문을 보낼 엔진이 설치돼 있지 않아요", "do": "claude, codex, agy 중 하나 설치",
-                          "why": "설치 후 그 엔진에 로그인하면 됩니다"})
-        return {"steps": steps, "engines": engines} if steps else None
-
     @staticmethod
-    def _attention_items(findings, last_route_failed):
+    def _attention_items(findings):
         """'확인할 일'의 실제 내용과 다음 행동. 펫이 고치지는 않는다(권한 자동 수정 없음)."""
         items = []
         for f in findings[:5]:
             do = "ro audit --fix" if f.startswith("권한 과다") else "ro audit"
             items.append({"what": log.redact(f).replace(str(Path.home()), "~"), "do": do})
-        if last_route_failed:
-            items.append({"what": "직전 질문이 실패했어요", "do": "답변 카드의 안내를 확인하고 다시 질문"})
         return items
-
-    def _plan(self, question, engine=None, project=None, cwd=None):
-        mapdata = ask.load_map(self.map_path, self.home)
-        if mapdata is None:  # CLI ask와 같다: 동의 없이 폴더를 훑지 않는다
-            return None, {"ok": False, "reason": "needs_setup",
-                          "output": "프로젝트 지도가 없습니다. 터미널에서 ro map으로 스캔할 폴더를 확인하고 지도를 만드세요."}
-        # 펫이 실행된 폴더(os.getcwd())는 사용자가 지금 보는 곳이 아니다: 질문이 가리키는 프로젝트만 붙인다
-        pl = ask.plan(question, mapdata, cwd=cwd, use_context=True,
-                      engine=engine or config.load(self.home).get("engine") or None,
-                      rules=learn.load_rules(self.home), project=project, log_dir=self.log_dir,
-                      memory_path=Path(self.home).expanduser() / "ro-model.md")
-        return pl, None
-
-    def preview_question(self, question, engine=None, project=None):
-        """보내기 전에 무엇이 어디로 가는지 보여 준다(CLI의 전송 전 미리보기와 같다). 아무것도 보내지 않는다."""
-        question = (question or "").strip()
-        if not question:
-            return {"ok": False, "output": "질문을 입력해 주세요."}
-        pl, err = self._plan(question, engine, project)
-        if err:
-            return err
-        pid = secrets.token_hex(6)
-        with self._lock:
-            self._preview = {"id": pid, "question": question, "plan": pl, "ts": time.time()}
-        age = ask.map_age_days(ask.load_map(self.map_path, self.home)) if pl["projects"] else None
-        # 승인하는 것과 같은 것을 보여 준다: 엔진에 실제로 보낼 (마스킹된) 프롬프트 전체
-        return {"ok": True, "id": pid, "engine": pl["engine"], "reason": pl["reason"], "projects": pl["projects"],
-                "context_chars": len(pl["context"]), "memories": pl.get("memories", 0),
-                "map_stale_days": age if age is not None and age >= ask.MAP_STALE_DAYS else None,
-                "prompt": log.redact(pl["prompt"])}
-
-    def cancel_ask(self):
-        with self._lock:
-            busy = self.busy
-        if busy:
-            self._cancel.set()
-        return {"ok": busy}
-
-    @staticmethod
-    def _failure_text(engine, res):
-        """엔진 실패 원문(영어 오류 등)을 그대로 답처럼 보여 주지 않는다."""
-        msg = route.explain(engine, res.get("reason") or "failed")
-        raw = (res.get("output") or "").strip()
-        if res.get("reason") in ("failed", "") and raw:
-            msg += f"\n\n원문: {raw[:300]}"
-        return msg
-
-    def ask_question(self, question, engine=None, project=None, cwd=None, preview_id=None):
-        """읽기 전용으로 질문을 실행하고 결과를 저장한다. preview_id를 주면 확인받은 그 계획 그대로 보낸다."""
-        question = (question or "").strip()
-        if not question:
-            return {"ok": False, "output": "질문을 입력해 주세요."}
-        if preview_id is not None:
-            with self._lock:
-                pv = self._preview
-            if (not pv or pv["id"] != preview_id or pv["question"] != question
-                    or time.time() - pv["ts"] > PREVIEW_TTL_SEC):
-                return {"ok": False, "reason": "needs_preview", "output": "보낼 내용을 다시 확인해 주세요."}
-            pl = pv["plan"]
-            # 확인 뒤 허용 폴더·지도가 바뀌어 빠진 프로젝트가 있으면 예전 내용을 보내지 않는다
-            mapdata = ask.load_map(self.map_path, self.home)
-            allowed = {p["name"] for p in (mapdata or {}).get("projects", [])}
-            if pl["projects"] and not set(pl["projects"]) <= allowed:
-                with self._lock:
-                    self._preview = None
-                return {"ok": False, "reason": "needs_preview",
-                        "output": "확인 뒤에 허용 폴더가 바뀌었어요. 보낼 내용을 다시 확인해 주세요."}
-        else:
-            pl, err = self._plan(question, engine, project, cwd)
-            if err:
-                return err
-        with self._lock:
-            if self.busy:  # 동시에 두 엔진을 띄우면 먼저 끝난 쪽이 busy를 풀고 답을 덮어쓴다
-                return {"ok": False, "busy": True, "output": "이전 질문을 처리하는 중입니다. 끝난 뒤 다시 물어 주세요."}
-            self.busy = True
-            self.busy_task = log.redact(question[:60])
-            self._preview = None
-            self._cancel.clear()
-        try:
-            run_cwd = pl.get("cwd") or str(Path.home())
-            res = route.run(pl["engine"], pl["prompt"], write=False, cwd=run_cwd, model=pl.get("model", ""),
-                            skip_git_check=not pl.get("cwd"), cancel=self._cancel)
-            log.append("route", question[:80], {
-                "engine": pl["engine"], "category": pl.get("category"), "mode": "read",
-                "ok": res["ok"], "code": res.get("code"), "duration": res.get("duration"),
-                "projects": pl.get("projects", []), "model": pl.get("model", ""),
-                "context_chars": len(pl.get("context", "")), "via": "pet",
-            }, engine=pl["engine"], log_dir=self.log_dir)
-            output = (res["output"] or "(출력 없음)") if res["ok"] else self._failure_text(pl["engine"], res)
-            ans = {
-                "question": log.redact(question),
-                "output": log.redact(output),
-                "engine": pl["engine"],
-                "reason": pl.get("reason", ""),
-                "projects": pl.get("projects", []),
-                "plan": pl,
-                "ok": res["ok"],
-                "feedback_given": False,
-                "id": secrets.token_hex(6),  # 평가를 답변 하나에 한 번만 묶는다
-                "ts": time.time(),
-            }
-            with self._lock:
-                self.last_answer = ans
-                if res["ok"]:
-                    self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
-            return {
-                "ok": res["ok"],
-                "cancelled": res.get("reason") == "cancelled",
-                "engine": ans["engine"],
-                "reason": ans["reason"],
-                "projects": ans["projects"],
-                "output": ans["output"],
-            }
-        finally:
-            with self._lock:
-                self.busy = False
-                self.busy_task = ""
-
-    def record_feedback(self, accepted):
-        with self._lock:
-            ans = self.last_answer
-            if not ans:
-                return {"ok": False, "output": "평가할 직전 답변이 없습니다."}
-            if not ans.get("ok", True):
-                return {"ok": False, "output": "실패한 답에는 평가를 남기지 않습니다."}
-            if ans.get("feedback_given"):  # 다시 눌러도(응답 유실 후 재전송 포함) 표본을 늘리지 않는다
-                return {"ok": True, "accepted": ans.get("accepted"), "already": True}
-            ans["feedback_given"] = True
-            ans["accepted"] = bool(accepted)
-            self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
-        log.append("feedback", "수용" if accepted else "거절", {
-            "engine": ans["engine"], "category": ans["plan"]["category"],
-            "accepted": bool(accepted), "projects": ans["projects"], "via": "pet", "answer": ans.get("id"),
-        }, engine=ans["engine"], log_dir=self.log_dir)
-        return {"ok": True, "accepted": bool(accepted)}
-
-    def decide_rule(self, action, cid):
-        if action not in ("approve", "reject") or not cid:
-            return {"ok": False, "output": "올바른 작업(approve/reject)과 id가 필요합니다."}
-        try:
-            cand = getattr(learn, action)(cid, self.home)
-        except KeyError as e:
-            return {"ok": False, "output": str(e)}
-        log.append(f"learn_{action}", cand["text"], {"id": cand["id"], "kind": cand["kind"]},
-                   log_dir=self.log_dir)
-        with self._lock:
-            self.resolved_until = time.time() + RESOLVED_WINDOW_SEC
-        return {"ok": True, "action": action, "candidate": log.redact(cand)}
 
 
 PET_HTML = r"""<!DOCTYPE html>
@@ -1054,19 +800,6 @@ PET_HTML = r"""<!DOCTYPE html>
     align-items: center;
     gap: 4px;
   }
-  .clear-chip-btn {
-    background: var(--panel-soft);
-    color: var(--panel-fg);
-    border: none;
-    border-radius: 999px;
-    padding: 2.5px 7px;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .clear-chip-btn:hover {
-    background: var(--divider);
-  }
   .close-x-btn {
     background: transparent;
     border: none;
@@ -1204,7 +937,6 @@ PET_HTML = r"""<!DOCTYPE html>
   .gate-files li { display: flex; gap: 4px; white-space: nowrap; }
   .gate-files li span { overflow: hidden; text-overflow: ellipsis; }
   .gate-files li .arrow { color: var(--muted); flex-shrink: 0; }
-  .send-ctx { white-space: pre-wrap; max-height: 110px; overflow-y: auto; margin-top: 4px; font-size: 11px; color: var(--muted); }
   .gate-actions {
     display: flex;
     flex-wrap: wrap;
@@ -1232,121 +964,7 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .action-btn.ghost:hover { background: var(--divider); }
 
-  /* 최근 질문 답변 뷰 (답변 스트림) */
-  .qa-card {
-    background: var(--panel-soft);
-    border: 1px solid var(--panel-border);
-    border-radius: 13px;
-    padding: 8px 10px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .user-msg-row {
-    display: flex;
-    justify-content: flex-end;
-  }
-  .user-pill {
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    padding: 4px 10px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 600;
-    max-width: 85%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ro-msg-row {
-    display: flex;
-    align-items: flex-start;
-    gap: 7px;
-  }
-  .mini-avatar {
-    width: 22px;
-    height: 22px;
-    min-width: 22px;
-    border-radius: 50%;
-    background: var(--panel-fg);
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    justify-content: center;
-    padding: 4px 3.5px 4px 4.5px;
-    gap: 0.9px;
-  }
-  .mini-avatar.small {
-    width: 16px;
-    height: 16px;
-    min-width: 16px;
-    padding: 2.8px 2.3px 2.8px 3.2px;
-    gap: 0.7px;
-  }
-  .mini-h {
-    width: 9.8px; height: 4.2px;
-    background: var(--panel-bg);
-    border-radius: 999px;
-    position: relative;
-  }
-  .mini-h::before, .mini-h::after {
-    content: "";
-    position: absolute;
-    background: var(--panel-fg);
-    border-radius: 999px;
-    width: 1.1px;
-    top: 1.0px;
-  }
-  .mini-h::before { height: 2.1px; left: 4.7px; }
-  .mini-h::after  { height: 1.7px; left: 6.7px; top: 1.2px; }
-  .mini-b { width: 7.7px; height: 3.1px; background: var(--panel-bg); border-radius: 999px; }
-  .mini-l { width: 11.9px; height: 3.1px; background: var(--panel-bg); border-radius: 999px; }
-  .mini-avatar.small .mini-h { width: 7.0px; height: 3.0px; }
-  .mini-avatar.small .mini-h::before { left: 3.3px; width: 0.8px; height: 1.5px; top: 0.7px; }
-  .mini-avatar.small .mini-h::after  { left: 4.8px; width: 0.8px; height: 1.2px; top: 0.9px; }
-  .mini-avatar.small .mini-b { width: 5.4px; height: 2.2px; }
-  .mini-avatar.small .mini-l { width: 8.4px; height: 2.2px; }
 
-  .ro-pill {
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    padding: 7px 11px;
-    border-radius: 13px;
-    font-size: 11px;
-    line-height: 1.45;
-    max-height: min(240px, 42vh);
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: keep-all;
-    user-select: text;
-    -webkit-user-select: text;
-    flex: 1;
-  }
-  .ro-sub-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 11px;
-    color: var(--muted);
-    padding-left: 2px;
-  }
-  .feedback-chips {
-    display: flex;
-    gap: 4px;
-  }
-  .fb-btn {
-    background: var(--panel-bg);
-    color: var(--panel-fg);
-    border: 1px solid var(--panel-border);
-    border-radius: 999px;
-    padding: 2px 7px;
-    font-size: 11px;
-    font-weight: 700;
-    cursor: pointer;
-  }
-  .fb-btn:hover { background: var(--divider); }
 
   /* 최근 활동 섹션 */
   .section-row {
@@ -2123,8 +1741,6 @@ PET_HTML = r"""<!DOCTYPE html>
     --spring: linear(0, 0.031, 0.107, 0.208, 0.319, 0.429, 0.534, 0.628, 0.71, 0.78, 0.838, 0.884, 0.921, 0.949, 0.97, 0.985, 0.996, 1.003, 1.008, 1.01, 1);
   }
   [hidden] { display: none !important; }
-  .gate-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-  .fb-done { font-size: 11px; color: var(--muted); }
   .org-cats { display: flex; flex-wrap: wrap; gap: 4px; }
   .org-cats:empty, .org-msg:empty { display: none; }
   .org-msg, .org-summary { font-size: 11px; color: var(--muted); line-height: 1.45; word-break: keep-all; overflow-wrap: anywhere; }
@@ -2136,12 +1752,11 @@ PET_HTML = r"""<!DOCTYPE html>
     min-width: 24px; min-height: 24px;
   }
   .bubble summary { cursor: pointer; font-size: 11px; }
-  #setupCard { border-color: var(--panel-border); background: var(--panel-soft); }
   #timelineList:has(> .stats-empty), #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) { flex: 1; }
   #timelineList > .stats-empty { flex: 1; display: grid; place-items: center; }
   #fileOrgBlock:has(.org-cats:empty + .org-cats:empty) > .org-summary { flex: 1; display: grid; place-items: center; }
-  #setupText, #attentionText { white-space: pre-line; }
-  #setupText code, #attentionText code { font: inherit; font-weight: 700; user-select: all; }
+  #attentionText { white-space: pre-line; }
+  #attentionText code { font: inherit; font-weight: 700; user-select: all; }
   .org-summary code, .org-msg code { white-space: nowrap; font: inherit; font-weight: 700; }
   .block-sub { font-size: 11px; color: var(--muted); line-height: 1.4; }
   .link-btn {
@@ -2351,7 +1966,6 @@ PET_HTML = r"""<!DOCTYPE html>
         <button id="tabBtnSettings" class="nav-tab" data-tab="settings">설정</button>
       </div>
       <div class="top-right">
-        <button id="clearBtn" class="clear-chip-btn" style="display:none;" title="답변·알림을 화면에서 닫습니다(문제를 해결하지는 않아요)">알림 지우기</button>
         <button id="moreBtn" class="close-x-btn" style="display:none;" title="메뉴 (데스크톱에 꺼내기·메뉴 막대로 보내기 등)">⋯</button>
         <button id="closeBtn" class="close-x-btn" title="대화창 닫기 (Esc)">✕</button>
       </div>
@@ -2361,14 +1975,6 @@ PET_HTML = r"""<!DOCTYPE html>
 
     <!-- 1. 기본 (Home) 탭 -->
     <div id="paneHome" class="tab-pane active">
-      <!-- 준비가 덜 됐을 때(지도·엔진 없음): 무엇을 하면 되는지 계속 보여 준다 -->
-      <div id="setupCard" class="gate-box" style="display:none;" role="region" aria-label="시작 준비">
-        <div id="setupSummary" class="gate-body"></div>
-        <details>
-          <summary>준비 방법</summary>
-          <div id="setupText" class="gate-body"></div>
-        </details>
-      </div>
       <!-- 확인할 일: 무엇이 문제이고 다음에 무엇을 하면 되는지 -->
       <div id="attentionCard" class="gate-box" style="display:none;" role="region" aria-label="확인할 일">
         <div class="gate-head">확인할 일</div>
@@ -2399,40 +2005,6 @@ PET_HTML = r"""<!DOCTYPE html>
         <div class="metric-item" id="metricAttentionItem" title="눌러서 확인할 일 보기">
           <div id="metricAttention" class="metric-value">0</div>
           <div class="metric-label">확인할 일</div>
-        </div>
-      </div>
-
-      <!-- 규칙 학습 게이트 카드 -->
-      <div id="ruleCard" class="gate-box" style="display:none;">
-        <div id="ruleTitle" class="gate-head">규칙 학습 후보 발견 (승인 전 미적용)</div>
-        <div id="ruleText" class="gate-body gate-text"></div>
-        <div class="gate-actions">
-          <button id="ruleApproveBtn" class="action-btn primary">승인</button>
-          <button id="ruleRejectBtn" class="action-btn ghost">거절</button>
-        </div>
-      </div>
-
-      <!-- 질문 답변 카드 -->
-      <div id="answerCard" class="qa-card" style="display:none;">
-        <div id="userMsgRow" class="user-msg-row">
-          <div id="userQuestionPill" class="user-pill"></div>
-        </div>
-        <div class="ro-msg-row">
-          <div class="mini-avatar" aria-hidden="true">
-            <div class="mini-h"></div>
-            <div class="mini-b"></div>
-            <div class="mini-l"></div>
-          </div>
-          <div id="roMainBubble" class="ro-pill" aria-live="polite">기록하고, 풀어낸다.</div>
-        </div>
-        <div class="ro-sub-row">
-          <span id="subStatusText"></span>
-          <button id="askCancelBtn" class="fb-btn" type="button" style="display:none;">취소</button>
-          <span id="feedbackBtns" class="feedback-chips" style="display:none;">
-            <button id="fbYes" class="fb-btn" title="이 답이 도움이 됐어요">도움됨</button>
-            <button id="fbNo" class="fb-btn" title="이 답이 아쉬워요">아쉬움</button>
-          </span>
-          <span id="fbDone" class="fb-done" style="display:none;"></span>
         </div>
       </div>
 
@@ -2550,13 +2122,12 @@ PET_HTML = r"""<!DOCTYPE html>
     </div>
 
     <!-- 질문 보내기 전 확인 카드 -->
-    <div id="sendCard" class="gate-box" style="display:none;" role="region" aria-label="보내기 전 확인">
-      <div id="sendHead" class="gate-head">외부 엔진으로 보낼까요?</div>
+    <div id="sendCard" class="gate-box" style="display:none;" role="region" aria-label="안내">
+      <div id="sendHead" class="gate-head">ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.</div>
       <div id="sendText" class="gate-body"></div>
       <div class="gate-actions">
-        <button id="sendApproveBtn" class="action-btn primary">보내기</button>
-        <button id="sendRecordBtn" class="action-btn ghost">기록으로만 남기기</button>
-        <button id="sendFindBtn" class="action-btn ghost" title="엔진에 보내지 않고 내 파일에서 찾아요">내 파일에서 찾기</button>
+        <button id="sendRecordBtn" class="action-btn primary">기록으로만 남기기</button>
+        <button id="sendFindBtn" class="action-btn ghost" title="내 파일에서 이름·내용으로 찾아요">내 파일에서 찾기</button>
         <button id="sendCancelBtn" class="action-btn ghost">취소</button>
       </div>
     </div>
@@ -2570,8 +2141,8 @@ PET_HTML = r"""<!DOCTYPE html>
         <div class="pal-input-row">
           <span class="pal-slash" aria-hidden="true">/</span>
           <input id="palInput" class="pal-input" type="text" role="combobox" aria-expanded="true"
-                 aria-controls="palList" aria-label="명령을 고르거나 그냥 물어보세요" autocomplete="off"
-                 placeholder="명령을 고르거나 그냥 물어보세요">
+                 aria-controls="palList" aria-label="명령을 고르거나 기록·파일 검색어를 쓰세요" autocomplete="off"
+                 placeholder="명령을 고르거나 기록·파일 검색어를 쓰세요">
         </div>
         <div id="palList" class="pal-list" role="listbox" aria-label="명령 목록"></div>
         <div class="pal-foot"><span><kbd>↑↓</kbd> 이동</span><span><kbd>↵</kbd> 실행</span><span><kbd>esc</kbd> 닫기</span></div>
@@ -2581,8 +2152,8 @@ PET_HTML = r"""<!DOCTYPE html>
     <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
       <div class="input-bar">
-        <input id="askInput" class="ask-input" type="text" placeholder="물어보거나 기록하세요 (보내기 전에 확인해요)" autocomplete="off" />
-        <button id="askSubmit" class="ask-submit" type="submit" title="보내기 전 확인">
+        <input id="askInput" class="ask-input" type="text" placeholder="기록하거나 파일을 찾아보세요" autocomplete="off" />
+        <button id="askSubmit" class="ask-submit" type="submit" title="기록하거나 찾기">
           <svg id="plusIcon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
             <line x1="8" y1="2.5" x2="8" y2="13.5"></line>
             <line x1="2.5" y1="8" x2="13.5" y2="8"></line>
@@ -2653,7 +2224,6 @@ const bubble = document.getElementById("bubble");
 const bubbleTop = document.getElementById("bubbleTop");
 const petWrap = document.getElementById("petWrap");
 const petCaption = document.getElementById("petCaption");
-const clearBtn = document.getElementById("clearBtn");
 const closeBtn = document.getElementById("closeBtn");
 
 const paneHome = document.getElementById("paneHome");
@@ -2671,18 +2241,15 @@ const sendCard = document.getElementById("sendCard");
 const findCard = document.getElementById("findCard");
 const sendHead = document.getElementById("sendHead");
 const sendText = document.getElementById("sendText");
-const askCancelBtn = document.getElementById("askCancelBtn");
 
 const greetingTitle = document.getElementById("greetingTitle");
 const greetingSub = document.getElementById("greetingSub");
 const staleBanner = document.getElementById("staleBanner");
-const setupCard = document.getElementById("setupCard");
-const setupText = document.getElementById("setupText");
 const attentionCard = document.getElementById("attentionCard");
 const attentionText = document.getElementById("attentionText");
 document.getElementById("metricAttentionItem").addEventListener("click", (e) => {  // 숫자에서 바로 내용으로
   e.stopPropagation();
-  const target = [attentionCard, writeCard, document.getElementById("ruleCard")].find(c => c && c.style.display !== "none");
+  const target = [attentionCard, writeCard].find(c => c && c.style.display !== "none");
   if (target) target.scrollIntoView({ block: "nearest" });
 });
 const filterSummaryBtn = document.getElementById("filterSummaryBtn");
@@ -2692,23 +2259,12 @@ const metricEvents = document.getElementById("metricEvents");
 const metricProjects = document.getElementById("metricProjects");
 const metricAttention = document.getElementById("metricAttention");
 
-const answerCard = document.getElementById("answerCard");
-const userMsgRow = document.getElementById("userMsgRow");
-const userQuestionPill = document.getElementById("userQuestionPill");
-const roMainBubble = document.getElementById("roMainBubble");
-const subStatusText = document.getElementById("subStatusText");
-const feedbackBtns = document.getElementById("feedbackBtns");
-const ruleTitle = document.getElementById("ruleTitle");
 const orgSummary = document.getElementById("orgSummary");
 const orgCats = document.getElementById("orgCats");
 const orgQuar = document.getElementById("orgQuar");
 const orgScanBtn = document.getElementById("orgScanBtn");
 const orgUndoBtn = document.getElementById("orgUndoBtn");
 const orgMsg = document.getElementById("orgMsg");
-const fbDone = document.getElementById("fbDone");
-let fbDoneUntil = 0;
-let askNotice = null;   // 질문 진행 중·실패 직후에는 폴링이 직전 답변으로 말풍선을 덮어쓰지 않게 한다
-let askNoticeUntil = 0;
 let lastActKey = "";
 let recallShown = false;   // 회상 답(로컬)을 보는 중에는 직전 엔진 답을 겹쳐 띄우지 않는다
 const RECENT_SHOWN = 4;
@@ -2719,8 +2275,6 @@ let pendingId = null;
 
 const writeCard = document.getElementById("writeCard");
 const writeText = document.getElementById("writeText");
-const ruleCard = document.getElementById("ruleCard");
-const ruleText = document.getElementById("ruleText");
 
 const logCountBadge = document.getElementById("logCountBadge");
 const activityList = document.getElementById("activityList");
@@ -2742,7 +2296,6 @@ const eyesWrap = document.getElementById("eyesWrap");
 const eyeL = document.getElementById("eyeL");
 const eyeR = document.getElementById("eyeR");
 
-let currentRuleId = null;
 let currentMood = "idle";
 let currentAction = null;
 let actionTimer = null;
@@ -2914,7 +2467,6 @@ function notifyHost(payload) {
 }
 
 let bubbleOpenedAt = 0;
-let questionBusy = false;
 function setBubbleOpen(open) {
   if (open && bubble.classList.contains("hidden")) bubbleOpenedAt = performance.now();
   bubble.classList.toggle("hidden", !open);
@@ -2926,7 +2478,7 @@ function setBubbleOpen(open) {
 
 window.addEventListener("blur", () => {
   if (bubble.classList.contains("hidden") || performance.now() - bubbleOpenedAt < 300 ||
-      askInput.value || askInput.disabled || questionBusy ||
+      askInput.value ||
       writeCard.style.display !== "none" || sendCard.style.display !== "none" ||
       (ambient && ambient.focus) || !palette.hidden) return;
   setBubbleOpen(false);
@@ -2987,19 +2539,6 @@ moreBtn.addEventListener("click", (e) => {
 closeBtn.addEventListener("click", (e) => {
   e.stopPropagation();
   setBubbleOpen(false);
-});
-
-clearBtn.addEventListener("click", async (e) => {
-  e.stopPropagation();
-  previewLockUntil = 0;
-  askNotice = null;
-  askNoticeUntil = 0;
-  recallShown = false;
-  recallCard.style.display = "none";
-  recOrgCard.style.display = "none";
-  hideSendCard();
-  await apiPost("/api/clear", {});
-  await refreshState();
 });
 
 /* 설정 탭 핸들러 */
@@ -3401,7 +2940,6 @@ let lastHostStatus = "";
 let latestState = null;
 function applyState(st) {
   latestState = st;
-  questionBusy = !!st.busy;
   // 메뉴 막대 메뉴 첫 줄용. 바뀔 때만 보낸다
   const hostStatus = { type: "status", today: (st.counts && st.counts.today_records) || 0 };
   if (JSON.stringify(hostStatus) !== lastHostStatus) {
@@ -3423,9 +2961,7 @@ function applyState(st) {
     } else if (st.action && st.action !== currentAction) {
       window.triggerAction(st.action, 4500);
     } else if (!currentAction) {
-      if (st.mood === "focus") {
-        window.triggerAction("thinking", 0);
-      } else if (st.mood === "resolved") {
+      if (st.mood === "resolved") {
         window.triggerAction("success", 4000);
       } else if (st.mood === "anxious") {
         window.triggerAction("failure", 0);
@@ -3443,16 +2979,13 @@ function renderBubbleState(st) {
     focusBtn.textContent = st.ambient.focus ? "집중 모드 끄기" : "집중 모드 켜기";
     focusBtn.classList.toggle("active", !!st.ambient.focus);
   }
-  const showClear = !!(st.can_clear_notice || (askNotice && Date.now() < askNoticeUntil && !st.busy && !askInput.disabled));
-  clearBtn.style.display = showClear ? "inline-block" : "none";
-
   const counts = st.counts || {};
   const logs = st.recent_logs || [];          // 사용자 기록만 (펫 시작·스캔·질문 제외)
   const tl = st.timeline || [];               // 오늘 일어난 모든 일
   const recordCount = counts.today_records || 0;
   const eventCount = counts.today_events || 0;
   const lastTs = logs.length ? (logs[logs.length - 1].ts || "").slice(0, 5) : "";
-  const attention = (counts.pending_rules || 0) + (counts.audit_findings || 0) + (st.write_pending ? 1 : 0);
+  const attention = (counts.audit_findings || 0) + (st.write_pending ? 1 : 0);
 
   // 1. 브리핑
   const health = st.health === "attention" ? "확인할 일이 있어요" : "정상 동작 중";
@@ -3469,16 +3002,7 @@ function renderBubbleState(st) {
   metricProjects.textContent = counts.projects || 0;
   metricAttention.textContent = attention;
 
-  // 준비 안내·확인할 일: 무엇이 문제이고 무엇을 하면 되는지(같은 내용이면 다시 그리지 않음)
-  const setupKey = JSON.stringify(st.setup || null);
-  if (setupCard.dataset.key !== setupKey) {
-    setupCard.dataset.key = setupKey;
-    setupCard.style.display = st.setup ? "flex" : "none";
-    if (st.setup) document.getElementById("setupSummary").textContent = `${st.setup.steps[0].what}. 질문 준비가 필요하지만 기록은 지금도 됩니다.`;
-    if (st.setup) setupText.replaceChildren(...st.setup.steps.map(s => h("div", {},
-      h("div", { text: `· ${s.what}` }), h("div", { class: "block-sub" }, "터미널: ", h("code", { text: s.do })),
-      s.why ? h("div", { class: "block-sub", text: s.why }) : null)));
-  }
+  // 확인할 일: 무엇이 문제이고 무엇을 하면 되는지(같은 내용이면 다시 그리지 않음)
   const attKey = JSON.stringify(st.attention_items || []);
   if (attentionCard.dataset.key !== attKey) {
     attentionCard.dataset.key = attKey;
@@ -3486,38 +3010,6 @@ function renderBubbleState(st) {
     attentionCard.style.display = items.length ? "flex" : "none";
     attentionText.replaceChildren(...items.map(a => h("div", {},
       h("div", { text: `· ${a.what}` }), h("div", { class: "block-sub" }, "다음: ", h("code", { text: a.do })))));
-  }
-
-  // 3. 답변 카드: 진행 중·실패 직후 알림 > 서버가 처리 중(새로고침 뒤) > 직전 답변
-  if (st.busy && Date.now() >= askNoticeUntil) {
-    answerCard.style.display = "flex";
-    userMsgRow.style.display = "flex";
-    userQuestionPill.textContent = st.busy_question || "";
-    roMainBubble.textContent = "생각하는 중...";
-    subStatusText.textContent = "답을 기다리는 중";
-    feedbackBtns.style.display = "none";
-    askCancelBtn.style.display = "inline-block";
-  } else if (Date.now() < askNoticeUntil) {
-    answerCard.style.display = "flex";
-    userMsgRow.style.display = "flex";
-    userQuestionPill.textContent = askNotice.q;
-    roMainBubble.textContent = askNotice.msg;
-    feedbackBtns.style.display = "none";
-  } else if (st.last_answer && !recallShown) {
-    const ans = st.last_answer;
-    answerCard.style.display = "flex";
-    userMsgRow.style.display = "flex";
-    userQuestionPill.textContent = ans.question;
-    roMainBubble.textContent = ans.output;
-    askCancelBtn.style.display = "none";
-    const projs = (ans.projects || []).join(", ");
-    // 답변은 펫을 다시 열면 사라진다(이번 실행 동안만 보관 — 기록에는 질문 요약만 남는다)
-    subStatusText.textContent = (ans.ok === false ? `${ans.engine} · 답을 받지 못했어요`
-      : (projs ? `${ans.engine} · ${projs}` : ans.engine)) + " · 이번 실행 동안만 보관";
-    feedbackBtns.style.display = (ans.ok === false || ans.feedback_given) ? "none" : "inline-flex";
-    fbDone.style.display = Date.now() < fbDoneUntil ? "inline" : "none";
-  } else {
-    answerCard.style.display = "none";
   }
 
   renderOrganize(st.organize);
@@ -3541,19 +3033,6 @@ function renderBubbleState(st) {
     if (!wasPending) { hideToast(); writeCard.scrollIntoView({ block: "nearest" }); }  // 새 승인 요청이 가려지지 않게
   } else {
     writeCard.style.display = "none";
-  }
-
-  if (st.pending_rules && st.pending_rules.length > 0) {
-    const r = st.pending_rules[0];
-    currentRuleId = r.id;
-    ruleCard.style.display = "flex";
-    const total = counts.pending_rules || st.pending_rules.length;
-    ruleTitle.textContent = `규칙 학습 후보 발견 (1/${total} · 승인 전 미적용)`;
-    ruleText.textContent = `${r.text} (${r.evidence})`;
-    ruleText.title = ruleText.textContent;
-  } else {
-    currentRuleId = null;
-    ruleCard.style.display = "none";
   }
 
   // 4. 최근 기록 (홈): 배지는 오늘 기록 수, 목록은 최근 4개 + 전체 보기
@@ -3673,7 +3152,7 @@ async function refreshState(wait = false) {
   }
 }
 
-/* 입력창: 기록 회상은 로컬에서, 그 밖의 질문은 보내기 전 확인을 거쳐 엔진으로. '/기록 …'은 바로 기록 */
+/* 입력창: 기록 회상·파일 찾기는 로컬에서. '/기록 …'은 바로 기록. 그 밖의 입력은 안내 카드(기록으로만 남기기·파일 찾기)로 */
 let pendingSend = null;
 function resetInput() {
   askInput.value = "";
@@ -3695,78 +3174,16 @@ async function submitInput(q) {
   }
   if (!p.slash && FIND_VERB.test(q) && FIND_NOUN.test(q) && !NOT_FILE.test(q)) { await runFind(q); return; }
   if (!p.slash && RECALL_INTENT.test(q)) { await runRecall(q); return; }
-  await previewAsk(q);
+  showGuide(q);
 }
-async function previewAsk(q) {
+function showGuide(q) {
   hideSendCard();
-  let pv = null;
-  try { pv = await apiPost("/api/ask/preview", { question: q }); } catch (err) {}
-  if (!pv || !pv.ok) {
-    if (!askInput.value) { askInput.value = q; askInput.dispatchEvent(new Event("input")); }
-    switchTab("home");
-    askNotice = { q, msg: pv ? (pv.output || pv.error || "보낼 준비를 하지 못했어요.") : "서버에 연결하지 못했어요." };
-    askNoticeUntil = Date.now() + 8000;
-    await refreshState();
-    return;
-  }
-  pendingSend = { q, id: pv.id };
-  let where = pv.projects.length ? `프로젝트 ${pv.projects.join(", ")} 정보 ${pv.context_chars}자를 함께 보냅니다.`
-                                 : "프로젝트 정보 없이 질문만 보냅니다.";
-  if (pv.memories) where += ` 승인한 기억 ${pv.memories}개도 함께 보냅니다.`;
-  if (pv.map_stale_days) where += ` 프로젝트 지도가 ${pv.map_stale_days}일 전 것이라 설명이 낡았을 수 있어요(터미널: ro map).`;
-  if (pv.projects.length) where += " 다른 프로젝트였다면 취소하고 질문에 프로젝트 이름을 넣어 다시 보내세요.";
-  sendHead.textContent = `${pv.engine}(으)로 보낼까요?`;
-  // 승인하는 내용 그대로(마스킹된 프롬프트 전체)를 펼쳐 볼 수 있다
-  fill(sendText, h("div", { text: `“${q}”` }), h("div", { class: "block-sub", text: where }),
-    pv.prompt ? h("details", { class: "rc-ev" }, h("summary", { text: `보낼 내용 전체 보기 (${pv.prompt.length}자)` }),
-      h("div", { class: "send-ctx", tabindex: "0", text: pv.prompt })) : null);
+  pendingSend = { q };
+  fill(sendText, h("div", { text: `“${q}”` }));
   hideToast();
   sendCard.style.display = "flex";
   sendCard.scrollIntoView({ block: "nearest" });
-  document.getElementById("sendApproveBtn").focus();
-}
-async function sendAsk() {
-  if (!pendingSend) return;
-  const { q, id } = pendingSend;
-  hideSendCard();
-  switchTab("home");  // 진행·취소·답은 홈의 답변 카드에 나온다: 다른 탭에서 보내도 보이게
-  recallShown = false;
-  recallCard.style.display = "none";
-  findCard.style.display = "none";
-  recOrgCard.style.display = "none";
-  askInput.disabled = true;
-  askSubmit.disabled = true;
-  previewLockUntil = 0;
-  askNotice = { q, msg: "생각하는 중..." };
-  askNoticeUntil = Infinity;
-  answerCard.style.display = "flex";
-  userMsgRow.style.display = "flex";
-  userQuestionPill.textContent = q;
-  roMainBubble.textContent = askNotice.msg;
-  subStatusText.textContent = "답을 기다리는 중";
-  feedbackBtns.style.display = "none";
-  askCancelBtn.style.display = "inline-block";
-  setMoodClass("focus");
-  let res = null;
-  try {
-    res = await apiPost("/api/ask", { question: q, preview_id: id });
-  } catch (err) {
-    res = null;
-  } finally {
-    askInput.disabled = false;
-    askSubmit.disabled = false;
-    askCancelBtn.style.display = "none";
-  }
-  askNoticeUntil = 0;
-  if (!res || !res.ok) {
-    // 답을 못 받았으면 질문을 입력창에 되돌려 다시 보낼 수 있게 한다
-    if (!askInput.value) askInput.value = q;
-    if (!res || res.reason === "needs_preview" || res.busy) {
-      askNotice = { q, msg: res ? res.output : "서버에 연결하지 못했어요. 질문은 입력창에 남겨 두었습니다." };
-      askNoticeUntil = Date.now() + 8000;
-    }
-  }
-  await refreshState();
+  document.getElementById("sendCancelBtn").focus();  // 기록·찾기는 눌러서 고르고, 기본 포커스는 안전한 '취소'
 }
 askForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -3778,7 +3195,6 @@ askForm.addEventListener("submit", async (e) => {
   resetInput();
   await submitInput(q);
 });
-document.getElementById("sendApproveBtn").addEventListener("click", sendAsk);
 document.getElementById("sendRecordBtn").addEventListener("click", async () => {
   if (!pendingSend) return;
   const q = pendingSend.q;
@@ -3790,21 +3206,7 @@ document.getElementById("sendCancelBtn").addEventListener("click", () => {
   hideSendCard();
   askInput.focus();
 });
-askCancelBtn.addEventListener("click", async () => {
-  askCancelBtn.disabled = true;
-  try { await apiPost("/api/ask/cancel", {}); } finally { askCancelBtn.disabled = false; }
-});
 
-document.getElementById("ruleApproveBtn").addEventListener("click", async () => {
-  if (!currentRuleId) return;
-  await apiPost("/api/learn", { action: "approve", id: currentRuleId });
-  await refreshState();
-});
-document.getElementById("ruleRejectBtn").addEventListener("click", async () => {
-  if (!currentRuleId) return;
-  await apiPost("/api/learn", { action: "reject", id: currentRuleId });
-  await refreshState();
-});
 /* 건너뛴 파일과 이유는 사용자가 닫을 때까지(다음 작업 전까지) 남겨 둔다 */
 function writeResultText(r) {
   const rows = (r.skipped || []).map(s => `· ${s.name}: ${s.reason}`);
@@ -3907,18 +3309,6 @@ orgUndoBtn.addEventListener("click", async () => {
   setOrgMsg(r.ok ? "아래 확인 카드에서 승인하면 되돌립니다." : (r.output || ""), r.ok ? 0 : 6000);
   await refreshState();
 });
-async function sendFeedback(accepted) {
-  let res = null;
-  try {
-    res = await apiPost("/api/feedback", { accepted });
-  } catch (err) {}
-  // 눌렀는지 알 수 있게 잠깐 결과를 남긴다(버튼은 한 번만 누를 수 있다)
-  fbDone.textContent = res && res.ok ? (accepted ? "수용 반영 ✓" : "거절 반영 ✓") : "반영 실패 — 다시 눌러 주세요";
-  fbDoneUntil = Date.now() + 2500;
-  await refreshState();
-}
-document.getElementById("fbYes").addEventListener("click", () => sendFeedback(true));
-document.getElementById("fbNo").addEventListener("click", () => sendFeedback(false));
 
 /* 마우스가 창 밖으로 나가면 시선을 가운데로 되돌린다 */
 document.documentElement.addEventListener("mouseleave", () => {
@@ -4600,14 +3990,12 @@ async function runRecall(q) {
     (r.followups || []).filter(f => f !== q).map(f => h("button", { class: "mini-btn", type: "button", text: f,
       onclick: () => runRecall(f) })),
     r.found ? h("button", { class: "mini-btn", type: "button", text: "메모로 저장", onclick: () =>
-      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null,
-    r.found ? null : h("button", { class: "mini-btn", type: "button", text: "엔진에 물어보기", onclick: () => previewAsk(q) }));
+      capture("text", "답변 메모", [r.headline, ...r.items.map(i => `${i.text} [${i.n}]`)].join("\n"), 0) }) : null);
   fill(recallCard,
     h("div", { class: "rc-q", text: q }), h("div", { class: "rc-head", text: r.headline }),
     items.length ? h("ul", { class: "rc-list" }, items) : null, ev, chips,
     r.note ? h("div", { class: "rc-foot", text: r.note }) : null);
   recallCard.style.display = "flex";
-  answerCard.style.display = "none";
   recallShown = true;
   hideSendCard();
 }
@@ -4645,7 +4033,6 @@ async function runFind(q, body) {
   switchTab("home");
   recallCard.style.display = "none";
   recOrgCard.style.display = "none";
-  answerCard.style.display = "none";
   recallShown = false;
   hideSendCard();
   findRes = null; findSel = 1; findMissing = false; findBusy = true; findAll = false;
@@ -4717,7 +4104,6 @@ function findMissingBlock(r) {
     box.append(h("div", { class: "block-sub", text: "고른 걸 기억하면 찾던 파일을 알려 줄 수 있어요. (지금은 꺼져 있어요)" }),
       h("div", { class: "fd-actions" }, h("button", { class: "mini-btn primary", type: "button", text: "기억하기 켜기", onclick: () => findSignals(true) })));
   }
-  box.append(h("div", { class: "fd-actions" }, h("button", { class: "mini-btn", type: "button", text: "엔진에 물어보기", onclick: () => previewAsk(r.query) })));
   return box;
 }
 function findConsentCard() {
@@ -4839,9 +4225,9 @@ function buildRows() {
     COMMANDS.filter(c => c.label.slice(1).startsWith(p.name)).forEach(c => rows.push({ sec: "명령", cmd: c, arg: p.arg }));
   } else if (!p.text) {
     COMMANDS.forEach(c => rows.push({ sec: "명령", cmd: c }));
-    recentList().forEach(q => rows.push({ sec: "최근에 물어본 것", ask: q }));
+    recentList().forEach(q => rows.push({ sec: "최근 입력", ask: q }));
   } else {
-    rows.push({ sec: "질문", ask: p.text });
+    rows.push({ sec: "입력", ask: p.text });
   }
   return rows;
 }
@@ -4854,7 +4240,7 @@ function renderPalette() {
     if (r.sec !== sec) { sec = r.sec; palList.append(h("div", { class: "pal-sec", role: "presentation", text: sec })); }
     const item = h("div", { class: "pal-item", role: "option", id: `palOpt${i}`, "aria-selected": i === palIndex ? "true" : "false",
       onmousedown: (e) => { e.preventDefault(); palIndex = i; runPalette(); } },
-      r.cmd ? [h("b", { text: r.cmd.label }), h("span", { text: r.cmd.desc })] : [h("b", { text: r.sec === "질문" ? "질문" : "다시" }), h("span", { text: r.ask })]);
+      r.cmd ? [h("b", { text: r.cmd.label }), h("span", { text: r.cmd.desc })] : [h("b", { text: r.sec === "입력" ? "입력" : "다시" }), h("span", { text: r.ask })]);
     palList.append(item);
   });
   palInput.setAttribute("aria-activedescendant", palRows.length ? `palOpt${palIndex}` : "");
@@ -5027,20 +4413,7 @@ def make_handler(runtime):
                 return
 
             parsed = urlparse(self.path)
-            if parsed.path == "/api/ask/preview":
-                self._send_json(200, runtime.preview_question(data.get("question", ""), engine=data.get("engine"),
-                                                              project=data.get("project")))
-            elif parsed.path == "/api/ask":
-                # 패널에서는 보내기 전 확인(preview)을 거친 계획만 보낸다
-                res = runtime.ask_question(data.get("question", ""), preview_id=str(data.get("preview_id") or ""))
-                self._send_json(200, res)
-            elif parsed.path == "/api/ask/cancel":
-                self._send_json(200, runtime.cancel_ask())
-            elif parsed.path == "/api/feedback":
-                self._send_json(200, runtime.record_feedback(bool(data.get("accepted"))))
-            elif parsed.path == "/api/learn":
-                self._send_json(200, runtime.decide_rule(data.get("action"), data.get("id")))
-            elif parsed.path == "/api/write_gate":
+            if parsed.path == "/api/write_gate":
                 if not isinstance(data.get("approve"), bool):  # "false" 같은 문자열을 승인으로 읽지 않는다
                     self._send_json(400, {"ok": False, "error": "approve는 true/false여야 합니다."})
                 else:
@@ -5086,8 +4459,6 @@ def make_handler(runtime):
                 self._send_json(200, runtime.set_prefs(data if isinstance(data, dict) else {}))
             elif parsed.path == "/api/focus":
                 self._send_json(200, runtime.set_focus(bool(data.get("on"))))
-            elif parsed.path == "/api/clear":
-                self._send_json(200, runtime.clear_notice())
             elif parsed.path == "/api/action":
                 act = data.get("action") or data.get("name", "")
                 self._send_json(200, runtime.trigger_action(act, data.get("duration", 4.0)))
@@ -5140,7 +4511,7 @@ def _is_pet_process(pid, key):
     return "ro" in args and "pet" in args  # `ro pet …` 또는 `python -m ro pet …`
 
 
-def stop_existing_pets(home=learn.HOME):
+def stop_existing_pets(home=config.HOME):
     """이미 실행 중인 이전 ro pet / ro-pet-host 프로세스를 모두 정리해 중복 실행(2마리 현상)을 막는다."""
     pid_file = Path(home).expanduser() / "pet.pid"
     my_pid = os.getpid()

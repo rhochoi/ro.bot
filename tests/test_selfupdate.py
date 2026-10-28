@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ro import route, selfupdate
+from ro import selfupdate
 
 
 class SelfUpdateTest(unittest.TestCase):
@@ -38,12 +38,15 @@ class SelfUpdateTest(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(selfupdate.update(), 1)
 
-    def test_user_routing_overrides(self):
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "routing.toml"
-            f.write_text("x")
-            with mock.patch.object(route, "USER_ROUTING", f):
-                self.assertEqual(route.routing_path(), f)
+    def test_doctor_checks_only_the_static_tool_list(self):
+        self.assertEqual(selfupdate.TOOLS, ("claude", "agy"))
+        for found, code in (({"claude": "/x/claude", "agy": "/x/agy"}, 0), ({"claude": "/x/claude"}, 0), ({}, 1)):
+            with mock.patch.object(selfupdate.shutil, "which", side_effect=lambda n, f=found: f.get(n)), \
+                    mock.patch("builtins.print") as out:
+                self.assertEqual(selfupdate.doctor(), code, found)
+            text = " ".join(str(c.args[0]) for c in out.call_args_list)
+            self.assertNotIn("라우팅표", text)
+            self.assertNotIn("codex", text)
 
 
 if __name__ == "__main__":

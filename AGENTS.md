@@ -2,7 +2,7 @@
 # rog.bot
 
 도구에 종속되지 않는 하나의 캐릭터. 아래 원칙과 공유 계층은 어떤 도구에서 불러도 같다.
-공유 계층: `identity/`(원칙), `~/.ro/ro-model.md`(승인된 기억, 사용자별), `routing.toml`(작업 유형→엔진·모델 기본값, 사용자별 사본 `~/.ro/routing.toml`).
+공유 계층: `identity/`(원칙).
 
 # rog.bot 작업 원칙
 

@@ -3,10 +3,8 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: bash scripts/delegate.sh [--dry-run] <codex|agy|auto> <brief-file>
-  codex: codex exec -s workspace-write - (brief on stdin)
+Usage: bash scripts/delegate.sh [--dry-run] agy <brief-file>
   agy:   agy -p -- BRIEF (default permissions)
-  auto:  repository routing.toml keywords; Claude selection is rejected
   --dry-run: validate and show command without invoking an engine or writing logs
   --help: show this help
 EOF
@@ -21,7 +19,7 @@ if [[ $# -ne 2 ]]; then usage >&2; exit 2; fi
 engine=$1
 brief=$2
 case "$engine" in
-    codex|agy|auto) ;;
+    agy) ;;
     *) usage >&2; exit 2 ;;
 esac
 if [[ ! -f "$brief" || ! -r "$brief" ]]; then
@@ -42,20 +40,10 @@ except (OSError, UnicodeError):
     sys.exit("Error: cannot read brief as UTF-8")
 if not text.strip() or redact(text) != text:
     sys.exit("Error: brief must be nonempty and contain no secrets; use masked text")
-engine = sys.argv[1]
-if engine == "auto":
-    from ro.route import choose, load_routing
-    engine = choose(text, routing=load_routing(Path("routing.toml")))[0]
-if engine not in ("codex", "agy"):
-    sys.exit("Error: auto selected Claude; specify codex or agy explicitly")
-print(engine)
+print(sys.argv[1])
 ' "$engine" "$brief")
 if "$dry_run"; then
-    if [[ "$engine" = codex ]]; then
-        printf 'codex exec -s workspace-write - < BRIEF (dry-run)\n'
-    else
-        printf 'agy -p -- BRIEF (dry-run; default permissions)\n'
-    fi
+    printf 'agy -p -- BRIEF (dry-run; default permissions)\n'
     exit 0
 fi
 if ! command -v "$engine" >/dev/null 2>&1; then
@@ -66,13 +54,8 @@ fi
 umask 077
 mkdir -p .ro-delegate
 log=$(mktemp ".ro-delegate/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX.log")
-if [[ "$engine" = codex ]]; then
-    command=(codex exec -s workspace-write -)
-    input=$brief
-else
-    command=(agy -p -- "$(< "$brief")")
-    input=/dev/null
-fi
+command=(agy -p -- "$(< "$brief")")
+input=/dev/null
 set +e
 "${command[@]}" < "$input" 2>&1 | python3 -c '
 import sys
