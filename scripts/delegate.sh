@@ -53,7 +53,10 @@ fi
 
 umask 077
 mkdir -p .ro-delegate
-log=$(mktemp ".ro-delegate/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX.log")
+# macOS(BSD) mktemp는 X 뒤에 접미사가 붙으면 X를 바꾸지 않으므로 X로 끝나게 만든 뒤 .log를 붙인다.
+log=$(mktemp ".ro-delegate/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+mv -n "$log" "$log.log"
+log="$log.log"
 command=(agy -p -- "$(< "$brief")")
 input=/dev/null
 set +e

@@ -76,6 +76,18 @@ sys.exit(int(os.environ.get("DELEGATE_EXIT", "0")))
         self.assertIn(str(log.relative_to(self.root)), result.stdout)
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
 
+    def test_repeated_runs_get_distinct_random_logs(self):
+        self.brief.write_text("브라우저 UI\n", encoding="utf-8")
+        for _ in range(2):  # 같은 초에 두 번 실행해도 두 번째가 실패하지 않아야 한다
+            result = self.run_delegate("agy", self.brief)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        logs = sorted((self.root / ".ro-delegate").iterdir())
+        self.assertEqual(len(logs), 2)
+        for log in logs:
+            self.assertEqual(log.suffix, ".log")
+            self.assertNotIn("XXXXXX", log.name)
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
     def test_agy_prompt_is_literal_and_permissions_stay_default(self):
         result = self.run_delegate("agy", self.brief)
         self.assertEqual(result.returncode, 0, result.stderr)
