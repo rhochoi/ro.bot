@@ -3,10 +3,12 @@
 audit: ~/.ro 데이터의 권한·비밀 유출·손상 줄 점검 (읽기 전용, --fix 시 권한만 조정)
 eval:  핵심 안전 불변식을 임시 디렉터리에서 재검증
 """
+import ast
 import contextlib
 import io
 import json
 import os
+import re
 import stat
 import tempfile
 from pathlib import Path
@@ -54,7 +56,38 @@ def audit(home=HOME, fix=False):
     return findings, fixed
 
 
+NETWORK_MODULES = {"socket", "ssl", "urllib.request", "http.client", "requests", "httpx", "aiohttp",
+                   "ftplib", "smtplib", "telnetlib", "xmlrpc.client", "websocket", "websockets"}
+NETWORK_COMMANDS = {"curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "rsync", "ftp", "telnet"}
+REMOTE_URL = re.compile(r"\b(?:https?|wss?|ftp)://(?!(?:127\.0\.0\.1|localhost)[:/])[\w.-]+")
+
+
+def network_offenders(root=Path(__file__).parent):
+    """ro 패키지에서 기기 밖으로 보낼 수 있는 코드: 네트워크 모듈 import, 네트워크 명령 실행, 원격 주소 문자열.
+    로컬 펫 서버(http.server, 127.0.0.1)와 주소 '해석'(urllib.parse)은 허용한다. 반환: ["파일:줄 이유"]."""
+    found = []
+    for path in sorted(Path(root).glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+            for name in names:
+                if any(name == m or name.startswith(m + ".") for m in NETWORK_MODULES):
+                    found.append(f"{path.name}:{node.lineno} import {name}")
+            if (isinstance(node, (ast.List, ast.Tuple)) and node.elts and isinstance(node.elts[0], ast.Constant)
+                    and node.elts[0].value in NETWORK_COMMANDS):
+                found.append(f"{path.name}:{node.lineno} 실행 {node.elts[0].value}")
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and REMOTE_URL.search(node.value):
+                found.append(f"{path.name}:{node.lineno} 원격 주소")
+    return found
+
+
 def _checks():
+    def no_network():
+        return not network_offenders()
+
     def redaction():
         d = log.redact({"api_key": "k", "s": "sk-abcdefghijklmnopqrstuv"})
         return d["api_key"] == log.MASK and "sk-" not in d["s"]
@@ -258,6 +291,7 @@ def _checks():
                 and rt.snapshot()["write_pending"].get("qkind") == "extracted"
 
     return [
+        ("기기 밖으로 보내는 코드 없음(네트워크 모듈·명령·원격 주소)", no_network),
         ("비밀 마스킹", redaction),
         ("Map은 비밀 파일 제외", map_skips_secrets),
         ("정리: 읽기 전용 스캔·격리 후 복원 가능", tidy_is_reversible),
