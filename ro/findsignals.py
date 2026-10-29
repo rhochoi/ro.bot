@@ -43,9 +43,10 @@ def _directory(home, create=False):
         fsutil.ensure_dir(directory)
         os.chmod(directory, 0o700)
         for name in ("events.json", "last.json", "signals.lock"):
-            path = directory / name
-            if path.exists():
-                os.chmod(path, 0o600)
+            try:  # 잠금 밖이라 확인과 chmod 사이에 다른 스레드가 last.json을 지울 수 있다
+                os.chmod(directory / name, 0o600)
+            except FileNotFoundError:
+                pass
     return directory
 
 
