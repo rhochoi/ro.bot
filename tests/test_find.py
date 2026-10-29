@@ -188,6 +188,41 @@ class FindTest(unittest.TestCase):
         self.assertTrue(all(Path(args[-1]) in safe for args in metadata))
         self.assertTrue(any("마지막 열람" in reason for row in result["results"] for reason in row["reasons"]))
 
+    def test_received_period_uses_date_added(self):
+        # 지난달(9월)에 받았지만 원본 수정일이 오래된 파일, 9월에 수정했지만 받은 건 아닌 파일
+        received = self.file("계약서_받음.pdf", "2024-03-01T12:00:00")
+        edited = self.file("계약서_수정.pdf", "2026-09-15T12:00:00")
+        self.assertEqual(find.parse_query("지난달에 받은 계약서", NOW)["date_field"], "added")
+        self.assertEqual(find.parse_query("지난달에 다운로드한 계약서", NOW)["terms"], ["계약서"])
+        self.assertNotIn("date_field", find.parse_query("받은 계약서", NOW))  # 기간 없으면 그대로
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(args)
+            if args[0] == "mdfind" and "kMDItemDateAdded" in args[-1]:
+                return SimpleNamespace(returncode=0, stdout=f"{received}\0{self.base / '범위밖.pdf'}\0")
+            return SimpleNamespace(returncode=0, stdout="")
+        result = find.search("지난달에 받은 계약서", roots=[self.root], now=NOW, runner=runner)
+        self.assertEqual(self.paths(result), [received])
+        self.assertIn("지난달 받음", result["results"][0]["reasons"])
+        self.assertNotIn("added_paths", result["parsed"])
+        # 받은 날로는 없을 때 수정일 기준 결과를 먼저 제안한다
+        missing = lambda args, **kw: SimpleNamespace(returncode=0, stdout="")
+        empty = find.search("지난달에 받은 계약서", roots=[self.root], now=NOW, runner=missing)
+        self.assertEqual(empty["results"], [])
+        self.assertEqual([g["message"] for g in empty["relaxed"]], ["받은 날 대신 수정일로 보면 1건", "기간 조건을 빼면 2건"])
+        self.assertEqual(self.paths({"results": empty["relaxed"][0]["results"]}), [edited])
+        self.assertIn("지난달 수정", empty["relaxed"][0]["results"][0]["reasons"])
+        query = next(args[-1] for args in calls if "kMDItemDateAdded" in args[-1])
+        since = datetime(2026, 9, 1).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        until = datetime(2026, 10, 1).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        self.assertEqual(query, f"kMDItemDateAdded >= $time.iso({since}) && kMDItemDateAdded < $time.iso({until})")
+        # Spotlight를 못 쓰면 수정일로 찾고 그 사실을 알린다
+        fallback = self.search("지난달에 받은 계약서")
+        self.assertEqual(self.paths(fallback), [edited])
+        self.assertIn("지난달 수정", fallback["results"][0]["reasons"])
+        self.assertIn("받은 날짜는 Spotlight가 있어야 확인할 수 있어 수정일로 찾았습니다", fallback["notes"])
+        self.assertEqual(self.paths(self.search("지난달 계약서")), [edited])  # 동사가 없으면 기존 동작
+
     def test_spotlight_failure_and_null_metadata(self):
         path = self.file("계약서.pdf")
         for error in (OSError("private"), subprocess.TimeoutExpired("private", 10)):
