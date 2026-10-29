@@ -165,7 +165,7 @@ def record_search(parsed, results, meta, home=HOME):
         # 실패한 새 검색을 이전 검색의 선택과 혼동하지 않게 먼저 무효화한다.
         (directory / "last.json").unlink(missing_ok=True)
         now = time.time()
-        roots = findeval._roots(meta.get("roots") if meta.get("roots") is not None else findeval.default_roots(home))
+        roots = findeval._roots(findeval.default_roots(home))
         roots = [r for r in roots if find._safe_path(r) is not None and r.is_dir()]
         shown, paths = [], []
         for rank, row in enumerate(results, 1):
@@ -192,9 +192,9 @@ def record_search(parsed, results, meta, home=HOME):
         return event["id"]
 
 
-def record_query(query, result, shown, elapsed_ms, roots, body, home=HOME):
+def record_query(query, result, shown, elapsed_ms, body, home=HOME):
     """CLI와 펫이 같은 방식으로 검색 직후 신호를 남긴다. 켜져 있지 않으면 None."""
-    meta = {"ms": elapsed_ms, "roots": roots, "n_results": len(result["results"]),
+    meta = {"ms": elapsed_ms, "n_results": len(result["results"]),
             "phrases": find.parse_query(query)["phrases"] if body is False else result["parsed"]["phrases"],
             "relaxed": bool(result["relaxed"]), "period_labels": period_labels(query)}
     return record_search(result["parsed"], shown, meta, home)

@@ -97,7 +97,7 @@ class FindSession:
         event_id = None
         if recording:
             try:
-                event_id = findsignals.record_query(question, result, shown, elapsed, None, body, self.home)
+                event_id = findsignals.record_query(question, result, shown, elapsed, body, self.home)
             except (ValueError, OSError):
                 event_id = None
         items = [self._item(i, row, roots) for i, row in enumerate(result["results"], 1)]
