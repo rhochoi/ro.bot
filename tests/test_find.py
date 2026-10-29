@@ -188,6 +188,28 @@ class FindTest(unittest.TestCase):
         self.assertTrue(all(Path(args[-1]) in safe for args in metadata))
         self.assertTrue(any("마지막 열람" in reason for row in result["results"] for reason in row["reasons"]))
 
+    def test_korean_spelling_of_english_words(self):
+        same = [("피치", "pitch"), ("프레젠테이션", "presentation"), ("버짓", "budget"), ("리포트", "report"),
+                ("마케팅", "marketing"), ("노트", "notes"), ("에이전트", "agent"), ("파이널", "final"),
+                ("가이드", "guide"), ("포트폴리오", "portfolio")]
+        for korean, english in same:
+            self.assertTrue(find._same_sound(korean, english), (korean, english))
+        # 알려진 한계: 자음 4개 이하는 한 자음 차이를 허용하지 않아(portfolio ↔ profile 오탐 방지) 놓친다
+        self.assertFalse(find._same_sound("스케줄", "schedule"))
+        # 실제 파일 이름에서 겹쳤던 단어들: 첫 모음·묵음 gh·짧은 열쇠의 오타 불허로 거른다
+        different = [("피치", "path"), ("피치", "office"), ("가이드", "code"), ("가이드", "eight"),
+                     ("포트폴리오", "profile"), ("랜딩", "finding"), ("덱", "deck"), ("피치", "pi")]
+        for korean, english in different:
+            self.assertFalse(find._same_sound(korean, english), (korean, english))
+        self.assertLess(find._syllable_gap("리서치", "research"), find._syllable_gap("리서치", "lease"))
+        pitch = self.file("Q3_Pitch_Deck.pdf")
+        self.file("path_notes.txt")
+        result = self.search("피치")
+        self.assertEqual(self.paths(result), [pitch])
+        self.assertIn("소리 '피치' ↔ 'pitch'", result["results"][0]["reasons"])
+        korean = self.file("피치_원본.pdf")
+        self.assertEqual(self.paths(self.search("피치"))[0], korean)  # 글자 그대로 맞는 이름이 먼저
+
     def test_received_period_uses_date_added(self):
         # 지난달(9월)에 받았지만 원본 수정일이 오래된 파일, 9월에 수정했지만 받은 건 아닌 파일
         received = self.file("계약서_받음.pdf", "2024-03-01T12:00:00")

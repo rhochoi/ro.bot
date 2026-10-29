@@ -203,6 +203,95 @@ def _one_edit(a, b):
     return errors + (j < len(b) or i < len(a)) <= 1
 
 
+# 한글로 소리 낸 영어 단어(피치↔pitch)를 잇는 거친 자음 열쇠. 모음·반모음은 버리고 자음만 비교한다.
+_INITIAL = "K K N T T L M B B S S _ S S S K T P H".split()  # 초성 19자, ㅇ(_)은 소리 없음
+_FINAL = {1: "K", 2: "K", 4: "N", 7: "T", 8: "L", 16: "M", 17: "P", 19: "T", 21: "NG"}  # 종성 ㄱ ㄲ ㄴ ㄷ ㄹ ㅁ ㅂ(업=up) ㅅ ㅇ
+_SPELLING = [("tion", "S N"), ("sion", "S N"), ("tch", "S"), ("sch", "S K"), ("dge", "S"), ("dg", "S"),
+             ("ch", "S"), ("sh", "S"), ("ph", "P"), ("th", "S"), ("ck", "K"), ("ng", "NG"), ("gn", "N"),
+             ("qu", "K"), ("gy", "S"), ("gh", ""), ("x", "K S")]
+_LETTER = dict(zip("bcdfghjklmnpqrstvz", "BKTPKHSKLMNPKLSTBS"))
+# 첫 모음이 어울리는지(피치 ≠ path, 가이드 ≠ code). 영어 철자 모음이 불규칙해 넉넉하게 잡는다.
+_VOWEL = {0: "aou", 1: "ae", 4: "aeiou", 5: "ea", 8: "oa", 9: "wa", 13: "ou", 14: "wo", 17: "u", 18: "", 19: "u", 20: "iey"}
+
+
+def _collapse(key):
+    return [k for i, k in enumerate(key) if not i or k != key[i - 1]]
+
+
+def _hangul_key(word):
+    key = []
+    for ch in word:
+        code = ord(ch) - 0xAC00
+        if not 0 <= code < 11172:
+            return None
+        initial, final = code // 588, code % 28
+        if _INITIAL[initial] != "_":
+            key.append(_INITIAL[initial])
+        if final:
+            key.append(_FINAL.get(final, "?"))
+    return _collapse(key)
+
+
+def _latin_key(word):
+    key, i = [], 0
+    while i < len(word):
+        rule = next(((src, out) for src, out in _SPELLING if word.startswith(src, i)), None)
+        if rule:
+            key.extend(rule[1].split())
+            i += len(rule[0])
+            continue
+        c = word[i]
+        nxt = word[i + 1] if i + 1 < len(word) else ""
+        if c in "cg" and nxt and nxt in "eiy":
+            key.append("S")  # 연음: page·agent·policy (target 같은 예외는 놓친다)
+        elif c == "r" and nxt not in "aeiouy":
+            pass  # 모음 앞이 아닌 r은 한국어 표기에서 소리가 없다(report → 리포트)
+        elif c == "h" and i:
+            pass
+        elif c in _LETTER:
+            key.append(_LETTER[c])
+        i += 1
+    return _collapse(key)
+
+
+def _first_vowel_ok(korean, english):
+    first = next((c for c in english if c in "aeiou"), "y")
+    for i, ch in enumerate(korean):
+        medial = (ord(ch) - 0xAC00) % 588 // 28
+        if medial == 18:  # ㅡ는 자음 뒤에 끼워 넣은 소리(스·트·프)라 건너뛴다
+            continue
+        allowed = _VOWEL.get(medial, "aeiouwy")
+        if medial in (0, 2) and korean[i + 1:i + 2] == "이":
+            allowed = "iyu"  # 파이널(final)·가이드(guide)의 '아이'는 영어 철자 i·y·ui
+        return first in allowed
+    return True
+
+
+def _syllable_gap(korean, english):
+    """한글 음절 수(끼워 넣은 ㅡ·이중모음의 '이' 제외)와 영어 모음 묶음 수의 차이. 작을수록 비슷한 소리."""
+    medials = [(ord(ch) - 0xAC00) % 588 // 28 for ch in korean]
+    spoken = sum(m != 18 and not (ch == "이" and i and medials[i - 1] in (0, 5))
+                 for i, (ch, m) in enumerate(zip(korean, medials)))
+    groups = len(re.findall(r"[aeiouy]+", english))
+    if groups > 1 and re.search(r"[^aeiouy]e$", english):
+        groups -= 1  # 묵음 e
+    return abs(spoken - groups)
+
+
+def _same_sound(korean, english):
+    if len(korean) < 2 or len(english) < 3 or not _first_vowel_ok(korean, english):
+        return False
+    ko, en = _hangul_key(korean), _latin_key(english)
+    if not ko or len(ko) < 2:
+        return False
+    if en[-1:] == ["S"] and english.endswith("s") and ko == en[:-1]:
+        en = en[:-1]  # 복수형 notes ↔ 노트
+    if ko == en:
+        return True
+    # 열쇠가 길면 자음 하나 차이까지 허용(철자와 소리가 조금 어긋나는 긴 단어)
+    return len(ko) >= 5 and len(ko) == len(en) and sum(a != b for a, b in zip(ko, en)) == 1
+
+
 def _match(term, name, stem, short_typo=False):
     if term in (name, stem):
         return 500, 0, f"이름 전체 '{term}' 일치"
@@ -219,12 +308,16 @@ def _match(term, name, stem, short_typo=False):
         return 100, 0, "오타 1자 허용"
     if len(term) >= 3 or (short_typo and len(term) >= 2):
         middle = len(term) // 2
-        if term[:middle] not in stem and term[middle:] not in stem:
-            return None
-        for size in (len(term), len(term) + 1, len(term) - 1):
-            for position in range(len(stem) - size + 1):
-                if _one_edit(term, stem[position:position + size]):
-                    return 100, position, "오타 1자 허용"
+        if term[:middle] in stem or term[middle:] in stem:
+            for size in (len(term), len(term) + 1, len(term) - 1):
+                for position in range(len(stem) - size + 1):
+                    if _one_edit(term, stem[position:position + size]):
+                        return 100, position, "오타 1자 허용"
+    if term.isalpha() and not term.isascii():  # 마지막 수단: 한글로 소리 낸 영어 단어
+        sounds = [(90 - 5 * min(_syllable_gap(term, found[0]), 4), found.start(), f"소리 '{term}' ↔ '{found[0]}'")
+                  for found in re.finditer(r"[a-z]+", stem) if _same_sound(term, found[0])]
+        if sounds:
+            return max(sounds, key=lambda m: (m[0], -m[1]))
     return None
 
 
