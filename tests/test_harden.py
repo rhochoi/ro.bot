@@ -36,6 +36,21 @@ class HardenTest(unittest.TestCase):
             log.append("t", "s", log_dir=Path(h) / ".ro" / "log")
             self.assertEqual(harden.audit(Path(h) / ".ro")[0], [])
 
+    def test_network_check_catches_each_way_out_and_allows_local(self):
+        with tempfile.TemporaryDirectory() as d:
+            ok = Path(d) / "ok.py"
+            ok.write_text("from urllib.parse import urlparse\nfrom http.server import HTTPServer\n"
+                          "URL = 'http://127.0.0.1:8765/'\nHOST = 'http://localhost:9/'\n# https://example.com 주석\n")
+            self.assertEqual(harden.network_offenders(d), [])
+            bad = {"import urllib.request": "import urllib.request",
+                   "from http import client": "import http.client",
+                   "import socket as s": "import socket",
+                   "subprocess.run(['curl', 'x'])": "실행 curl",
+                   "X = 'https://example.com/upload'": "원격 주소"}
+            for code, reason in bad.items():
+                (Path(d) / "bad.py").write_text(code + "\n")
+                self.assertTrue(any(reason in f for f in harden.network_offenders(d)), code)
+
     def test_eval_fails_when_protection_removed(self):
         # 회귀: 보호 장치를 꺼도 PASS가 나오던 공허한 검사
         def failed(name):
@@ -43,6 +58,8 @@ class HardenTest(unittest.TestCase):
 
         with mock.patch("ro.mapper.is_secret", return_value=False):
             self.assertTrue(failed("Map은 비밀 파일 제외"))
+        with mock.patch("ro.harden.network_offenders", return_value=["x.py:1 import socket"]):
+            self.assertTrue(failed("기기 밖으로 보내는 코드 없음(네트워크 모듈·명령·원격 주소)"))
 
 
 if __name__ == "__main__":
