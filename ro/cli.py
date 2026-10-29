@@ -190,7 +190,8 @@ def main(argv=None):
             raise SystemExit("검색 범위 또는 본문 색인을 확인하지 못했습니다.") from None
         elapsed = (time.perf_counter() - started) * 1000
         try:
-            recording = findsignals.enabled(config.HOME)
+            # --root로 범위를 직접 준 검색은 데모·검증용이라 실제 사용 신호에 섞지 않는다.
+            recording = not args.root and findsignals.enabled(config.HOME)
         except (OSError, ValueError):
             recording = False
         shown = []
