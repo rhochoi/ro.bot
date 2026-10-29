@@ -62,6 +62,14 @@ def test_off_creates_nothing_and_output_is_exact(env, capsys):
     assert not home.exists()
 
 
+def test_cli_explicit_root_is_not_recorded(env, capsys):
+    home, root = start(env)
+    rows(root)
+    cli.main(["find", "sample", "--no-spotlight", "--root", str(root)])
+    assert capsys.readouterr().out == "1. ~/Documents/sample-0.txt — 이름이 'sample'로 시작\n"
+    assert not (home / "find-signals/events.json").exists()
+
+
 def test_opt_in_features_and_permissions(env):
     home, root = start(env)
     result = rows(root)

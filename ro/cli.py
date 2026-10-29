@@ -190,7 +190,8 @@ def main(argv=None):
             raise SystemExit("검색 범위 또는 본문 색인을 확인하지 못했습니다.") from None
         elapsed = (time.perf_counter() - started) * 1000
         try:
-            recording = findsignals.enabled(config.HOME)
+            # --root로 범위를 직접 준 검색은 데모·검증용이라 실제 사용 신호에 섞지 않는다.
+            recording = not args.root and findsignals.enabled(config.HOME)
         except (OSError, ValueError):
             recording = False
         shown = []
@@ -211,7 +212,7 @@ def main(argv=None):
             show(relaxed["results"])
         if recording:
             try:
-                event_id = findsignals.record_query(args.query, result, shown, elapsed, args.root, args.body, config.HOME)
+                event_id = findsignals.record_query(args.query, result, shown, elapsed, args.body, config.HOME)
                 if event_id:
                     print("고르려면: ro find-pick 번호  /  못 찾음: ro find-pick none")
             except (ValueError, OSError):

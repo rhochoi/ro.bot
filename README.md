@@ -15,7 +15,6 @@ $ ro find "계약서 PDF"
 
 1. ~/Downloads/계약서_최종_v2.pdf — 이름이 '계약서'로 시작 · PDF
 2. ~/Documents/계약/용역계약서_서명본.pdf — 이름에 '계약서' 포함 · PDF
-고르려면: ro find-pick 번호  /  못 찾음: ro find-pick none
 ```
 
 *데모 폴더에서 실제로 실행한 출력입니다(경로만 줄였습니다).*
