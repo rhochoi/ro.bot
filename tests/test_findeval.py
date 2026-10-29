@@ -296,6 +296,21 @@ class FindEvalTest(unittest.TestCase):
         for column in ("MRR", "precision@2", "평균 정답 수"):
             self.assertIn(column, text)
 
+    def test_relative_period_is_evaluated_at_question_creation(self):
+        from types import SimpleNamespace
+        old = self.root / "계약_지난달.pdf"
+        old.touch()
+        stamp = datetime(2025, 5, 15, 12).timestamp()
+        os.utime(old, (stamp, stamp))
+        q = {**self.question(query="지난달 계약", answer=old), "created": "2025-06-10T12:00:00+09:00"}
+        empty = SimpleNamespace(returncode=0, stdout="")
+        with patch.object(find.subprocess, "run", return_value=empty):
+            dated = findeval.run(find.searcher([self.root], home=self.home), [q], roots=[self.root])
+            undated = findeval.run(lambda query: find.searcher([self.root], home=self.home)(query), [q], roots=[self.root])
+        self.assertEqual(dated["total"]["hit_rate"], 1)  # 등록한 2025-06 기준 지난달 = 5월
+        self.assertEqual(undated["total"]["hit_rate"], 0)  # 오늘 기준이면 빗나간다
+        self.assertIsNone(findeval._created({"created": "now"}))
+
     def test_metrics_full_rank_short_results_and_safety(self):
         q = self.question()
         q["answers"] += [str(self.secret), str(self.base / "outside.txt")]

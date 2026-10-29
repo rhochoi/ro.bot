@@ -627,9 +627,10 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
 
 
 def searcher(roots=None, home=findeval.HOME):
-    def find(query):
-        result = search(query, roots=roots, limit=20, home=home)
+    def find(query, now=None):
+        result = search(query, roots=roots, now=now, limit=20, home=home)
         find.errors += "Spotlight 사용 불가" in result["notes"]
         return [item["path"] for row in result["results"] for item in (row, *row.get("siblings", []))]
     find.errors = 0
+    find.dated = True  # findeval.run이 질문 등록 시각을 now로 넘긴다
     return find
