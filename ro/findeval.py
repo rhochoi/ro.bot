@@ -365,6 +365,13 @@ def _locate(path, moves):
     return path if os.path.exists(path) else None
 
 
+def _created(q):
+    try:
+        return datetime.fromisoformat(q["created"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def run(searcher, questions, k=5, roots=None, moves=None):
     """적중·정밀도는 상위 k, MRR·안전 위반은 전체 반환 목록을 기준으로 한다.
     moves(relocations 결과)를 주면 옮겨진 정답을 따라가고, 정답 파일이 하나도 없는 질문은 지표에서 빼고 따로 센다."""
@@ -386,7 +393,9 @@ def run(searcher, questions, k=5, roots=None, moves=None):
         started = time.perf_counter()
         errors = 0
         try:
-            results = list(searcher(q["query"]))
+            # "지난달" 같은 상대 기간은 오늘이 아니라 질문을 등록한 때 기준이다(달이 바뀌어도 결과가 흔들리지 않게).
+            results = list(searcher(q["query"], now=_created(q)) if getattr(searcher, "dated", False)
+                           else searcher(q["query"]))
         except Exception:
             results, errors = [], 1
         elapsed = (time.perf_counter() - started) * 1000
