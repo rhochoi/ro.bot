@@ -234,7 +234,8 @@ def main(argv=None):
                 for name, searcher in searchers.items():
                     if args.searcher in (name, "all") or args.searcher == "both" and name != "find":
                         print(name)
-                        print(findeval.report(findeval.run(searcher, questions, args.k, roots=roots)))
+                        print(findeval.report(findeval.run(searcher, questions, args.k, roots=roots,
+                                                           moves=findeval.relocations())))
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
         except OSError:

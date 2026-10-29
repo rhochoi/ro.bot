@@ -333,6 +333,28 @@ class FindEvalTest(unittest.TestCase):
         result = findeval.run(lambda q: [secret_alias], [self.question()], roots=[self.root])
         self.assertEqual(result["total"]["secret_results"], 1)
 
+    def test_run_follows_organize_moves_and_skips_missing_answers(self):
+        old = self.root / "Downloads-old.txt"
+        moved = self.file("정리됨/2026-01-01_Downloads-old.txt")
+        journal = self.home / "organize" / "journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(json.dumps({"op": "move", "batch": "b", "id": "1", "src": str(old), "dst": str(moved),
+                                       "ts": "2026-01-01T00:00:00+0900"}) + "\n", encoding="utf-8")
+        moves = findeval.relocations(self.home)
+        gone = self.question("ocr_phrase", answer=self.root / "gone.png", id="q0002")
+        questions = [self.question("ocr_phrase", answer=old), gone]
+        result = findeval.run(lambda q: [moved], questions, roots=[self.root], moves=moves)
+        ocr = result["by_type"]["ocr_phrase"]
+        self.assertEqual((ocr["questions"], ocr["hits"], ocr["missing"], ocr["dataless"]), (1, 1, 1, 0))
+        self.assertEqual(result["total"]["missing"], 1)
+        self.assertIn("정답 없음(제외)", findeval.report(result))
+        # moves 없이 호출하면 예전처럼 옛 경로를 그대로 채점한다.
+        self.assertEqual(findeval.run(lambda q: [moved], questions, roots=[self.root])["total"]["hits"], 0)
+        os.chflags(moved, stat.UF_NODUMP)
+        with patch.object(findeval, "DATALESS", stat.UF_NODUMP):
+            ocr = findeval.run(lambda q: [], questions[:1], roots=[self.root], moves=moves)["by_type"]["ocr_phrase"]
+        self.assertEqual(ocr["dataless"], 1)
+
     def test_empty_run_errors_and_invalid_k(self):
         self.assertEqual(findeval.run(lambda q: [], [], roots=[])["total"]["questions"], 0)
         with self.assertRaises(ValueError):

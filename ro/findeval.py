@@ -20,6 +20,7 @@ from .mapper import SKIP_DIRS, is_secret
 
 HOME = config.HOME
 ICLOUD_DRIVE = "~/Library/Mobile Documents/com~apple~CloudDocs"
+DATALESS = 0x40000000  # iCloud가 원본을 내려 둔 파일(st_flags SF_DATALESS)
 DEFAULT_ROOTS = ["~/Downloads", "~/Documents", "~/Desktop", ICLOUD_DRIVE]
 TYPES = ("name_part", "name_choseong", "name_typo", "kind_time", "ambiguous", "combo", "content_phrase", "content_words", "ocr_phrase", "real")
 CHOSEONG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
@@ -349,13 +350,38 @@ def scan_name(query, roots):
             if query in nfc(p.name).casefold() or query in choseong(p.name).casefold()]
 
 
-def run(searcher, questions, k=5, roots=None):
-    """적중·정밀도는 상위 k, MRR·안전 위반은 전체 반환 목록을 기준으로 한다."""
+def relocations(home=HOME):
+    """정리 기능이 옮긴 파일의 옛 경로 → 새 경로. 평가 정답이 이동 때문에 낡지 않게 따라간다."""
+    from .organize import read_journal
+    return {nfc(e["src"]): e["dst"] for e in read_journal(home)
+            if e.get("op") == "move" and e.get("src") and e.get("dst")}
+
+
+def _locate(path, moves):
+    seen = set()
+    while not os.path.lexists(path) and nfc(path) in moves and nfc(path) not in seen:
+        seen.add(nfc(path))
+        path = moves[nfc(path)]
+    return path if os.path.exists(path) else None
+
+
+def run(searcher, questions, k=5, roots=None, moves=None):
+    """적중·정밀도는 상위 k, MRR·안전 위반은 전체 반환 목록을 기준으로 한다.
+    moves(relocations 결과)를 주면 옮겨진 정답을 따라가고, 정답 파일이 하나도 없는 질문은 지표에서 빼고 따로 센다."""
     if k < 1:
         raise ValueError("k는 1 이상이어야 합니다.")
     roots = [Path(_path_key(r)) for r in (default_roots() if roots is None else roots)]
-    rows = []
+    rows, missing = [], defaultdict(int)
     for q in questions:
+        dataless = False
+        if moves is not None:
+            located = [p for p in (_locate(a, moves) for a in q["answers"]) if p]
+            if not located:
+                missing[q["type"]] += 1
+                continue
+            # 내려받지 않은 정답은 본문 색인이 불가능해 점수가 낮아도 검색 결함이 아닐 수 있다.
+            dataless = all(getattr(os.stat(p), "st_flags", 0) & DATALESS for p in located)
+            q = {**q, "answers": located}
         before = getattr(searcher, "errors", 0)
         started = time.perf_counter()
         errors = 0
@@ -380,11 +406,11 @@ def run(searcher, questions, k=5, roots=None):
                 correct += i < k
         rows.append({"id": q["id"], "type": q["type"], "hit": correct > 0, "zero": not results,
                      "mrr": reciprocal_rank, "precision_at_k": correct / min(k, len(results)) if results else 0,
-                     "mean_answers": len(answers),
+                     "mean_answers": len(answers), "dataless": dataless,
                      "latency_ms": elapsed, "errors": errors, "secret_results": secret_count,
                      "outside_results": outside_count, "unsafe_results": unsafe_count})
 
-    def metrics(items):
+    def metrics(items, kind=None):
         n = len(items)
         sums = {key: sum(row[key] for row in items) for key in
                 ("hit", "zero", "latency_ms", "errors", "secret_results", "outside_results", "unsafe_results",
@@ -393,9 +419,11 @@ def run(searcher, questions, k=5, roots=None):
                 "zero_rate": sums["zero"] / n if n else 0,
                 "mean_latency_ms": sums["latency_ms"] / n if n else 0,
                 **{key: sums[key] / n if n else 0 for key in ("mrr", "precision_at_k", "mean_answers")},
-                **{key: sums[key] for key in ("errors", "secret_results", "outside_results", "unsafe_results")}}
+                **{key: sums[key] for key in ("errors", "secret_results", "outside_results", "unsafe_results")},
+                "dataless": sum(row["dataless"] for row in items),
+                "missing": sum(missing.values()) if kind is None else missing[kind]}
 
-    return {"k": k, "by_type": {kind: metrics([r for r in rows if r["type"] == kind]) for kind in TYPES},
+    return {"k": k, "by_type": {kind: metrics([r for r in rows if r["type"] == kind], kind) for kind in TYPES},
             "total": metrics(rows)}
 
 
@@ -406,11 +434,11 @@ def display_path(path):
 
 
 def report(result):
-    lines = [f"유형 | 질문 수 | 적중@{result['k']} | MRR | precision@{result['k']} | 평균 정답 수 | 0건 비율 | 평균 ms | 비밀 | 범위 밖 | 위반 결과 | 오류",
-             "--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---:"]
+    lines = [f"유형 | 질문 수 | 적중@{result['k']} | MRR | precision@{result['k']} | 평균 정답 수 | 0건 비율 | 평균 ms | 비밀 | 범위 밖 | 위반 결과 | 오류 | 내려받기 필요 정답 | 정답 없음(제외)",
+             "--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---:"]
     for kind, m in [*result["by_type"].items(), ("합계", result["total"])]:
         lines.append(f"{kind} | {m['questions']} | {m['hit_rate']:.1%} | {m['mrr']:.3f} | "
                      f"{m['precision_at_k']:.1%} | {m['mean_answers']:.2f} | {m['zero_rate']:.1%} | "
                      f"{m['mean_latency_ms']:.2f} | {m['secret_results']} | {m['outside_results']} | "
-                     f"{m['unsafe_results']} | {m['errors']}")
+                     f"{m['unsafe_results']} | {m['errors']} | {m['dataless']} | {m['missing']}")
     return "\n".join(lines)

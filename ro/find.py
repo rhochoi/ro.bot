@@ -32,6 +32,8 @@ STOP = {"파일", "파일을", "파일은", "찾아줘", "찾아", "찾기", "�
         "있나", "있어", "있는", "그", "거", "것", "좀", "보여줘", "알려줘", "수정", "수정한",
         "수정된", "만든", "받은", "열어본", "작업하던", "문서", "자료", "관련", "에", "의"}
 BODY_STOP = STOP | {"사본", "그거", "그것", "이거", "저거", "했던", "전에", "예전에", "혹시"}
+DATALESS = findeval.DATALESS
+JAMO = re.compile('[\u3131-\u318e]')  # 호환 자모(초성 입력)
 LETTER_READINGS = dict(zip(
     "에이 비 씨 디 이 에프 지 에이치 아이 제이 케이 엘 엠 엔 오 피 큐 알 에스 티 유 브이 더블유 엑스 와이 제트".split(),
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
@@ -311,7 +313,32 @@ def _rank(candidates, parsed, period_label, drop=None, short_typo=False, group=T
     return _group(_score(candidates, parsed, period_label, drop, short_typo, strict, matcher), group)
 
 
-def _body_search(candidates, parsed, label, allowed, budget, home, matcher=_match):
+def _spotlight_text(phrase):
+    """Spotlight 질의 문자열 안에서 따옴표·역슬래시·와일드카드를 글자 그대로 쓰게 한다."""
+    return re.sub(r'([\\"*?])', r'\\\1', phrase)
+
+
+def _spotlight_body(paths, phrases, allowed, command):
+    """내려받지 않은 파일은 색인할 수 없어 Spotlight가 가진 본문(이미지 속 글자 포함)으로만 확인한다. 파일은 내려받지 않는다."""
+    found, names = {}, {str(p) for p in paths}
+    # Spotlight는 한글을 자모로 쪼개 비교해 초성 구절('ㄱㅅ')이 아무 한글 본문과 일치한다.
+    phrases = [phrase for phrase in phrases if not JAMO.search(phrase)]
+    for root in allowed:
+        if not any(p.is_relative_to(root) for p in paths):
+            continue
+        for phrase in phrases:
+            output = command(["mdfind", "-0", "-onlyin", str(root), f'kMDItemTextContent == "*{_spotlight_text(phrase)}*"cd'])
+            if output is None:
+                return found
+            for raw_path in output.split("\0"):
+                # 결과가 많을 수 있어 후보 경로인지 먼저 보고, 맞을 때만 경로 안전 검사를 한다.
+                safe = _safe_path(raw_path, allowed) if raw_path in names else None
+                if safe in paths:
+                    found.setdefault(safe, []).append(phrase)
+    return found
+
+
+def _body_search(candidates, parsed, label, allowed, budget, home, matcher=_match, spotlight=None):
     result = {"results": [], "notes": []}
     from .findindex import Index
     rows = _rank(candidates, parsed, label, group=False, strict=True, matcher=matcher)
@@ -350,6 +377,17 @@ def _body_search(candidates, parsed, label, allowed, budget, home, matcher=_matc
             row["flags"].append("본문 일부만 확인(잘림)")
         row["snippet"] = hit["snippet"]
         ranked.append(row)
+    hit_paths = {hit["path"] for hit in hits}
+    dataless = {p for p in paths if p not in hit_paths and getattr(candidates[p][0], "st_flags", 0) & DATALESS}
+    if spotlight and dataless:
+        found = _spotlight_body(dataless, phrases, allowed, spotlight)
+        result["notes"].append(f"내려받기 필요 {len(dataless)}개 중 {len(found)}개는 Spotlight 본문에서 일치(내려받지 않고 확인)")
+        for path, matched in found.items():
+            row = by_path[path]
+            row["score"] += sum(bool(set(matched).intersection(group)) for group in phrase_groups) * 10000
+            row["reasons"].extend(f"Spotlight 본문에서 '{phrase}' 발견" for phrase in matched)
+            row["flags"].append("Spotlight 본문 확인(내려받지 않음)")
+            ranked.append(row)
     result["results"] = sorted(ranked, key=lambda r: (-r["score"], str(r["path"])))
     if not ranked:
         incomplete = truncated or any(counts[k] for k in ('skipped_unsupported', 'needs_download', 'too_large', 'pending'))
@@ -488,7 +526,8 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
             result["notes"].append("이름에 없어 본문까지 확인: 이름 일치가 없거나 약해 자동 확대")
         started = time.monotonic()
         try:
-            found = _body_search(candidates, body_parsed, label, allowed, budget, home, matcher)
+            found = _body_search(candidates, body_parsed, label, allowed, budget, home, matcher,
+                                 command if spotlight else None)
             result["notes"].extend(found["notes"])
             if automatic and time.monotonic() - started >= budget:
                 result["notes"].append("본문 시간 예산 초과: 이름 검색 결과 유지")

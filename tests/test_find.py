@@ -463,6 +463,34 @@ class FindExpansionTest(unittest.TestCase):
         self.assertEqual(self.paths(result)[0], hit)
         self.assertIn('Spotlight 확인', result['results'][1]['reasons'])
 
+    def test_spotlight_body_for_dataless_files_only(self):
+        # 내려받지 않은 파일 대신 사용자 플래그(UF_NODUMP)로 흉내 낸다.
+        evicted = self.file('slide.pages')
+        os.chflags(evicted, stat.UF_NODUMP)
+        local = self.file('notes.pages')
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(args)
+            hit = args[0] == 'mdfind' and 'kMDItemTextContent' in args[-1]
+            return SimpleNamespace(returncode=0, stdout=f'{evicted}\0{local}\0' if hit else '')
+        with patch.object(find, 'DATALESS', stat.UF_NODUMP):
+            result = find.search('"은하*수?"', roots=[self.root], runner=runner, home=self.base / 'state')
+        self.assertEqual(self.paths(result), [evicted])
+        self.assertIn("Spotlight 본문에서 '은하*수?' 발견", result['results'][0]['reasons'])
+        self.assertIn('Spotlight 본문 확인(내려받지 않음)', result['results'][0]['flags'])
+        self.assertEqual([a[-1] for a in calls if 'kMDItemTextContent' in a[-1]],
+                         ['kMDItemTextContent == "*은하\\*수\\?*"cd'])
+        self.assertEqual(find._spotlight_text('a"b\\c'), 'a\\"b\\\\c')
+        calls.clear()
+        with patch.object(find, 'DATALESS', stat.UF_NODUMP):
+            result = find.search('"ㅇㅎ" "은하"', roots=[self.root], runner=runner, home=self.base / 'state')
+        self.assertEqual([a[-1] for a in calls if 'kMDItemTextContent' in a[-1]],
+                         ['kMDItemTextContent == "*은하*"cd'])
+        calls.clear()
+        result = find.search('"은하수"', roots=[self.root], runner=runner, spotlight=False, home=self.base / 'state')
+        self.assertEqual(self.paths(result), [])
+        self.assertFalse(calls)
+
     def test_failure_and_budget_keep_names_without_exception_text(self):
         from ro import findindex
         weak = self.file('외개어.txt')
