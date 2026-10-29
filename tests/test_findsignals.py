@@ -317,6 +317,20 @@ def test_concurrent_writes_are_not_lost(env):
     assert last["id"] == saved[-1]["id"]
 
 
+def test_file_removed_during_permission_fix_is_ignored(env, monkeypatch):
+    # CI에서 실제로 난 경쟁: 다른 스레드가 chmod 직전에 last.json을 지운다
+    home, _ = start(env)
+    record(home, [])
+    chmod = os.chmod
+    def racing(path, mode):
+        if Path(path).name == "last.json":
+            Path(path).unlink(missing_ok=True)
+        chmod(path, mode)
+    monkeypatch.setattr(signals.os, "chmod", racing)
+    assert record(home, []) is not None
+    assert len(events(home)) == 2
+
+
 def test_age_buckets_and_current_file_revalidation(env):
     home, root = start(env)
     result = rows(root, 4)
