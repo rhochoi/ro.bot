@@ -30,7 +30,8 @@ KINDS = {
 }
 STOP = {"파일", "파일을", "파일은", "찾아줘", "찾아", "찾기", "어디", "어딨지", "있더라",
         "있나", "있어", "있는", "그", "거", "것", "좀", "보여줘", "알려줘", "수정", "수정한",
-        "수정된", "만든", "받은", "열어본", "작업하던", "문서", "자료", "관련", "에", "의"}
+        "수정된", "만든", "받은", "열어본", "작업하던", "문서", "자료", "관련", "에", "의",
+        "받았던", "다운받은", "다운로드한", "다운로드받은", "내려받은"}
 BODY_STOP = STOP | {"사본", "그거", "그것", "이거", "저거", "했던", "전에", "예전에", "혹시"}
 DATALESS = findeval.DATALESS
 JAMO = re.compile('[\u3131-\u318e]')  # 호환 자모(초성 입력)
@@ -55,6 +56,8 @@ def _acronym(token):
 PERIOD = re.compile(
     r"(?<![\w-])(?:\d{4}-\d{2}|(?:작년|올해|\d{4}년)\s*\d{1,2}월|\d{1,2}월|"
     r"오늘|어제|그제|그저께|이번\s*주|지난\s*주|이번\s*달|지난\s*달|올해|작년)(?:에)?(?![\w-])")
+# "지난달에 받은"은 수정일이 아니라 이 Mac에 들어온 날(Spotlight kMDItemDateAdded)로 거른다.
+ADDED = re.compile(r"(?<!\S)(?:받은|받았던|다운받은|다운로드한|다운로드받은|내려받은)(?!\S)")
 VERSION = re.compile(r"(?:[_ -](?:final|최종)\d*|[_ -]\d+|\s*\(\d+\))$", re.I)
 
 
@@ -116,6 +119,8 @@ def parse_query(text, now=None):
         intervals = [_period(m[0], now) for m in periods]
         parsed["since"] = max(start for start, _ in intervals)
         parsed["until"] = min(end for _, end in intervals)
+        if ADDED.search(q):
+            parsed["date_field"] = "added"
         q = PERIOD.sub(" ", q)
     body_cue = bool(parsed["phrases"]) or bool(re.search(r"들어간|적힌|라고 쓴|(?<!\S)(?:내용[에이]?|포함|본문)(?!\S)", q))
     if body_cue:
@@ -239,6 +244,8 @@ def _family(path):
 def _score(candidates, parsed, period_label, drop=None, short_typo=False, strict=False, matcher=_match):
     since = datetime.fromisoformat(parsed["since"]).timestamp() if parsed["since"] else None
     until = (datetime.fromisoformat(parsed["until"]) + timedelta(days=1)).timestamp() if parsed["until"] else None
+    # search()가 Spotlight로 채운다. 없거나 drop="added"(완화)이면 수정일로 거른다
+    added = None if drop == "added" else parsed.get("added_paths")
     scored = []
     for path, (st, confirmed) in candidates.items():
         name = findeval.nfc(path.name).casefold()
@@ -250,7 +257,8 @@ def _score(candidates, parsed, period_label, drop=None, short_typo=False, strict
         kinds = [kind for kind in parsed["kinds"] if _kind(path, kind)]
         if drop != "kinds" and parsed["kinds"] and not kinds:
             continue
-        if drop != "period" and since is not None and not since <= st.st_mtime < until:
+        if drop != "period" and since is not None and (
+                path not in added if added is not None else not since <= st.st_mtime < until):
             continue
         matches, alias_reasons = [], []
         for term in parsed["terms"]:
@@ -277,7 +285,7 @@ def _score(candidates, parsed, period_label, drop=None, short_typo=False, strict
         reasons.extend(alias_reasons)
         reasons.extend(kinds)
         if since is not None and drop != "period":
-            reasons.append(f"{period_label} 수정")
+            reasons.append(f"{period_label} {'받음' if added is not None else '수정'}")
         if confirmed:
             reasons.append("Spotlight 확인")
         flags = ["내려받기 필요"] if getattr(st, "st_flags", 0) & 0x40000000 else []
@@ -424,6 +432,18 @@ def _run(args, runner):
     return None
 
 
+def _added_paths(parsed, allowed, command):
+    """기간 안에 이 Mac에 들어온 파일 경로 집합. Spotlight를 못 쓰면 None.
+    안전 검사는 하지 않는다: 이미 검사를 통과한 후보를 거르는 데만 쓴다."""
+    since = datetime.fromisoformat(parsed["since"]).astimezone()
+    until = (datetime.fromisoformat(parsed["until"]) + timedelta(days=1)).astimezone()
+    query = (f"kMDItemDateAdded >= $time.iso({since.strftime('%Y-%m-%dT%H:%M:%S%z')}) && "
+             f"kMDItemDateAdded < $time.iso({until.strftime('%Y-%m-%dT%H:%M:%S%z')})")
+    # 폴더별로 나눠 병렬 호출하면 Spotlight 안에서 서로 기다려 더 느리다(실측 730ms → 한 번 335ms).
+    output = command(["mdfind", "-0", *(arg for root in allowed for arg in ("-onlyin", str(root))), query])
+    return None if output is None else {Path(raw) for raw in output.split("\0") if raw}
+
+
 def _used_dates(output, count):
     if output is None:
         return None
@@ -510,6 +530,12 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
                     continue
                 if stat.S_ISREG(st.st_mode):
                     candidates[safe] = (st, True)
+    if parsed.get("date_field") == "added" and parsed["since"]:
+        added = _added_paths(parsed, allowed, command if spotlight else lambda args: None)
+        if added is None:
+            result["notes"].append("받은 날짜는 Spotlight가 있어야 확인할 수 있어 수정일로 찾았습니다")
+        else:
+            parsed["added_paths"] = added
     label = " · ".join(m[0].removesuffix("에") for m in PERIOD.finditer(findeval.nfc(text)))
     matcher = lru_cache(maxsize=None)(_match)
     scored = [] if use_body else _score(candidates, parsed, label, matcher=matcher)
@@ -555,6 +581,7 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
                 ranked.extend(remaining)
             else:
                 result["results"] = found["results"][:limit]
+                parsed.pop("added_paths", None)
                 return result
         except (OSError, ValueError, sqlite3.Error, subprocess.TimeoutExpired):
             if not automatic:
@@ -586,13 +613,16 @@ def search(text, roots=None, now=None, limit=10, spotlight=True, runner=None,
                if not any(word in findeval.nfc(str(p)).casefold() for word in parsed["exclude"])):
             result["notes"].append("내려받기 필요 파일 존재")
         for drop, message in (("kinds", "·".join(parsed["kinds"]) + " 조건을 빼면"),
+                              ("added", "받은 날 대신 수정일로 보면"),
                               ("period", "기간 조건을 빼면"), ("typo", "짧은 검색어도 오타 1자 허용 시")):
-            if drop == "kinds" and not parsed["kinds"] or drop == "period" and not parsed["since"]:
+            if (drop == "kinds" and not parsed["kinds"] or drop == "period" and not parsed["since"]
+                    or drop == "added" and "added_paths" not in parsed):
                 continue
             relaxed = _rank(candidates, parsed, label, drop, short_typo=drop == "typo", matcher=matcher)
             if relaxed:
                 result["relaxed"].append({"condition": drop, "message": f"{message} {len(relaxed)}건",
                                           "results": relaxed[:limit]})
+    parsed.pop("added_paths", None)  # 내부용 경로 집합은 호출자에게 넘기지 않는다
     return result
 
 
