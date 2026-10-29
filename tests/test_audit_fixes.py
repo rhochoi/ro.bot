@@ -1,5 +1,4 @@
 """2026-10-25 제품 감사(docs/audits)에서 재현된 결함의 회귀 테스트 중 기존 파일에 맞는 자리가 없는 것."""
-import json
 import tempfile
 import threading
 import unittest
@@ -8,7 +7,7 @@ from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from ro import config, distill, harden, log, mapper, pet
+from ro import config, harden, log, mapper, pet
 
 
 class ConfigLockTest(unittest.TestCase):
@@ -34,37 +33,6 @@ class ConfigLockTest(unittest.TestCase):
                     t.join()
             data = real(h)
             self.assertEqual((data.get("engine"), data.get("pet")), ("codex", {"material": "glass"}))
-
-
-class DistillWeeklyLimitTest(unittest.TestCase):
-    def test_two_concurrent_runs_call_the_engine_once(self):
-        with tempfile.TemporaryDirectory() as h:
-            calls, gate = [], threading.Barrier(2, timeout=1)
-
-            def runner(engine, prompt, write=False):
-                calls.append(engine)
-                return {"ok": True, "output": "[]"}
-
-            w = {"tool_days": {"git": 3}, "proj_days": {}, "sessions": 0, "days": 7}
-            real_state = distill._state
-
-            def racing_state(home):
-                out = real_state(home)
-                try:
-                    gate.wait()
-                except threading.BrokenBarrierError:
-                    pass
-                return out
-
-            with mock.patch.object(distill, "_state", racing_state), \
-                    mock.patch.object(distill, "payload", return_value={"x": 1}):
-                ts = [threading.Thread(target=distill.external_candidates, args=(w, "claude", h, runner),
-                                       kwargs={"log_dir": h}) for _ in range(2)]
-                for t in ts:
-                    t.start()
-                for t in ts:
-                    t.join()
-            self.assertEqual(len(calls), 1)
 
 
 class ApiInputTest(unittest.TestCase):

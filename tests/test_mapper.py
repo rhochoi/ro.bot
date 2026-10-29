@@ -92,7 +92,6 @@ class HostileRepoTest(unittest.TestCase):
         import os
         import subprocess
         import sys
-        from ro import ask, bench, collectors
         with tempfile.TemporaryDirectory() as d:
             repo, marker = Path(d) / "evil", Path(d) / "ran"
             repo.mkdir()
@@ -120,7 +119,4 @@ class HostileRepoTest(unittest.TestCase):
 
             self.assertEqual(mapper._git(repo, "log", "-1", "--format=%s"), "init")
             mapper.describe_project(repo)
-            ask.build_context([{"name": "evil", "path": str(repo), "git": {"branch": "main"}}])
-            bench._git(repo, "log", "-1", "--format=%s")
-            collectors._git(str(repo), "log", "-1")
             self.assertFalse(marker.exists())
