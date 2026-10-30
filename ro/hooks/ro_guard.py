@@ -70,10 +70,25 @@ def _tokens(segment):
         return segment.split()
 
 
+GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+
+
+def _git_sub(args):
+    """git 전역 옵션(-C 폴더 등)을 건너뛴 (하위 명령, 나머지 인자)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in GIT_OPTS_WITH_VALUE else 1
+    return (args[i], args[i + 1:]) if i < len(args) else ("", [])
+
+
 def _scan(command, depth=0):
-    """위험 사유 문자열을 돌려주거나 None."""
+    """위험 사유 문자열을 돌려주거나 None. 차단 목록 방식이라 모든 우회를 막지는 못한다(보조 장치)."""
     if depth > 3:
         return "중첩이 깊어 판단할 수 없는 명령"
+    for inner in re.findall(r"\$\(([^()]*)\)|`([^`]*)`", command):   # $(…)·`…` 안의 명령도 본다
+        found = _scan(inner[0] or inner[1], depth + 1)
+        if found:
+            return found
     for seg in re.split(r"&&|\|\||[;\n|]", command):
         toks = _tokens(seg.strip())
         while toks and (toks[0] in WRAPPERS or re.match(r"^\w+=", toks[0])):
@@ -93,11 +108,14 @@ def _scan(command, depth=0):
         targets = [a for a in args if not a.startswith("-")]
         if head == "rm":
             recursive = any(re.fullmatch(r"-[a-zA-Z]*[rR][a-zA-Z]*", f) or f == "--recursive" for f in flags)
-            if recursive and not all(_safe_target(t) for t in targets):
+            if recursive and not (targets and all(_safe_target(t) for t in targets)):  # 대상 없음 = xargs 등이 채움
                 return "재귀 삭제(rm -r)가 임시·재생성 디렉터리 밖을 가리킵니다"
         elif head == "git":
-            sub = next((a for a in args if not a.startswith("-")), "")
-            if sub == "push" and any(f in ("-f", "--force") or f.startswith("--force=") for f in flags):
+            sub, rest = _git_sub(args)
+            flags = [a for a in rest if a.startswith("-")]
+            targets = [a for a in rest if not a.startswith("-")]
+            if sub == "push" and (any(f in ("-f", "--force") or f.startswith("--force=") for f in flags)
+                                  or any(t.startswith("+") for t in targets)):
                 return "git push --force는 원격 이력을 덮어씁니다(--force-with-lease는 통과)"
             if sub == "reset" and "--hard" in flags:
                 return "git reset --hard는 커밋하지 않은 변경을 지웁니다"
@@ -105,6 +123,16 @@ def _scan(command, depth=0):
                 return "git clean -f는 추적하지 않는 파일을 지웁니다"
             if sub in ("checkout", "restore") and targets[-1:] == ["."]:
                 return "작업 트리 전체를 되돌립니다"
+        elif head == "find":
+            starts = []
+            for a in args:
+                if a.startswith("-") or a in ("(", "!"):
+                    break
+                starts.append(a)
+            deletes = "-delete" in args or any(a in ("-exec", "-execdir") and i + 1 < len(args)
+                                               and os.path.basename(args[i + 1]) == "rm" for i, a in enumerate(args))
+            if deletes and not (starts and all(_safe_target(s) for s in starts)):
+                return "find로 찾은 파일을 지웁니다(-delete·-exec rm)"
         elif head in ("mkfs", "diskutil", "dd", "shred"):
             if head != "dd" or any(a.startswith("of=/dev/") for a in args):
                 return f"{head}는 디스크·장치를 직접 바꿉니다"
@@ -130,8 +158,8 @@ def main(argv):
         out = (check_secrets if mode == "secrets" else check_destructive)(tool, inp)
         if out:
             print(json.dumps(out, ensure_ascii=False))
-    except Exception:       # 훅 오류가 모든 작업을 막지 않게 한다
-        pass
+    except Exception as e:  # 훅 오류가 모든 작업을 막지 않게 한다. 대신 조용히 넘기지 않고 알린다
+        print(f"ro_guard: 검사하지 못했습니다({type(e).__name__}) — 이 호출은 보호 없이 진행됩니다", file=sys.stderr)
     return 0
 
 

@@ -4477,6 +4477,7 @@ function connChip(on, text, title) {
   return h("span", { class: on ? "conn-chip on" : "conn-chip", title, text: `${on ? "✓" : "–"} ${text}` });
 }
 const RULES_TEXT = { source: "규칙 원본", linked: "규칙 연결", other: "따로 쓰는 규칙", missing: "규칙 없음" };
+const HOOK_TEXT = { on: "안전 훅", missing: "안전 훅 없음", stale: "안전 훅 갱신 필요", broken: "안전 훅 작동 안 함" };
 /* 연결할 항목이 있으면 설정 탭과 연결 버튼에 숫자를 단다(알림은 띄우지 않는다) */
 function setConnBadge(n) {
   for (const el of [document.getElementById("tabBtnSettings"), document.getElementById("connOpenBtn")]) {
@@ -4518,7 +4519,7 @@ function connPlanBox(p) {
     h("div", { class: "conn-name", text: `연결할 항목 ${p.items.length}개 · 아직 아무것도 바뀌지 않았어요` }),
     h("ul", {}, p.items.map(it => h("li", { title: it.path, text: it.desc }))),
     p.notes.map(n => h("div", { class: "conn-note", text: n })),
-    h("div", { class: "conn-note", text: "고치기 전 파일은 ~/.ro/connect에 백업하고, 한 번에 되돌릴 수 있어요." }),
+    h("div", { class: "conn-note", text: "되돌리기는 ro가 넣은 줄·훅·링크만 빼요. 그 뒤에 바뀐 설정은 그대로 둬요." }),
     h("div", { class: "chip-row" }, go));
 }
 async function undoConnect() {
@@ -4554,7 +4555,8 @@ async function openConn(text) {
           connChip(e.app, e.app ? "앱" : "앱 없음", e.app || "응용 프로그램 폴더에 없음"),
           connChip(e.cli, `CLI ${e.cli_name}`, e.cli ? "터미널에서 실행 가능" : "PATH에 없음"),
           connChip(e.rules, RULES_TEXT[e.rules_state] || "규칙", e.rules_path),
-          e.hook === null ? null : connChip(e.hook, "안전 훅", e.hook ? "ro_guard 연결됨" : "README의 안전 훅 안내로 연결"))),
+          e.hook === null ? null : connChip(e.hook, HOOK_TEXT[e.hook_state] || "안전 훅",
+            "위험한 명령 문자열을 찾아 승인을 묻는 보조 장치(모든 우회를 막지는 못함)"))),
       btn);
   }));
   const first = connList.querySelector(".conn-plan button") || connList.querySelector("button:not([disabled])");

@@ -31,6 +31,14 @@ jobs:
         run: |
           python -m pip install pytest
           python -m pytest -q
+      - name: wheel contents
+        # 설치본(uv tool·pipx)에도 훅·Swift 호스트가 들어가는지 본다. 체크아웃에서만 되는 경로 가정을 막는다
+        run: |
+          python -m pip install build
+          python -m build --wheel -o dist .
+          for f in ro/hooks/ro_guard.py ro/pet_mac.swift ro/ocr_mac.swift; do
+            unzip -l dist/*.whl | grep -q " $f$" || { echo "wheel에 $f 없음"; exit 1; }
+          done
       - name: tag and release
         if: github.event_name == 'push'
         env:

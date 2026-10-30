@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,8 +38,12 @@ class EnginesTest(unittest.TestCase):
         (self.apps / "Claude.app").mkdir()
         (self.apps / "Antigravity IDE.app").mkdir()
         (self.home / ".claude" / "CLAUDE.md").write_text("@~/.codex/AGENTS.md")
-        (self.home / ".claude" / "settings.json").write_text(
-            '{"a": "python3 ~/.ro/hooks/ro_guard.py secrets", "b": "python3 ~/.ro/hooks/ro_guard.py destructive"}')
+        (self.home / ".ro" / "hooks").mkdir(parents=True)
+        shutil.copyfile(engines.GUARD_SRC, self.home / ".ro" / "hooks" / "ro_guard.py")
+        settings = self.home / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [
+            {"matcher": matcher, "hooks": [{"type": "command", "command": engines._guard_cmd(mode)}]}
+            for mode, matcher in engines.GUARD_MODES]}}))
         st = {e["id"]: e for e in engines.status(which=lambda c: "/bin/x" if c == "codex" else None,
                                                   app_dirs=(str(self.apps),))}
         self.assertEqual([e["id"] for e in engines.status(which=lambda c: None, app_dirs=())], ["claude", "codex", "agy"])
@@ -47,6 +52,12 @@ class EnginesTest(unittest.TestCase):
         self.assertEqual((st["codex"]["app"], st["codex"]["cli"], st["codex"]["rules"], st["codex"]["hook"]),
                          (None, True, False, None))  # 훅은 Claude에만 있다
         self.assertEqual(st["agy"]["app"], "Antigravity IDE.app")
+        self.assertEqual(st["claude"]["hook_state"], "on")          # 실제로 실행해 승인 요구가 나온다
+        # 문자열만 있고 훅 항목이 아니면 연결되지 않은 것이다(2026-10-30 재감사 재현)
+        settings.write_text(json.dumps({"env": {"X": "echo ro_guard.py secrets ro_guard.py destructive"}}))
+        self.assertEqual(engines.hook_state(settings), "missing")
+        (self.home / ".claude" / "CLAUDE.md").write_text("참고: ~/.codex/AGENTS.md는 쓰지 않음")
+        self.assertEqual(engines.rules_state("claude"), "other")
 
     def test_handoff_app_copies_text_then_opens(self):
         (self.apps / "Claude.app").mkdir()
@@ -182,6 +193,89 @@ class ConnectTest(unittest.TestCase):
         self.assertEqual(agy.resolve(), self.src.resolve())
         engines.connect_undo()
         self.assertEqual(os.readlink(agy), str(self.home / "nowhere.md"))
+
+
+class ConnectAuditFixTest(ConnectTest):
+    """2026-10-30 재감사(AI Council)에서 나온 결함들의 회귀 테스트."""
+
+    def test_settings_json_is_never_copied_and_undo_removes_only_ro_hooks(self):
+        (self.home / ".claude").mkdir()
+        settings = self.home / ".claude" / "settings.json"
+        settings.write_text(json.dumps({"env": {"TOKEN": "x"}}))
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        copies = [p for p in (self.home / ".ro" / "connect").rglob("*") if p.is_file() and p.name != "history.json"]
+        self.assertFalse([p for p in copies if "TOKEN" in p.read_text(errors="replace")])  # 원칙 2: 설정 사본 없음
+        data = json.loads(settings.read_text())
+        data["model"] = "opus"                                   # Claude Code가 그 뒤에 설정을 다시 씀
+        settings.write_text(json.dumps(data))
+        r = engines.connect_undo()
+        self.assertEqual(r["kept"], [])
+        self.assertEqual(json.loads(settings.read_text()), {"env": {"TOKEN": "x"}, "model": "opus"})
+
+    def test_stale_hook_copy_is_offered_for_update_and_undo_restores_it(self):
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        dst = self.home / ".ro" / "hooks" / "ro_guard.py"
+        dst.write_text("# 예전 훅\n")
+        st = {e["id"]: e for e in engines.status(**self.kw)}
+        self.assertEqual(st["claude"]["hook_state"], "stale")
+        p = self.plan()
+        self.assertEqual([i["kind"] for i in p["items"]], ["hook_update"])
+        engines.connect_apply(p["id"], **self.kw)
+        self.assertEqual(dst.read_bytes(), engines.GUARD_SRC.read_bytes())
+        self.assertEqual(engines.connect_undo()["reverted"], 1)
+        self.assertEqual(dst.read_text(), "# 예전 훅\n")
+
+    def test_history_accumulates_so_each_connect_can_be_undone(self):
+        agy_only = {"which": lambda c: "/bin/agy" if c == "agy" else None, "app_dirs": ()}
+        self.assertTrue(engines.connect_apply(engines.connect_plan(**agy_only)["id"], **agy_only)["ok"])
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        self.assertEqual(len(engines._history()), 2)
+        engines.connect_undo()
+        self.assertFalse((self.home / ".claude" / "CLAUDE.md").exists())
+        self.assertTrue((self.home / ".gemini" / "AGENTS.md").is_symlink())   # 첫 연결은 아직 남아 있다
+        engines.connect_undo()
+        self.assertFalse((self.home / ".gemini" / "AGENTS.md").exists())
+        self.assertFalse(engines.connect_undo()["ok"])
+
+    def test_symlinked_rules_file_keeps_its_link(self):
+        dot = self.home / "dotfiles"
+        dot.mkdir()
+        (dot / "CLAUDE.md").write_text("내 규칙\n")
+        (self.home / ".claude").mkdir()
+        link = self.home / ".claude" / "CLAUDE.md"
+        link.symlink_to(dot / "CLAUDE.md")
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((dot / "CLAUDE.md").read_text(), "내 규칙\n\n@~/.codex/AGENTS.md\n")
+        engines.connect_undo()
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((dot / "CLAUDE.md").read_text(), "내 규칙\n")
+
+    def test_legacy_last_json_record_can_still_be_undone(self):
+        (self.home / ".gemini").mkdir()
+        link = self.home / ".gemini" / "AGENTS.md"
+        link.symlink_to(self.src)
+        (self.home / ".ro" / "connect").mkdir(parents=True)
+        (self.home / ".ro" / "connect" / "last.json").write_text(json.dumps(
+            {"stamp": "s", "entries": [{"path": str(link), "backup": None, "after": "link:" + str(self.src)}]}))
+        self.assertEqual(engines.connect_undo(), {"ok": True, "reverted": 1, "kept": []})
+        self.assertFalse(link.exists() or link.is_symlink())
+        self.assertFalse((self.home / ".ro" / "connect" / "last.json").exists())
+
+    def test_hook_that_does_not_block_is_reported_broken(self):
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        with mock.patch.object(engines, "_guard_selftest", return_value=False):
+            st = {e["id"]: e for e in engines.status(**self.kw)}
+            self.assertEqual((st["claude"]["hook"], st["claude"]["hook_state"]), (False, "broken"))
+            self.assertIn("막지 않았어요", " ".join(self.plan()["notes"]))
+
+
+class PackagingTest(unittest.TestCase):
+    def test_guard_script_ships_inside_the_package(self):
+        # wheel은 ro/ 패키지만 담는다. 훅이 그 밖(scripts/)에 있으면 설치본에서 연결이 안 됐다(2026-10-30 재감사)
+        import ro
+        self.assertTrue(engines.GUARD_SRC.is_file())
+        self.assertTrue(engines.GUARD_SRC.is_relative_to(Path(ro.__file__).resolve().parent))
 
 
 class EnginesRouteTest(unittest.TestCase):

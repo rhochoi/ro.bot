@@ -96,14 +96,15 @@ main() {
   esac
 
   say "설치 완료: $(ro --version 2>/dev/null || echo ro)"
-  ro doctor || warn "엔진이 하나도 없습니다. claude·codex·agy 중 쓰는 것을 설치하세요."
+  ro doctor || warn "AI 도구가 하나도 없습니다. claude·agy 중 쓰는 것을 설치하세요."
   launch_pet
   cat <<'EOF'
 
 다음 단계:
   ro map                         내 프로젝트 지도 만들기(~/.ro에만 저장)
   ro organize scan               다운로드 정리안: 분류 이동·치울 후보·보관(승인한 것만, undo 가능)
-  ro ask "이 프로젝트 구조 설명해줘"
+  ro find "지난달에 받은 계약서 PDF"   내 파일 찾기(읽기만 함)
+  ro connect                     AI 도구에 공통 규칙·안전 훅 연결 계획 보기(--yes로 적용, undo로 되돌림)
   ro pet                         펫 다시 띄우기(끄기: 메뉴바 아이콘 → 종료)
   ro update                      나중에 업데이트
 EOF

@@ -59,14 +59,20 @@ def audit(home=HOME, fix=False):
 NETWORK_MODULES = {"socket", "ssl", "urllib.request", "http.client", "requests", "httpx", "aiohttp",
                    "ftplib", "smtplib", "telnetlib", "xmlrpc.client", "websocket", "websockets"}
 NETWORK_COMMANDS = {"curl", "wget", "nc", "ncat", "ssh", "scp", "sftp", "rsync", "ftp", "telnet"}
+SWIFT_NETWORK = re.compile(r"\b(URLSession|NWConnection|NWListener|CFStream|NSURLConnection)")
 REMOTE_URL = re.compile(r"\b(?:https?|wss?|ftp)://(?!(?:127\.0\.0\.1|localhost)[:/])[\w.-]+")
 
 
 def network_offenders(root=Path(__file__).parent):
-    """ro 패키지에서 기기 밖으로 보낼 수 있는 코드: 네트워크 모듈 import, 네트워크 명령 실행, 원격 주소 문자열.
+    """ro 패키지(하위 폴더 포함)에서 기기 밖으로 보낼 수 있는 코드: 네트워크 모듈 import, 네트워크 명령 실행, 원격 주소 문자열.
+    Swift 호스트는 네트워크 API 이름과 원격 주소를 본다.
     로컬 펫 서버(http.server, 127.0.0.1)와 주소 '해석'(urllib.parse)은 허용한다. 반환: ["파일:줄 이유"]."""
     found = []
-    for path in sorted(Path(root).glob("*.py")):
+    for path in sorted(Path(root).rglob("*.swift")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if SWIFT_NETWORK.search(line) or REMOTE_URL.search(line):
+                found.append(f"{path.name}:{n} 네트워크")
+    for path in sorted(Path(root).rglob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             names = []
             if isinstance(node, ast.Import):
