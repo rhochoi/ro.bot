@@ -26,6 +26,10 @@ SAFE_ROOTS = ("/tmp/", "/private/tmp/", "/var/folders/")
 SAFE_NAMES = {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "dist", "build"}
 WRAPPERS = {"sudo", "env", "command", "time", "nice", "nohup", "xargs", "exec"}
 SHELLS = {"bash", "sh", "zsh"}
+# 한 줄 코드 실행(-c·-e)에서 파일을 지우는 호출. 모든 표현을 잡지는 못한다(보조 장치)
+INTERPRETERS = {"python", "python3", "perl", "ruby", "node", "deno", "bun", "osascript"}
+CODE_DELETE = re.compile(r"\b(rmtree|os\.remove|os\.unlink|os\.rmdir|\.unlink\(|\.rmdir\(|unlinkSync|rmSync|rmdirSync"
+                         r"|fs\.rm\(|FileUtils\.rm|File\.delete|\bunlink\b|rm_rf|remove_dir_all|delete\s+(?:file|folder))")
 
 
 def decide(kind, reason):
@@ -89,6 +93,12 @@ def _scan(command, depth=0):
         found = _scan(inner[0] or inner[1], depth + 1)
         if found:
             return found
+    toks = _tokens(command)   # 한 줄 코드는 ; 로 자르기 전에 본다(따옴표 안의 ; 때문에)
+    for i, t in enumerate(toks):
+        if re.sub(r"[\d.]+$", "", os.path.basename(t)) in INTERPRETERS:   # python3.13 → python3
+            code = next((toks[j + 1] for j in range(i + 1, min(i + 4, len(toks) - 1)) if toks[j] in ("-c", "-e", "--eval")), "")
+            if CODE_DELETE.search(code):
+                return f"{os.path.basename(t)} 한 줄 코드가 파일을 지웁니다"
     for seg in re.split(r"&&|\|\||[;\n|]", command):
         toks = _tokens(seg.strip())
         while toks and (toks[0] in WRAPPERS or re.match(r"^\w+=", toks[0])):

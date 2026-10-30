@@ -331,6 +331,9 @@ def connect_apply(plan_id, which=shutil.which, app_dirs=APP_DIRS):
             hist = _history()
             hist.append({"stamp": stamp, "entries": entries})
             fsutil.atomic_write(_x(CONNECT_DIR) / "history.json", json.dumps(hist, ensure_ascii=False))
+            legacy = _x(CONNECT_DIR) / "last.json"
+            if legacy.exists():
+                legacy.unlink()                  # 예전 형식 기록은 history.json으로 옮겨졌다
     return {"ok": True, "applied": len(plan["items"])}
 
 

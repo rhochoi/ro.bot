@@ -9,10 +9,21 @@ from ro import selfupdate
 
 
 class SelfUpdateTest(unittest.TestCase):
-    def test_checkout_uses_git_pull(self):
-        cmd, _ = selfupdate.update_command()  # 이 테스트는 저장소 체크아웃에서 실행된다
+    def test_checkout_uses_git_pull_only_on_main(self):
+        # 이 테스트는 저장소 체크아웃에서 실행된다
+        with mock.patch.object(selfupdate, "_branch", return_value="main"):
+            cmd, _ = selfupdate.update_command()
         self.assertEqual(cmd[:2], ["git", "-C"])
         self.assertIn("--ff-only", cmd)
+        # 작업 브랜치·분리된 HEAD에서는 당겨 오지 않는다(2026-10-30 재감사)
+        for branch in ("claude/feature-x", None):
+            with mock.patch.object(selfupdate, "_branch", return_value=branch):
+                cmd, why = selfupdate.update_command()
+            self.assertIsNone(cmd)
+            self.assertIn("업데이트하지 않았습니다", why)
+
+    def test_branch_reads_this_checkout(self):
+        self.assertIsInstance(selfupdate._branch(), (str, type(None)))
 
     def test_installed_uses_pipx(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(selfupdate, "ROOT", Path(d)), \
@@ -27,7 +38,8 @@ class SelfUpdateTest(unittest.TestCase):
 
     def test_update_header_printed_before_command_output(self):
         out = []
-        with mock.patch("builtins.print", lambda *a, **k: out.append(k.get("flush"))):
+        with mock.patch("builtins.print", lambda *a, **k: out.append(k.get("flush"))), \
+                mock.patch.object(selfupdate, "_branch", return_value="main"):
             selfupdate.update(runner=lambda cmd: mock.Mock(returncode=0))
         self.assertEqual(out, [True])
 

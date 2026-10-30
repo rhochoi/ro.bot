@@ -262,6 +262,14 @@ class ConnectAuditFixTest(ConnectTest):
         self.assertFalse(link.exists() or link.is_symlink())
         self.assertFalse((self.home / ".ro" / "connect" / "last.json").exists())
 
+    def test_next_connect_migrates_legacy_record(self):
+        (self.home / ".ro" / "connect").mkdir(parents=True)
+        legacy = self.home / ".ro" / "connect" / "last.json"
+        legacy.write_text(json.dumps({"stamp": "s", "entries": [{"path": "/x", "backup": None, "after": None}]}))
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        self.assertFalse(legacy.exists())
+        self.assertEqual(len(engines._history()), 2)       # 예전 기록 + 이번 연결
+
     def test_hook_that_does_not_block_is_reported_broken(self):
         engines.connect_apply(self.plan()["id"], **self.kw)
         with mock.patch.object(engines, "_guard_selftest", return_value=False):
