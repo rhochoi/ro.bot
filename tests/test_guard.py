@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ro import log
 
-GUARD = Path(__file__).resolve().parent.parent / "scripts" / "hooks" / "ro_guard.py"
+GUARD = Path(__file__).resolve().parent.parent / "ro" / "hooks" / "ro_guard.py"
 spec = importlib.util.spec_from_file_location("ro_guard", GUARD)
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
@@ -74,6 +74,16 @@ class Destructive(unittest.TestCase):
         for c in ("git push --force-with-lease", "git push origin main", "git reset --soft HEAD~1", "git status"):
             self.passes(c)
 
+    def test_known_bypasses_ask(self):
+        # 2026-10-30 재감사에서 재현된 우회: 대상 없는 rm(xargs가 채움), git 전역 옵션, + 강제 푸시, find 삭제, 명령 치환
+        for c in ("find ~ -name x | xargs rm -rf", "git -C repo reset --hard", "git -C ../r push -f",
+                  "git push origin +main", "find ~/Documents -delete", "find . -name '*.log' -exec rm {} +",
+                  "echo $(rm -rf ~/x)", "echo `rm -rf ~/x`"):
+            self.asks(c)
+        for c in ("find /tmp/x -delete", "find . -name x", "git -C repo status", "git push origin main:main",
+                  "echo $(date)"):
+            self.passes(c)
+
     def test_other_tools_are_ignored(self):
         self.assertIsNone(run("destructive", "Write", file_path="a", content="rm -rf /"))
 
@@ -83,6 +93,8 @@ class FailOpen(unittest.TestCase):
         for stdin, mode in (("not json", "secrets"), ("{}", "nope"), ("", "destructive")):
             p = subprocess.run([sys.executable, str(GUARD), mode], input=stdin, capture_output=True, text=True)
             self.assertEqual((p.returncode, p.stdout.strip()), (0, ""))
+            if mode != "nope":                   # 읽지 못한 입력은 막지 않지만 조용히 넘기지도 않는다
+                self.assertIn("보호 없이", p.stderr)
 
 
 if __name__ == "__main__":

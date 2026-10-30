@@ -126,7 +126,7 @@ class PetLayoutTest(unittest.TestCase):
         page.fill("#askInput", "2 더하기 2는?")
         page.press("#askInput", "Enter")
         page.wait_for_selector("#sendCard", state="visible")  # 안내 카드는 탭 밖이라 설정 탭에서도 보인다
-        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
+        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 AI 도구로 넘겨 주세요.")
         self.assertEqual(page.locator("#sendApproveBtn").count(), 0)   # 엔진으로 보내는 버튼은 없다
         with page.expect_response(lambda r: urlsplit(r.url).path == "/api/capture"):   # 남은 선택지 1: 기록으로만 남기기
             page.click("#sendRecordBtn")
@@ -194,7 +194,7 @@ class PetLayoutTest(unittest.TestCase):
         page.press("#askInput", "Enter")
         page.wait_for_selector("#sendCard", state="visible")   # '오늘'만 붙은 일반 요청은 회상으로 새지 않고 안내 카드로 간다
         self.assertNotIn("/api/recall", paths)
-        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.")
+        self.assertEqual(page.inner_text("#sendHead"), "ro는 기록과 파일 찾기만 도와요. 질문은 AI 도구로 넘겨 주세요.")
         page.click("#sendCancelBtn")
     def test_failed_prefs_save_reverts_the_screen(self):
         page = self.open_page()

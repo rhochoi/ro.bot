@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, findui, fsutil, harden, log, mapper, organize, recall, records
+from . import config, engines, findui, fsutil, harden, log, mapper, organize, recall, records
 
 STATE_WAIT_TIMEOUT = 20.0
 STATE_WAIT_INTERVAL = 2.0
@@ -1893,6 +1893,33 @@ PET_HTML = r"""<!DOCTYPE html>
   .pal-item[aria-selected="true"] { background: var(--panel-soft); }
   .pal-item b { font-weight: 800; min-width: 44px; }
   .pal-item span { color: var(--muted); font-size: 11px; }
+  .pal-item i { font-style: normal; color: var(--muted); font-size: 10px; background: var(--panel-soft); border-radius: 6px; padding: 0 5px; flex-shrink: 0; }
+  /* 입력창 '/' 자동완성: 입력창 바로 위에 뜬다 */
+  .ask-form { position: relative; }
+  .slash-pop {
+    position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 5;
+    background: var(--panel-bg); color: var(--panel-fg); border: 1px solid var(--panel-border);
+    border-radius: 12px; box-shadow: 0 10px 24px rgba(15, 14, 13, 0.24); padding: 4px; max-height: 232px; overflow-y: auto;
+  }
+  .slash-pop .pal-item { align-items: center; }
+  .slash-pop .pal-item b { min-width: 52px; }
+  .slash-pop .pal-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slash-pop .pal-foot { position: sticky; bottom: -4px; margin: 4px -4px -4px; padding: 5px 9px; background: var(--panel-bg); }
+  /* AI 도구 연결 창 */
+  .conn-list { display: flex; flex-direction: column; gap: 6px; padding: 8px; max-height: 330px; overflow-y: auto; }
+  .conn-row { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid var(--divider); border-radius: 11px; }
+  .conn-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .conn-name { font-size: 12px; font-weight: 800; }
+  .conn-chips { display: flex; gap: 4px; flex-wrap: wrap; }
+  .conn-chip { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: var(--panel-soft); color: var(--muted); }
+  .conn-chip.on { color: var(--accent-text); font-weight: 700; }
+  .conn-row .mini-btn[disabled] { opacity: 0.45; cursor: default; }
+  .conn-plan { display: flex; flex-direction: column; gap: 6px; padding: 9px 10px; border: 1.5px solid var(--accent); border-radius: 11px; }
+  .conn-plan ul { margin: 0; padding-left: 16px; font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
+  .conn-plan code { font: inherit; font-weight: 700; }
+  .conn-note { font-size: 10.5px; color: var(--muted); }
+  .conn-badge { display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+  .conn-pending { padding: 8px 11px 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 11px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
   /* 카드가 길어져도 말풍선 안에서 스크롤한다 */
@@ -2070,6 +2097,15 @@ PET_HTML = r"""<!DOCTYPE html>
           <div class="block-sub">켜면 눈을 감고 알림을 모아 둡니다</div>
         </div>
 
+        <!-- AI 도구 연결 -->
+        <div class="setting-block">
+          <div class="block-title">AI 도구 연결</div>
+          <div class="options-row">
+            <button id="connOpenBtn" class="opt-btn">Claude · Codex · Antigravity</button>
+          </div>
+          <div class="block-sub">설치된 도구에 공통 규칙·안전 훅을 연결하고(미리 보고 승인), 입력을 넘깁니다</div>
+        </div>
+
         <!-- 재질 3종 -->
         <div class="setting-block">
           <div class="block-title">재질</div>
@@ -2123,11 +2159,12 @@ PET_HTML = r"""<!DOCTYPE html>
 
     <!-- 질문 보내기 전 확인 카드 -->
     <div id="sendCard" class="gate-box" style="display:none;" role="region" aria-label="안내">
-      <div id="sendHead" class="gate-head">ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.</div>
+      <div id="sendHead" class="gate-head">ro는 기록과 파일 찾기만 도와요. 질문은 AI 도구로 넘겨 주세요.</div>
       <div id="sendText" class="gate-body"></div>
       <div class="gate-actions">
         <button id="sendRecordBtn" class="action-btn primary">기록으로만 남기기</button>
         <button id="sendFindBtn" class="action-btn ghost" title="내 파일에서 이름·내용으로 찾아요">내 파일에서 찾기</button>
+        <button id="sendEngineBtn" class="action-btn ghost" title="Claude·Codex·Antigravity로 넘겨요">AI로 넘기기</button>
         <button id="sendCancelBtn" class="action-btn ghost">취소</button>
       </div>
     </div>
@@ -2149,10 +2186,22 @@ PET_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- AI 도구 연결 창: 상태는 읽기만 하고, 넘기기는 클립보드 + 앱 열기 -->
+    <div id="connWin" class="palette" hidden>
+      <div class="pal-box" role="dialog" aria-modal="true" aria-labelledby="connTitle">
+        <div class="pal-input-row"><b id="connTitle">AI 도구 연결</b></div>
+        <div id="connPending" class="conn-pending" hidden></div>
+        <div id="connList" class="conn-list"></div>
+        <div class="pal-foot"><span>입력창에서 <kbd>/claude 질문</kbd>으로 바로 넘기기</span><span><kbd>esc</kbd> 닫기</span></div>
+      </div>
+    </div>
+
     <!-- 하단 질문 & 기록 입력 폼 (주황 '+' 액션 버튼) -->
     <form id="askForm" class="ask-form">
+      <div id="slashPop" class="slash-pop" role="listbox" aria-label="명령 목록" hidden></div>
       <div class="input-bar">
-        <input id="askInput" class="ask-input" type="text" placeholder="기록하거나 파일을 찾아보세요" autocomplete="off" />
+        <input id="askInput" class="ask-input" type="text" placeholder="기록하거나 파일을 찾아보세요 · / 명령" autocomplete="off"
+               role="combobox" aria-autocomplete="list" aria-controls="slashPop" aria-expanded="false" />
         <button id="askSubmit" class="ask-submit" type="submit" title="기록하거나 찾기">
           <svg id="plusIcon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round">
             <line x1="8" y1="2.5" x2="8" y2="13.5"></line>
@@ -3165,7 +3214,7 @@ function hideSendCard() {
 }
 async function submitInput(q) {
   const p = parsePalette(q);
-  const cmd = p.slash ? COMMANDS.find(c => c.label.slice(1) === p.name) : null;
+  const cmd = p.slash ? resolveCommand(p.name) : null;
   if (cmd) {
     if (cmd.arg && !p.arg) { askInput.value = cmd.label + " "; askInput.focus(); return; }  // 내용을 마저 쓰게
     const ok = await runCommand(cmd, p.arg);
@@ -4192,14 +4241,48 @@ async function showRecordOrganize() {
 }
 
 /* B · ⌥R 팔레트 */
+// arg: 내용이 꼭 필요함 · hint: 뒤에 쓸 내용(있으면 고를 때 '/명령 '까지만 채운다) · aliases: 다른 이름(영문·한글)
 const COMMANDS = [
-  { id: "record", label: "/기록", desc: "지금 한 일 한 줄로 남기기", arg: true },
-  { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)" },
-  { id: "today", label: "/오늘", desc: "오늘 요약 보기" },
-  { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true },
-  { id: "file", label: "/파일", desc: "내 파일 찾기 (이름·내용·기간)", arg: true },
-  { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기" },
+  { id: "record", label: "/기록", desc: "지금 한 일 한 줄로 남기기", arg: true, hint: "내용", aliases: ["record", "note"] },
+  { id: "file", label: "/파일", desc: "내 파일 찾기 (이름·내용·기간)", arg: true, hint: "검색어", aliases: ["file"] },
+  { id: "find", label: "/찾기", desc: "지난 기록에서 검색", arg: true, hint: "검색어", aliases: ["find", "search"] },
+  { id: "today", label: "/오늘", desc: "오늘 요약 보기", aliases: ["today"] },
+  { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)", aliases: ["organize", "정리"] },
+  { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기", aliases: ["focus"] },
+  { id: "connect", label: "/연결", desc: "Claude·Codex·Antigravity 연결 상태", aliases: ["connect", "ai"] },
+  { id: "claude", label: "/claude", desc: "Claude Code로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["클로드"] },
+  { id: "codex", label: "/codex", desc: "Codex로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["코덱스"] },
+  { id: "agy", label: "/agy", desc: "Antigravity로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["antigravity", "안티그래비티", "안티"] },
 ];
+/* 한글 명령은 초성(ㄱㄹ → 기록)과 조합 중인 글자(기로 → 기록)로도 찾는다 */
+const CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+function syl(ch) {
+  const c = ch.charCodeAt(0) - 0xAC00;
+  return c >= 0 && c < 11172 ? { cho: Math.floor(c / 588), jung: Math.floor(c / 28) % 21, jong: c % 28 } : null;
+}
+function namePrefix(q, name) {
+  if (q.length > name.length) return false;
+  for (let i = 0; i < q.length; i++) {
+    const a = q[i], b = name[i];
+    if (a === b) continue;
+    const sb = syl(b), sa = syl(a);
+    if (sb && CHO.indexOf(a) === sb.cho) continue;
+    if (i === q.length - 1 && sa && sb && !sa.jong && sa.cho === sb.cho && sa.jung === sb.jung) continue;
+    return false;
+  }
+  return true;
+}
+function cmdNames(c) { return [c.label.slice(1), ...(c.aliases || [])].map(n => n.toLowerCase()); }
+function matchCommands(name) {
+  const q = (name || "").toLowerCase();
+  if (!q) return COMMANDS.slice();
+  return COMMANDS.filter(c => cmdNames(c).some(n => namePrefix(q, n)))
+    .sort((a, b) => (cmdNames(b).includes(q) ? 1 : 0) - (cmdNames(a).includes(q) ? 1 : 0));
+}
+function resolveCommand(name) {
+  const q = (name || "").toLowerCase();
+  return COMMANDS.find(c => cmdNames(c).includes(q)) || null;
+}
 // 내 기록을 묻는 말만 로컬 회상으로 보낸다. '오늘'·'어제'만 붙은 일반 요청("오늘 alpha 구조 설명해줘")은 질문이다
 // 파일을 찾는 말: 찾는 동사와 파일 명사가 함께 있을 때만. "이 파일 설명해줘" 같은 질문은 그대로 엔진 확인으로 간다
 const FIND_VERB = /(찾아\s*줘|찾아줘|찾아\s*봐|찾고\s*있|찾는|어디\s*(있|갔|에\s*있)|어딨|있더라|뭐였더라)/;
@@ -4222,7 +4305,7 @@ function buildRows() {
   const p = parsePalette(palInput.value);
   const rows = [];
   if (p.slash) {
-    COMMANDS.filter(c => c.label.slice(1).startsWith(p.name)).forEach(c => rows.push({ sec: "명령", cmd: c, arg: p.arg }));
+    matchCommands(p.name).forEach(c => rows.push({ sec: "명령", cmd: c, arg: p.arg }));
   } else if (!p.text) {
     COMMANDS.forEach(c => rows.push({ sec: "명령", cmd: c }));
     recentList().forEach(q => rows.push({ sec: "최근 입력", ask: q }));
@@ -4268,6 +4351,8 @@ async function runCommand(c, arg) {
   else if (c.id === "find") await runRecall(`${arg} 기록 찾아줘`);
   else if (c.id === "file") await runFind(arg);
   else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
+  else if (c.id === "connect") await openConn(arg || "");
+  else if (c.engine) return handoffTo(c.id, arg || "");
   return true;
 }
 async function runPalette() {
@@ -4296,9 +4381,221 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closePalette(); }
   else if (e.key === "ArrowDown") { e.preventDefault(); palIndex = (palIndex + 1) % Math.max(1, palRows.length); renderPalette(); }
   else if (e.key === "ArrowUp") { e.preventDefault(); palIndex = (palIndex - 1 + palRows.length) % Math.max(1, palRows.length); renderPalette(); }
-  else if (e.key === "Enter") { e.preventDefault(); runPalette(); }
+  else if (e.key === "Enter") { e.preventDefault(); if (!e.isComposing && e.keyCode !== 229) runPalette(); }
   else if (e.key === "Tab") { e.preventDefault(); }
 }, true);
+
+/* 입력창 '/' 자동완성: 팔레트와 같은 명령 목록·실행. 이름을 쓰는 동안 목록, 내용을 쓰는 동안 그 명령 한 줄 */
+const slashPop = document.getElementById("slashPop");
+let slashRows = [], slashSel = 0;
+function slashState() {
+  const v = askInput.value;
+  if (!/^\s*\//.test(v)) return null;
+  const p = parsePalette(v);
+  const naming = !/^\s*\/\S*\s/.test(v);
+  const rows = naming ? matchCommands(p.name) : [resolveCommand(p.name)].filter(Boolean);
+  return { naming, rows, arg: p.arg };
+}
+function hideSlash() {
+  if (slashPop.hidden) return;
+  slashPop.hidden = true;
+  askInput.setAttribute("aria-expanded", "false");
+  askInput.removeAttribute("aria-activedescendant");
+}
+function renderSlash() {
+  const st = document.activeElement === askInput ? slashState() : null;
+  if (!st || !st.rows.length) {
+    if (st && st.naming) {  // 맞는 명령이 없으면 그렇다고 알린다(입력은 그대로 일반 입력으로 처리된다)
+      fill(slashPop, h("div", { class: "pal-item", role: "option", "aria-disabled": "true" },
+        h("span", { text: "맞는 명령이 없어요 · ↵ 그대로 보내기" })));
+      slashPop.hidden = false;
+      askInput.setAttribute("aria-expanded", "true");
+      return;
+    }
+    hideSlash();
+    return;
+  }
+  slashRows = st.rows;
+  slashSel = Math.min(slashSel, slashRows.length - 1);
+  fill(slashPop, slashRows.map((c, i) => h("div", { class: "pal-item", role: "option", id: `slashOpt${i}`,
+      "aria-selected": i === slashSel ? "true" : "false",
+      onmousedown: (e) => { e.preventDefault(); slashSel = i; pickSlash(false); } },
+    h("b", { text: c.label }), h("span", { text: c.desc }),
+    c.hint && !(st.arg && !st.naming) ? h("i", { text: `+ ${c.hint}` }) : null)),
+    h("div", { class: "pal-foot", "aria-hidden": "true" },
+      st.naming ? [h("span", {}, h("kbd", { text: "↑↓" }), " 고르기"), h("span", {}, h("kbd", { text: "tab" }), " 완성"),
+                   h("span", {}, h("kbd", { text: "↵" }), " 실행"), h("span", {}, h("kbd", { text: "esc" }), " 닫기")]
+               : [h("span", {}, h("kbd", { text: "↵" }), slashRows[0].arg && !st.arg ? ` ${slashRows[0].hint}을(를) 써 주세요` : " 실행")]));
+  slashPop.hidden = false;
+  askInput.setAttribute("aria-expanded", "true");
+  askInput.setAttribute("aria-activedescendant", `slashOpt${slashSel}`);
+  const sel = document.getElementById(`slashOpt${slashSel}`);
+  if (sel) sel.scrollIntoView({ block: "nearest" });
+}
+function setAsk(v) {
+  askInput.value = v;
+  askInput.dispatchEvent(new Event("input"));
+  askInput.setSelectionRange(v.length, v.length);
+}
+/* run=false: 완성만(Tab·클릭) · run=true: 내용이 필요 없으면 바로 실행(↵) */
+async function pickSlash(run) {
+  const st = slashState();
+  const c = slashRows[slashSel];
+  if (!st || !c) return;
+  if (!st.naming) return;
+  if (c.hint || !run) { setAsk(c.label + " "); askInput.focus(); return; }
+  resetInput();
+  hideSlash();
+  await runCommand(c, "");
+}
+askInput.addEventListener("input", () => { slashSel = 0; renderSlash(); });
+askInput.addEventListener("focus", renderSlash);
+askInput.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== askInput) hideSlash(); }, 0));
+askInput.addEventListener("keydown", (e) => {
+  if (slashPop.hidden || e.isComposing || e.keyCode === 229 || e.altKey || e.metaKey || e.ctrlKey) return;
+  const st = slashState();
+  if (!st) return;
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); hideSlash(); return; }
+  if (!st.naming || !slashRows.length || !st.rows.length) return;  // 내용을 쓰는 중: ↵는 보통 제출
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault(); e.stopPropagation();
+    slashSel = (slashSel + (e.key === "ArrowDown" ? 1 : -1) + slashRows.length) % slashRows.length;
+    renderSlash();
+  } else if (e.key === "Tab") {
+    e.preventDefault(); e.stopPropagation(); pickSlash(false);
+  } else if (e.key === "Enter") {
+    e.preventDefault(); e.stopPropagation(); pickSlash(true);
+  }
+});
+
+/* AI 도구 연결 창 */
+const connWin = document.getElementById("connWin");
+const connList = document.getElementById("connList");
+const connPending = document.getElementById("connPending");
+let connText = "", connFocus = null;
+function connChip(on, text, title) {
+  return h("span", { class: on ? "conn-chip on" : "conn-chip", title, text: `${on ? "✓" : "–"} ${text}` });
+}
+const RULES_TEXT = { source: "규칙 원본", linked: "규칙 연결", other: "따로 쓰는 규칙", missing: "규칙 없음" };
+const HOOK_TEXT = { on: "안전 훅", missing: "안전 훅 없음", stale: "안전 훅 갱신 필요", broken: "안전 훅 작동 안 함" };
+/* 연결할 항목이 있으면 설정 탭과 연결 버튼에 숫자를 단다(알림은 띄우지 않는다) */
+function setConnBadge(n) {
+  for (const el of [document.getElementById("tabBtnSettings"), document.getElementById("connOpenBtn")]) {
+    let b = el.querySelector(".conn-badge");
+    if (!n) { if (b) b.remove(); continue; }
+    if (!b) { b = h("span", { class: "conn-badge" }); el.append(b); }
+    b.textContent = n;
+    b.setAttribute("aria-label", `연결할 항목 ${n}개`);
+  }
+}
+async function checkConnect() {
+  let p = null;
+  try { p = await apiPost("/api/engines/plan", {}); } catch (err) { p = null; }
+  setConnBadge(p && p.ok ? p.items.length : 0);
+  return p && p.ok ? p : null;
+}
+function connPlanBox(p) {
+  if (!p) return null;
+  if (!p.items.length) {
+    return p.notes.length ? h("div", { class: "conn-note" }, p.notes.map(n => h("div", { text: n }))) :
+      h("div", { class: "conn-note", text: "설치된 도구는 모두 연결돼 있어요." });
+  }
+  const go = h("button", { class: "mini-btn primary", type: "button", text: "승인하고 연결", onclick: async () => {
+    go.disabled = true;
+    let r = null;
+    try { r = await apiPost("/api/engines/connect", { id: p.id, approve: true }); } catch (err) { r = null; }
+    if (!r || !r.ok) {
+      showToast([h("div", { class: "toast-head", text: r ? (r.error || "연결하지 못했어요") : "서버에 연결하지 못했어요." })], 5500);
+      await openConn(connText);  // 바뀐 상태로 다시 보여 준다
+      return;
+    }
+    closeConn();  // 창이 토스트의 되돌리기를 가리지 않게
+    await checkConnect();
+    showToast([h("div", { class: "toast-head", text: `연결했어요 · ${r.applied}건` }),
+      h("div", { class: "block-sub", text: "/연결에서 상태를 다시 볼 수 있어요" }),
+      h("div", { class: "chip-row" }, h("button", { class: "mini-btn", type: "button", text: "되돌리기", onclick: undoConnect }))], 8000);
+  } });
+  return h("div", { class: "conn-plan", role: "region", "aria-label": "연결할 항목" },
+    h("div", { class: "conn-name", text: `연결할 항목 ${p.items.length}개 · 아직 아무것도 바뀌지 않았어요` }),
+    h("ul", {}, p.items.map(it => h("li", { title: it.path, text: it.desc }))),
+    p.notes.map(n => h("div", { class: "conn-note", text: n })),
+    h("div", { class: "conn-note", text: "되돌리기는 ro가 넣은 줄·훅·링크만 빼요. 그 뒤에 바뀐 설정은 그대로 둬요." }),
+    h("div", { class: "chip-row" }, go));
+}
+async function undoConnect() {
+  let r = null;
+  try { r = await apiPost("/api/engines/undo", {}); } catch (err) { r = null; }
+  const kept = r && r.kept && r.kept.length ? ` · 그사이 바뀐 ${r.kept.length}개는 그대로 둠` : "";
+  showToast([h("div", { class: "toast-head", text: !r ? "서버에 연결하지 못했어요." : r.ok ? `되돌렸어요 · ${r.reverted}건${kept}` : r.error })], 5500);
+  if (!connWin.hidden) await openConn(connText); else await checkConnect();
+}
+async function openConn(text) {
+  connText = (text || "").trim();
+  if (connWin.hidden) connFocus = document.activeElement;
+  setBubbleOpen(true);
+  hideSlash();
+  connWin.hidden = false;
+  connPending.hidden = !connText;
+  connPending.textContent = connText ? `넘길 내용: “${connText}”` : "";
+  fill(connList, h("div", { class: "rc-foot", text: "확인하는 중…" }));
+  let r = null;
+  try { r = await apiPost("/api/engines", {}); } catch (err) { r = null; }
+  if (!r || !r.ok) { fill(connList, h("div", { class: "rc-head", text: "서버에 연결하지 못했어요." })); return; }
+  const plan = await checkConnect();
+  fill(connList, connPlanBox(plan), r.engines.map(e => {
+    const usable = e.app || e.cli;
+    const btn = h("button", { class: connText ? "mini-btn primary" : "mini-btn", type: "button", disabled: !usable,
+      "aria-label": `${e.name} ${connText ? "로 넘기기" : "열기"}`,
+      text: !usable ? "없음" : connText ? "넘기기" : (e.app ? "열기" : "명령 복사"),
+      onclick: async () => { closeConn(); await handoffTo(e.id, connText); } });
+    return h("div", { class: "conn-row" },
+      h("div", { class: "conn-main" },
+        h("div", { class: "conn-name", text: e.name }),
+        h("div", { class: "conn-chips" },
+          connChip(e.app, e.app ? "앱" : "앱 없음", e.app || "응용 프로그램 폴더에 없음"),
+          connChip(e.cli, `CLI ${e.cli_name}`, e.cli ? "터미널에서 실행 가능" : "PATH에 없음"),
+          connChip(e.rules, RULES_TEXT[e.rules_state] || "규칙", e.rules_path),
+          e.hook === null ? null : connChip(e.hook, HOOK_TEXT[e.hook_state] || "안전 훅",
+            "위험한 명령 문자열을 찾아 승인을 묻는 보조 장치(모든 우회를 막지는 못함)"))),
+      btn);
+  }));
+  const first = connList.querySelector(".conn-plan button") || connList.querySelector("button:not([disabled])");
+  if (first) first.focus();
+}
+function closeConn() {
+  if (connWin.hidden) return;
+  connWin.hidden = true;
+  if (connFocus && connFocus.focus) connFocus.focus();
+}
+async function handoffTo(id, text) {
+  let r = null;
+  try { r = await apiPost("/api/engines/handoff", { id, text }); } catch (err) { r = null; }
+  if (!r || !r.ok) {
+    showToast([h("div", { class: "toast-head", text: r ? (r.error || "넘기지 못했어요") : "서버에 연결하지 못했어요." })], 5500);
+    return false;
+  }
+  const head = r.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : `${r.name}을(를) 열었어요`;
+  const sub = r.mode === "cli" ? "터미널에서 ⌘V 후 ↵" : r.copied ? "입력을 복사했어요 · ⌘V로 붙여 넣으세요" : null;
+  showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 4000);
+  return true;
+}
+document.getElementById("connOpenBtn").addEventListener("click", () => openConn(""));
+setTimeout(checkConnect, 1200);  // 새로 설치한 도구도 시작할 때 알아챈다
+connWin.addEventListener("mousedown", (e) => { if (e.target === connWin) closeConn(); });
+connWin.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeConn(); return; }
+  if (e.key !== "Tab") return;  // 창 안에서만 포커스가 돈다
+  const f = [...connWin.querySelectorAll("button:not([disabled])")];
+  if (!f.length) { e.preventDefault(); return; }
+  const i = f.indexOf(document.activeElement);
+  if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); }
+  else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
+});
+document.getElementById("sendEngineBtn").addEventListener("click", () => {
+  const q = pendingSend && pendingSend.q;
+  hideSendCard();
+  openConn(q || "");
+});
 
 if (!isNativeHost) {
   // 브라우저에서는 처음부터 대화창을 연다: 봇만 덩그러니 있으면 무엇을 할지 알기 어렵다
@@ -4459,6 +4756,19 @@ def make_handler(runtime):
                 self._send_json(200, runtime.set_prefs(data if isinstance(data, dict) else {}))
             elif parsed.path == "/api/focus":
                 self._send_json(200, runtime.set_focus(bool(data.get("on"))))
+            elif parsed.path == "/api/engines":
+                self._send_json(200, {"ok": True, "engines": engines.status()})
+            elif parsed.path == "/api/engines/plan":
+                self._send_json(200, engines.connect_plan())
+            elif parsed.path == "/api/engines/connect":
+                if data.get("approve") is not True:
+                    self._send_json(400, {"ok": False, "error": "approve는 true여야 합니다."})
+                else:
+                    self._send_json(200, engines.connect_apply(str(data.get("id") or "")))
+            elif parsed.path == "/api/engines/undo":
+                self._send_json(200, engines.connect_undo())
+            elif parsed.path == "/api/engines/handoff":
+                self._send_json(200, engines.handoff(str(data.get("id") or ""), str(data.get("text") or "")))
             elif parsed.path == "/api/action":
                 act = data.get("action") or data.get("name", "")
                 self._send_json(200, runtime.trigger_action(act, data.get("duration", 4.0)))

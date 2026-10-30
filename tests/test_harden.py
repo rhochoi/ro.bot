@@ -50,6 +50,16 @@ class HardenTest(unittest.TestCase):
             for code, reason in bad.items():
                 (Path(d) / "bad.py").write_text(code + "\n")
                 self.assertTrue(any(reason in f for f in harden.network_offenders(d)), code)
+            (Path(d) / "bad.py").unlink()
+            # 하위 폴더(ro/hooks 등)와 Swift 호스트도 검사 범위다(2026-10-30 재감사: 최상위 *.py만 보던 빈틈)
+            (Path(d) / "hooks").mkdir()
+            (Path(d) / "hooks" / "h.py").write_text("import socket\n")
+            self.assertTrue(any("h.py" in f for f in harden.network_offenders(d)))
+            (Path(d) / "hooks" / "h.py").unlink()
+            (Path(d) / "host.swift").write_text('let u = "http://127.0.0.1:8765/"\n')
+            self.assertEqual(harden.network_offenders(d), [])
+            (Path(d) / "host.swift").write_text("let s = URLSession.shared\n")
+            self.assertTrue(any("host.swift" in f for f in harden.network_offenders(d)))
 
     def test_eval_fails_when_protection_removed(self):
         # 회귀: 보호 장치를 꺼도 PASS가 나오던 공허한 검사

@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (config, find, findeval, findsignals, harden, log, mapper, organize, pet, selfupdate,
+from . import (config, engines, find, findeval, findsignals, harden, log, mapper, organize, pet, selfupdate,
                setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
@@ -79,6 +79,9 @@ def main(argv=None):
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
     sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 체크아웃은 git pull)")
     sub.add_parser("doctor", help="설치 상태·도구(claude·agy) 점검")
+    cn = sub.add_parser("connect", help="Claude Code·Codex·Antigravity에 공통 규칙·안전 훅 연결(미리 보기 → --yes로 적용 → undo)")
+    cn.add_argument("action", nargs="?", default="plan", choices=["plan", "undo"])
+    cn.add_argument("--yes", action="store_true", help="보여 준 계획을 적용")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정 상태")
@@ -251,6 +254,8 @@ def main(argv=None):
         raise SystemExit(selfupdate.update())
     elif args.cmd == "doctor":
         raise SystemExit(selfupdate.doctor())
+    elif args.cmd == "connect":
+        raise SystemExit(engines.connect_cli(args.action, args.yes))
     elif args.cmd == "setup":
         try:
             if args.setup_cmd in ("status", None):
