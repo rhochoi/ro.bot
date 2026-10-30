@@ -378,7 +378,7 @@ class PetTest(unittest.TestCase):
                      "previewAsk", "sendAsk", "sendApproveBtn", "/api/ask", "askCancelBtn",       # 엔진 질문
                      "setupCard", "clearBtn", "/api/clear"):                                      # 준비 안내·알림 닫기
             self.assertNotIn(gone, html)
-        self.assertIn("ro는 기록과 파일 찾기만 도와요. 질문은 Claude Code에서 해 주세요.", html)
+        self.assertIn("ro는 기록과 파일 찾기만 도와요. 질문은 AI 도구로 넘겨 주세요.", html)
         for kept in ("sendRecordBtn", "sendFindBtn", "sendCancelBtn"):                            # 안내 카드의 남은 선택지
             self.assertIn(f'id="{kept}"', html)
 
