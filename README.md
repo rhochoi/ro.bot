@@ -53,7 +53,7 @@ gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.gith
 ```
 
 ```bash
-ro doctor      # 설치·도구(claude/agy) 점검. 하나만 있어도 통과합니다
+ro doctor      # 설치·AI 도구(claude/agy) 점검. 하나만 있어도 통과합니다(Codex는 점검하지 않고, `ro connect`가 ~/.codex/AGENTS.md를 공통 규칙 원본으로만 씁니다)
 ro update      # 업데이트 (설치 방식에 맞춰 uv tool upgrade / pipx upgrade rog-bot, 저장소 체크아웃은 main일 때만 git pull)
 ro --version   # 설치된 버전
 ```

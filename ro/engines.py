@@ -11,7 +11,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -24,6 +23,7 @@ GUARD_SRC = Path(__file__).resolve().parent / "hooks" / "ro_guard.py"  # 패키�
 GUARD_DST = "~/.ro/hooks/ro_guard.py"
 GUARD_MODES = (("secrets", "Bash|Write|Edit|MultiEdit"), ("destructive", "Bash"))
 CONNECT_DIR = "~/.ro/connect"
+HISTORY_MAX = 20   # 되돌릴 수 있는 연결 기록 수. 밀려난 기록의 훅 백업(ro가 만든 파일)만 함께 지운다
 
 APP_DIRS = ("/Applications", "~/Applications")
 ENGINES = (
@@ -35,19 +35,23 @@ ENGINES = (
      "rules": "~/.gemini/GEMINI.md", "hook": None},
 )
 MAX_TEXT = 4000
+HOME = None   # None이면 실제 홈. 테스트는 임시 폴더로 바꿔 실제 ~/.claude·~/.ro를 읽거나 쓰지 않는다
 
 
 def _find_app(names, app_dirs=APP_DIRS):
     for d in app_dirs:
         for n in names:
-            p = Path(d).expanduser() / n
+            p = _x(d) / n
             if p.is_dir():
                 return p
     return None
 
 
 def _x(p):
-    return Path(p).expanduser()
+    s = str(p)
+    if HOME and (s == "~" or s.startswith("~/")):
+        return Path(HOME + s[1:])
+    return Path(s).expanduser()
 
 
 def _read(p):
@@ -330,6 +334,11 @@ def connect_apply(plan_id, which=shutil.which, app_dirs=APP_DIRS):
         if entries:
             hist = _history()
             hist.append({"stamp": stamp, "entries": entries})
+            for old in hist[:-HISTORY_MAX]:
+                d = _x(CONNECT_DIR) / old.get("stamp", "")
+                if old.get("stamp") and d.is_dir() and d.parent == _x(CONNECT_DIR):
+                    shutil.rmtree(d)
+            hist = hist[-HISTORY_MAX:]
             fsutil.atomic_write(_x(CONNECT_DIR) / "history.json", json.dumps(hist, ensure_ascii=False))
             legacy = _x(CONNECT_DIR) / "last.json"
             if legacy.exists():

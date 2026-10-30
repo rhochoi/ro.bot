@@ -924,7 +924,7 @@ final class PetAppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHand
             btn.action = #selector(statusButtonPressed)
             btn.sendAction(on: [.leftMouseDown, .rightMouseDown])
             btn.image = makeIcon(iconPose(nil, gait: .calm))
-            btn.toolTip = "ro — 층 셋, 눈 둘. 기록하고, 풀어낸다."
+            btn.toolTip = "ro — 층 셋, 눈 둘. 말로 찾고, 승인한 것만 정리한다."
         }
         let menu = NSMenu()
         menu.addItem(makeHeaderItem())

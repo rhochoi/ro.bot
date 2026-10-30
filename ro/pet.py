@@ -1918,7 +1918,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .conn-plan ul { margin: 0; padding-left: 16px; font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
   .conn-plan code { font: inherit; font-weight: 700; }
   .conn-note { font-size: 10.5px; color: var(--muted); }
-  .conn-badge { display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+  .conn-badge { display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px; border-radius: 999px; background: #C73310; color: #fff; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
   .conn-pending { padding: 8px 11px 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 11px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
@@ -2615,6 +2615,7 @@ wanderToggle.addEventListener("change", (e) => {
 
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (!connWin.hidden) { closeConn(); return; }  // 연결 창 안에 포커스가 없어도 Esc는 창부터 닫는다
   if (document.activeElement === askInput && askInput.value) {
     askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
     return;

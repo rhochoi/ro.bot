@@ -26,7 +26,7 @@ class SlashTest(unittest.TestCase):
         except Exception as e:  # 브라우저 미설치
             cls.pw.stop()
             cls.server.shutdown()
-            raise unittest.SkipTest(f"chromium 없음: {e}")
+            raise unittest.SkipTest(f"chromium 없음: {e}") from None
         fake = [{"id": "claude", "name": "Claude Code", "cli": True, "cli_name": "claude", "app": "Claude.app",
                  "rules": True, "rules_path": "~/.claude/CLAUDE.md", "hook": False},
                 {"id": "codex", "name": "Codex", "cli": False, "cli_name": "codex", "app": None,
@@ -129,6 +129,23 @@ class SlashTest(unittest.TestCase):
         p.wait_for_selector("#tabBtnSettings .conn-badge", state="detached")
         p.click("#toast >> text=되돌리기")
         p.wait_for_function("document.querySelector('#toast').innerText.includes('되돌렸어요')")
+
+    def test_escape_closes_conn_window_even_without_focus_inside(self):
+        p = self.page
+        with mock.patch.object(engines, "status", side_effect=OSError("x")):   # 서버 오류: 창에 버튼이 없다
+            p.evaluate("openConn('')")
+            p.wait_for_selector("#connWin:not([hidden])")
+            p.focus("#askInput")
+            p.keyboard.press("Escape")
+        self.assertTrue(p.locator("#connWin").is_hidden())
+        self.assertFalse(p.locator("#bubble.hidden").count())   # 말풍선은 그대로
+
+    def test_badge_text_has_enough_contrast(self):
+        self.plan.return_value = {"ok": True, "id": "p9", "notes": [], "items": [{"kind": "x", "path": "p", "desc": "d"}]}
+        self.page.evaluate("checkConnect()")
+        self.page.wait_for_selector("#tabBtnSettings .conn-badge")
+        bg = self.page.eval_on_selector("#tabBtnSettings .conn-badge", "e => getComputedStyle(e).backgroundColor")
+        self.assertEqual(bg, "rgb(199, 51, 16)")
 
     def test_engine_command_with_text_hands_off(self):
         p = self.page

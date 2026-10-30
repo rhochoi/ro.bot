@@ -27,7 +27,7 @@ def main(argv=None):
         return organize.tidy_alias(argv[1:])
     if argv[:1] == ["organize"]:
         return organize.main(argv[1:])
-    ap = argparse.ArgumentParser(prog="ro", description="ro — 기록하고, 풀어낸다.")
+    ap = argparse.ArgumentParser(prog="ro", description="ro — 내 Mac 파일을 말로 찾고, 승인한 것만 정리하는 로컬 전용 도구.")
     ap.add_argument("--version", action="version", version=f"ro {_version()}")
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("map", help="읽기 전용 스캔으로 지도 생성")
@@ -77,8 +77,8 @@ def main(argv=None):
     sub.add_parser("tidy", add_help=False, help="(별칭) ro organize로 합쳐짐 — 곧 사라집니다")  # 목록 표시용
     sub.add_parser("organize", add_help=False,
                    help="파일 분류·이름 정리(scan → show → apply → undo, 승인한 것만 이동)")  # 목록 표시용
-    sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 체크아웃은 git pull)")
-    sub.add_parser("doctor", help="설치 상태·도구(claude·agy) 점검")
+    sub.add_parser("update", help="최신 버전으로 업데이트(uv tool·pipx 설치본은 upgrade, 저장소 체크아웃은 main일 때만 git pull)")
+    sub.add_parser("doctor", help="설치 상태·AI 도구(claude·agy) 점검. Codex는 ro connect의 공통 규칙 원본으로만 씀")
     cn = sub.add_parser("connect", help="Claude Code·Codex·Antigravity에 공통 규칙·안전 훅 연결(미리 보기 → --yes로 적용 → undo)")
     cn.add_argument("action", nargs="?", default="plan", choices=["plan", "undo"])
     cn.add_argument("--yes", action="store_true", help="보여 준 계획을 적용")
@@ -94,7 +94,7 @@ def main(argv=None):
     a = lsub.add_parser("add", help="이벤트 기록")
     a.add_argument("kind")
     a.add_argument("summary")
-    a.add_argument("--engine", choices=["claude", "codex", "agy"])
+    a.add_argument("--engine", choices=["claude", "codex", "agy"], help="codex는 예전 기록과 맞추려고 남김")
     t = lsub.add_parser("tail", help="최근 이벤트")
     t.add_argument("-n", type=int, default=10)
     dl = lsub.add_parser("delete", help="기록 삭제(되돌릴 수 없음)")
@@ -270,7 +270,7 @@ def main(argv=None):
                     roots = mapper.default_roots()
                 print("\n".join(roots) or "(없음)")
         except ValueError as e:
-            raise SystemExit(str(e))
+            raise SystemExit(str(e)) from None
     elif args.cmd == "audit":
         findings, fixed = harden.audit(fix=args.fix)
         for f in findings:

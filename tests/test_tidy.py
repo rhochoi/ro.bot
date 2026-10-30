@@ -36,9 +36,9 @@ class TidyTest(unittest.TestCase):
         return p
 
     def test_scan_is_read_only_and_finds_dupes_stale(self):
-        a = self.w("a.txt", "same", 10)
-        b = self.w("copy/b.txt", "same", 1)
-        old = self.w("old.txt", "old", 400)
+        self.w("a.txt", "same", 10)
+        self.w("copy/b.txt", "same", 1)
+        self.w("old.txt", "old", 400)
         self.w("new.txt", "new", 1)
         before = sorted(str(p) for p in self.root.rglob("*"))
         plan = tidy.scan(self.root, min_size=1)

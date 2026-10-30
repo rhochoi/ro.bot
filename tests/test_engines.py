@@ -30,7 +30,7 @@ class EnginesTest(unittest.TestCase):
         self.apps = Path(self.tmp.name) / "Applications"
         self.apps.mkdir()
         (self.home / ".claude").mkdir(parents=True)
-        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env = mock.patch.object(engines, "HOME", str(self.home))
         env.start()
         self.addCleanup(env.stop)
 
@@ -107,7 +107,7 @@ class ConnectTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env = mock.patch.object(engines, "HOME", str(self.home))
         env.start()
         self.addCleanup(env.stop)
         (self.home / ".codex").mkdir()
@@ -270,12 +270,33 @@ class ConnectAuditFixTest(ConnectTest):
         self.assertFalse(legacy.exists())
         self.assertEqual(len(engines._history()), 2)       # 예전 기록 + 이번 연결
 
+    def test_history_is_capped_and_drops_only_old_backup_dirs(self):
+        cdir = self.home / ".ro" / "connect"
+        cdir.mkdir(parents=True)
+        old = [{"stamp": f"old{i}", "entries": []} for i in range(engines.HISTORY_MAX)]
+        (cdir / "history.json").write_text(json.dumps(old))
+        (cdir / "old0").mkdir()
+        (cdir / "old1").mkdir()
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        hist = engines._history()
+        self.assertEqual(len(hist), engines.HISTORY_MAX)
+        self.assertEqual(hist[0]["stamp"], "old1")
+        self.assertFalse((cdir / "old0").exists())
+        self.assertTrue((cdir / "old1").exists())
+
     def test_hook_that_does_not_block_is_reported_broken(self):
         engines.connect_apply(self.plan()["id"], **self.kw)
         with mock.patch.object(engines, "_guard_selftest", return_value=False):
             st = {e["id"]: e for e in engines.status(**self.kw)}
             self.assertEqual((st["claude"]["hook"], st["claude"]["hook_state"]), (False, "broken"))
             self.assertIn("막지 않았어요", " ".join(self.plan()["notes"]))
+
+
+class TestHomeIsolationTest(unittest.TestCase):
+    def test_tests_never_touch_the_real_home(self):
+        # tests/__init__.py가 연결 기능의 홈을 임시 폴더로 고정한다(펫 서버 테스트도 시작할 때 연결 상태를 묻는다)
+        self.assertIn("ro-test-home-", engines.HOME)
+        self.assertEqual(engines._x("~/.claude"), Path(engines.HOME) / ".claude")
 
 
 class PackagingTest(unittest.TestCase):
