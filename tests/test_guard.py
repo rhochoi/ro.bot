@@ -78,10 +78,14 @@ class Destructive(unittest.TestCase):
         # 2026-10-30 재감사에서 재현된 우회: 대상 없는 rm(xargs가 채움), git 전역 옵션, + 강제 푸시, find 삭제, 명령 치환
         for c in ("find ~ -name x | xargs rm -rf", "git -C repo reset --hard", "git -C ../r push -f",
                   "git push origin +main", "find ~/Documents -delete", "find . -name '*.log' -exec rm {} +",
-                  "echo $(rm -rf ~/x)", "echo `rm -rf ~/x`"):
+                  "echo $(rm -rf ~/x)", "echo `rm -rf ~/x`",
+                  "python3 -c 'import shutil; shutil.rmtree(\"/Users/me/x\")'", "python -c 'import os; os.remove(\"a\")'",
+                  "python3.13 -c 'from pathlib import Path; Path(\"a\").unlink()'",
+                  "node -e 'require(\"fs\").rmSync(\"x\", {recursive: true})'", "perl -e 'unlink glob \"*\"'",
+                  "ruby -e 'require \"fileutils\"; FileUtils.rm_rf(\"x\")'"):
             self.asks(c)
         for c in ("find /tmp/x -delete", "find . -name x", "git -C repo status", "git push origin main:main",
-                  "echo $(date)"):
+                  "echo $(date)", "python3 -c 'print(1)'", "python3 -m pytest -q", "node -e 'console.log(1)'"):
             self.passes(c)
 
     def test_other_tools_are_ignored(self):

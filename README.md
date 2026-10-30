@@ -54,7 +54,7 @@ gh api repos/rhochoi/ro.bot/contents/install.sh -H "Accept: application/vnd.gith
 
 ```bash
 ro doctor      # 설치·도구(claude/agy) 점검. 하나만 있어도 통과합니다
-ro update      # 업데이트 (설치 방식에 맞춰 uv tool upgrade / pipx upgrade rog-bot)
+ro update      # 업데이트 (설치 방식에 맞춰 uv tool upgrade / pipx upgrade rog-bot, 저장소 체크아웃은 main일 때만 git pull)
 ro --version   # 설치된 버전
 ```
 
@@ -63,17 +63,17 @@ ro --version   # 설치된 버전
 - 버전은 main 머지 때 자동으로 붙는 날짜 태그(`vYYYY.M.D`)에서 계산됩니다(`.github/workflows/release.yml`). 직접 올릴 필요 없습니다.
 - 기록(`~/.ro/log`)과 설정(`~/.ro/config.json`)은 사용자별로 `~/.ro`에만 쌓입니다(권한 0700/0600). 저장소에는 사용자 데이터가 없습니다.
 
-설치 후에는 아래 `python -m ro` 대신 `ro`로 실행합니다.
+설치하지 않고 저장소에서 바로 쓸 때는 아래 `ro` 대신 `python -m ro`로 실행합니다.
 
-## 사용 (저장소 루트에서)
+## 사용
 
-- `python -m ro map` / `show` 프로젝트·도구 지도 생성(`~/.ro/map.json`)과 요약. 스캔할 폴더는 `ro setup roots add|remove 폴더`로 정한다(`ro setup`은 현재 설정 상태)
+- `ro map` / `show` 프로젝트·도구 지도 생성(`~/.ro/map.json`)과 요약. 스캔할 폴더는 `ro setup roots add|remove 폴더`로 정한다(`ro setup`은 현재 설정 상태)
 - `ro find "질문" [--body|--no-body]` 이름·종류·수정일·본문(색인·이미지 OCR 포함)으로 파일 후보 찾기. 원본은 읽기 전용. 딸린 명령: `ro find-index status|clear|prune`(본문 색인), `ro find-signals`(검색 사용 신호, 기본 꺼짐), `ro find-pick`(고른 파일·못 찾음 기록), `ro find-eval`(검색 품질 평가)
-- `python -m ro organize scan|show|edit|apply|undo` 다운로드 정리 한 번에: 파일마다 분류 이동·치울 후보(중복·풀린 압축·옛 버전)·보관 중 하나를 제안 → 승인한 것만 적용(삭제 없음, `undo` 한 번에 복원). 격리 폴더 보기·비우기는 `ro organize trash [--empty]`(7일 지난 배치만, 터미널에서 `yes` 확인). `ro tidy`는 예전 명령의 호환용 별칭으로 scan·apply·undo·status만 받습니다(곧 제거, `docs/CLEANUP-DESIGN.md`)
-- `python -m ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서 (입력창: 지난 기록 질문은 로컬 기록으로 답하고, 파일 찾기와 `/` 명령을 지원합니다 — `/`를 치면 명령 목록이 뜨고 ↑↓·tab·↵로 고르며 초성(`ㄱㄹ`→`/기록`)·영문 별칭으로도 찾습니다. `/연결`은 Claude Code·Codex·Antigravity의 설치·규칙·안전 훅 상태를 보여 주고, 빠진 연결이 있으면 고칠 파일을 미리 보여 준 뒤 승인한 것만 연결합니다(아래 `ro connect`와 같음), `/claude`·`/codex`·`/agy 질문`은 입력을 클립보드에 넣고 앱을 엽니다(앱이 없으면 터미널용 명령을 복사). ro가 엔진에 질문을 보내지는 않습니다. 그 밖의 질문에는 "질문은 AI 도구로 넘겨 주세요" 안내 카드가 뜹니다. `정리` 탭: 정리안 보기 → 파일 목록 확인 후 승인 → 되돌리기)
+- `ro organize scan|show|edit|apply|undo` 다운로드 정리 한 번에: 파일마다 분류 이동·치울 후보(중복·풀린 압축·옛 버전)·보관 중 하나를 제안 → 승인한 것만 적용(삭제 없음, `undo` 한 번에 복원). 격리 폴더 보기·비우기는 `ro organize trash [--empty]`(7일 지난 배치만, 터미널에서 `yes` 확인). `ro tidy`는 예전 명령의 호환용 별칭으로 scan·apply·undo·status만 받습니다(곧 제거, `docs/CLEANUP-DESIGN.md`)
+- `ro pet [--browser] [--no-wander]` 코덱스 펫 스타일 macOS 데스크톱 오버레이 + 메뉴바 비서 (입력창: 지난 기록 질문은 로컬 기록으로 답하고, 파일 찾기와 `/` 명령을 지원합니다 — `/`를 치면 명령 목록이 뜨고 ↑↓·tab·↵로 고르며 초성(`ㄱㄹ`→`/기록`)·영문 별칭으로도 찾습니다. `/연결`은 Claude Code·Codex·Antigravity의 설치·규칙·안전 훅 상태를 보여 주고, 빠진 연결이 있으면 고칠 파일을 미리 보여 준 뒤 승인한 것만 연결합니다(아래 `ro connect`와 같음), `/claude`·`/codex`·`/agy 질문`은 입력을 클립보드에 넣고 앱을 엽니다(앱이 없으면 터미널용 명령을 복사). ro가 엔진에 질문을 보내지는 않습니다. 그 밖의 질문에는 "질문은 AI 도구로 넘겨 주세요" 안내 카드가 뜹니다. `정리` 탭: 정리안 보기 → 파일 목록 확인 후 승인 → 되돌리기)
 - `ro connect [--yes] | ro connect undo` 설치된 AI 도구에 공통 규칙(`~/.codex/AGENTS.md`)과 안전 훅을 연결. Claude Code는 `~/.claude/CLAUDE.md`에 `@~/.codex/AGENTS.md` 한 줄, Antigravity는 `~/.gemini/AGENTS.md` → 원본 링크, 안전 훅은 `~/.claude/settings.json`에 추가. 인자 없이는 계획만 보여 주고 `--yes`일 때만 씁니다. `undo`는 파일을 통째로 되돌리지 않고 ro가 넣은 줄·훅 항목·링크만 빼므로 그 뒤에 바뀐 설정은 그대로 남고, 여러 번 연결했으면 한 번에 하나씩 거슬러 올라갑니다(기록은 `~/.ro/connect/history.json`, `settings.json` 사본은 만들지 않음). 심볼릭 링크인 설정 파일은 링크를 유지한 채 실제 파일에 씁니다. 이미 따로 쓰는 규칙 파일은 덮어쓰지 않고, 설치 안 된 도구는 건드리지 않습니다
 - `ro audit [--fix]` `~/.ro` 권한·비밀·손상 줄 점검, `ro eval` 안전 불변식 회귀 체크리스트, `ro log add|tail|summary|delete --yes` 이벤트 기록·조회
-- 안전 훅: `ro/hooks/ro_guard.py`는 Claude Code PreToolUse 훅입니다. `secrets`는 Bash·Write·Edit에 비밀값이 들어가면 차단하고, `destructive`는 임시 폴더 밖의 `rm -r`·`find -delete`·`git push --force`(`+브랜치` 포함)·`git reset --hard` 등을 승인 요청합니다. 위험한 명령 문자열을 찾는 **보조 장치**라 모든 우회(예: `python -c`로 지우기)를 막지는 못하고, 훅이 입력을 읽지 못하면 막지 않고 경고만 남깁니다. 연결은 `ro connect`(또는 펫 `/연결`)가 계획을 보여 주고 승인한 뒤 `~/.ro/hooks/`에 복사·`~/.claude/settings.json`에 등록합니다. ro를 업데이트해 훅이 바뀌면 같은 화면에 "안전 훅 갱신 필요"로 뜹니다
+- 안전 훅: `ro/hooks/ro_guard.py`는 Claude Code PreToolUse 훅입니다. `secrets`는 Bash·Write·Edit에 비밀값이 들어가면 차단하고, `destructive`는 임시 폴더 밖의 `rm -r`·`find -delete`·`git push --force`(`+브랜치` 포함)·`git reset --hard` 등을 승인 요청합니다. `python -c`·`node -e` 같은 한 줄 코드가 파일을 지우는 호출(`shutil.rmtree`·`rmSync` 등)도 묻습니다. 위험한 명령 문자열을 찾는 **보조 장치**라 모든 우회(예: 스크립트 파일을 만들어 실행)를 막지는 못하고, Claude Code 자동 모드에서는 "묻기"가 자동 판단으로 승인될 수 있으며, 훅이 입력을 읽지 못하면 막지 않고 경고만 남깁니다. 연결은 `ro connect`(또는 펫 `/연결`)가 계획을 보여 주고 승인한 뒤 `~/.ro/hooks/`에 복사·`~/.claude/settings.json`에 등록합니다. ro를 업데이트해 훅이 바뀌면 같은 화면에 "안전 훅 갱신 필요"로 뜹니다
 - 에이전트 진입점: `CLAUDE.md`·`AGENTS.md`는 `python -m ro.adapters build`가 만드는 생성 파일입니다(`check`로 최신 여부 점검). UI·브라우저 작업은 `bash scripts/delegate.sh [--dry-run] agy <브리프 파일>`로 위임합니다
 - 테스트: `python -m unittest discover -s tests -t .`
 
