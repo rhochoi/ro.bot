@@ -1901,6 +1901,12 @@ PET_HTML = r"""<!DOCTYPE html>
     background: var(--panel-bg); color: var(--panel-fg); border: 1px solid var(--panel-border);
     border-radius: 12px; box-shadow: 0 10px 24px rgba(15, 14, 13, 0.24); padding: 4px; max-height: 232px; overflow-y: auto;
   }
+  .slash-pop, .conn-list, .pal-list { scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent; }
+  .slash-pop::-webkit-scrollbar, .conn-list::-webkit-scrollbar, .pal-list::-webkit-scrollbar { width: 6px; }
+  .slash-pop::-webkit-scrollbar-thumb, .conn-list::-webkit-scrollbar-thumb, .pal-list::-webkit-scrollbar-thumb {
+    background: var(--panel-border); border-radius: 3px; }
+  .slash-pop::-webkit-scrollbar-track, .conn-list::-webkit-scrollbar-track, .pal-list::-webkit-scrollbar-track { background: transparent; }
+  .conn-note code { font: inherit; font-weight: 700; white-space: nowrap; }
   .slash-pop .pal-item { align-items: center; }
   .slash-pop .pal-item b { min-width: 52px; }
   .slash-pop .pal-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4434,7 +4440,12 @@ function renderSlash() {
   askInput.setAttribute("aria-expanded", "true");
   askInput.setAttribute("aria-activedescendant", `slashOpt${slashSel}`);
   const sel = document.getElementById(`slashOpt${slashSel}`);
-  if (sel) sel.scrollIntoView({ block: "nearest" });
+  if (sel) {  // 목록 안에서만 스크롤한다(scrollIntoView는 열리는 중인 말풍선까지 움직여 목록이 맨 아래로 가기도 했다)
+    const foot = slashPop.querySelector(".pal-foot");
+    const view = slashPop.clientHeight - (foot ? foot.offsetHeight : 0);
+    if (sel.offsetTop < slashPop.scrollTop) slashPop.scrollTop = sel.offsetTop - 4;
+    else if (sel.offsetTop + sel.offsetHeight > slashPop.scrollTop + view) slashPop.scrollTop = sel.offsetTop + sel.offsetHeight - view;
+  }
 }
 function setAsk(v) {
   askInput.value = v;
@@ -4452,7 +4463,7 @@ async function pickSlash(run) {
   hideSlash();
   await runCommand(c, "");
 }
-askInput.addEventListener("input", () => { slashSel = 0; renderSlash(); });
+askInput.addEventListener("input", () => { slashSel = 0; slashPop.scrollTop = 0; renderSlash(); });
 askInput.addEventListener("focus", renderSlash);
 askInput.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== askInput) hideSlash(); }, 0));
 askInput.addEventListener("keydown", (e) => {
@@ -4501,7 +4512,8 @@ async function checkConnect() {
 }
 function connPlanBox(p) {
   if (!p) return null;
-  const src = p.source ? h("div", { class: "conn-note", text: `공통 규칙 원본: ${p.source} (바꾸기: ro connect --source 파일)` }) : null;
+  const src = p.source ? h("div", { class: "conn-note" }, `공통 규칙 원본: `, h("code", { text: p.source }),
+    ` · 바꾸려면 터미널에서 `, h("code", { text: "ro connect --source 파일" })) : null;
   if (!p.items.length) {
     return h("div", { class: "conn-note" }, p.notes.length ? p.notes.map(n => h("div", { text: n })) :
       h("div", { text: "설치된 도구는 모두 연결돼 있어요." }), src);

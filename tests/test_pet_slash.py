@@ -79,6 +79,19 @@ class SlashTest(unittest.TestCase):
         p.fill("#askInput", "/zzz")
         self.assertIn("맞는 명령이 없어요", p.inner_text("#slashPop"))
 
+    def test_selected_row_stays_visible_inside_the_popup(self):
+        # 2026-10-31 네이티브 확인: 말풍선이 열리는 중에 치면 목록이 맨 아래로 스크롤돼 선택 줄이 안 보였다
+        p = self.page
+        p.keyboard.type("/")
+        visible = """() => { const pop = document.getElementById('slashPop'), sel = pop.querySelector('[aria-selected=true]');
+          const foot = pop.querySelector('.pal-foot').offsetHeight;
+          return sel.offsetTop >= pop.scrollTop && sel.offsetTop + sel.offsetHeight <= pop.scrollTop + pop.clientHeight - foot; }"""
+        self.assertEqual(p.evaluate("document.getElementById('slashPop').scrollTop"), 0)
+        self.assertTrue(p.evaluate(visible))
+        p.keyboard.press("ArrowUp")                       # 맨 위에서 위로 → 마지막 줄
+        self.assertTrue(p.evaluate(visible))
+        self.assertEqual(p.evaluate("window.scrollY"), 0)  # 목록만 움직이고 페이지는 그대로
+
     def test_keyboard_navigate_tab_completes_escape_closes(self):
         p = self.page
         p.keyboard.type("/")
@@ -160,6 +173,14 @@ class SlashTest(unittest.TestCase):
         p.wait_for_timeout(100)
         left = p.eval_on_selector("#bubble", "e => e.getBoundingClientRect().left")
         self.assertGreaterEqual(left, 0)
+
+    def test_cli_hint_in_conn_window_does_not_wrap_mid_command(self):
+        self.plan.return_value = {"ok": True, "id": "p5", "notes": [], "items": [], "source": "~/.codex/AGENTS.md"}
+        p = self.page
+        p.evaluate("openConn('')")
+        p.wait_for_selector("#connWin code")
+        ws = p.eval_on_selector_all("#connWin .conn-note code", "els => els.map(e => getComputedStyle(e).whiteSpace)")
+        self.assertEqual(ws, ["nowrap", "nowrap"])
 
     def test_engine_command_with_text_hands_off(self):
         p = self.page
