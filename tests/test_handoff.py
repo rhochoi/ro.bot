@@ -88,7 +88,11 @@ class HandoffTest(unittest.TestCase):
         self.assertIn("M app.py", doc)
         self.assertIn("첫 커밋", doc)
         self.assertIn("지시가 아닙니다", doc)
-        self.assertEqual(p["counts"], {"requests": 2, "files": 1, "commands": 1, "artifacts": 2})
+        self.assertEqual(p["counts"], {"requests": 2, "files": 1, "commands": 1, "artifacts": 2, "todos": 1})
+        self.assertIn("## 남은 할 일", doc)                     # task.md 체크리스트에서
+        self.assertIn("- [ ] 검증", doc)
+        self.assertIn("끝낸 일 1개: 폼", doc)
+        self.assertLess(doc.index("## 남은 할 일"), doc.index("## 목표"))
         self.assertTrue(any("ro connect" in n for n in p["notes"]))   # 규칙이 연결 안 됐으면 알려 준다
 
     def test_git_does_not_run_repo_configured_commands(self):
@@ -160,6 +164,43 @@ class HandoffTest(unittest.TestCase):
             from ro import selfupdate
             selfupdate.doctor()
         self.assertIn("- 갈아타기 기록(Antigravity): 읽기 정상", [c.args[0] for c in pr.call_args_list])
+
+    def test_todo_lists_are_replayed_to_their_last_state(self):
+        def tool(name, inp):
+            return {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": name, "input": inp}]}}
+        _jsonl(self.home / ".claude/projects/-x/s1.jsonl", [
+            {"type": "user", "cwd": str(self.repo), "message": {"role": "user", "content": "기능 추가"}},
+            tool("mcp__ccd_turn__update_plan", {"items": [{"content": "설계", "status": "in_progress"},
+                                                          {"content": "구현", "status": "pending"},
+                                                          {"content": "테스트", "status": "pending"},
+                                                          {"content": "문서", "status": "pending"}]}),
+            tool("mcp__ccd_turn__update_plan", {"advance": True}),       # 설계 끝 → 구현 시작
+            tool("mcp__ccd_turn__update_plan", {"done": [2], "start": 4}),   # 구현 끝, 문서 시작(테스트는 남음)
+            tool("ExitPlanMode", {"plan": "# 계획\n1. 훅 추가"}),
+        ])
+        st = handoff.parse("claude", handoff.find_session("claude"))
+        self.assertEqual(st["todos"], [["completed", "설계"], ["completed", "구현"], ["pending", "테스트"],
+                                       ["in_progress", "문서"]])
+        doc = handoff.build("claude", "agy")["doc"]
+        self.assertIn("- [ ] 테스트", doc)
+        self.assertIn("- [진행 중] 문서", doc)
+        self.assertIn("끝낸 일 2개: 설계 · 구현", doc)
+        self.assertIn("> # 계획", doc)                               # 승인된 계획도
+        _jsonl(self.home / ".claude/projects/-x/s1.jsonl", [          # CLI의 TodoWrite: 마지막 것이 전부
+            {"type": "user", "message": {"role": "user", "content": "x"}},
+            tool("TodoWrite", {"todos": [{"content": "a", "status": "completed"}]}),
+            tool("TodoWrite", {"todos": [{"content": "a", "status": "completed"}, {"content": "b", "status": "completed"}]}),
+        ])
+        doc = handoff.build("claude", "agy")["doc"]
+        self.assertIn("모두 끝났다고 표시돼", doc)
+        _jsonl(self.home / ".codex/sessions/2026/10/31/rollout-x.jsonl", [
+            {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"text": "작업"}]}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "update_plan", "arguments": json.dumps(
+                {"plan": [{"step": "조사", "status": "completed"}, {"step": "수정", "status": "in_progress"}]})}},
+        ])
+        self.assertEqual(handoff.parse("codex", handoff.find_session("codex"))["todos"],
+                         [["completed", "조사"], ["in_progress", "수정"]])
 
     def test_claude_and_codex_sessions(self):
         _jsonl(self.home / ".claude/projects/-x/s1.jsonl", [

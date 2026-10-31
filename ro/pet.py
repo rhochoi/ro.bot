@@ -4641,7 +4641,7 @@ async function relayPlan(arg, session) {
     ...(r.why || []).map(w => h("div", { class: "block-sub", text: `자동 선택 · ${w}` })),
     h("div", { class: "toast-file", text: r.title }),
     h("div", { class: "block-sub", text: `마지막 활동 ${r.updated} · ${r.cwd || "작업 폴더 모름"}` }),
-    h("div", { class: "block-sub", text: `요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
+    h("div", { class: "block-sub", text: `남은 할 일 ${c.todos || 0} · 요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
       + (r.masked ? " · 비밀값은 가림" : "") }),
     ...(r.notes || []).map(n => h("div", { class: "block-sub", text: n })),
     body,

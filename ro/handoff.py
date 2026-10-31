@@ -25,6 +25,9 @@ MAX_DOC = 12000    # 클립보드로 넘길 문서 길이. 넘으면 뒤(산출�
 NAMES = {e["id"]: e["name"] for e in engines.ENGINES}
 WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit"}
 CMD_TOOLS = {"run_command", "Bash", "exec_command", "shell", "local_shell"}
+# 남은 할 일: 원래 도구가 직접 남긴 목록만 쓴다(문장에서 추측하지 않는다)
+CHECK = re.compile(r"^\s*[-*] \[([ xX/])\] (.+)$", re.M)   # Antigravity task.md 같은 체크리스트
+TODO_STATUS = {" ": "pending", "/": "in_progress", "x": "completed", "X": "completed"}
 PATCH_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.M)
 # 비밀값(log.redact) 말고도 외부 모델로 가면 안 되는 개인정보: 이메일·주민번호·전화·카드번호
 # 숫자 패턴은 앞뒤가 영문·숫자·-로 이어지면 잡지 않는다(UUID·해시 조각을 카드번호로 오인하지 않게). 한글은 붙어도 잡는다
@@ -216,12 +219,46 @@ def _user_text(s):
 
 
 def _blank():
-    return {"cwd": None, "users": [], "ai": [], "files": [], "commands": [], "artifacts": [], "goal": "", "lines": 0}
+    return {"cwd": None, "users": [], "ai": [], "files": [], "commands": [], "artifacts": [], "goal": "", "lines": 0,
+            "todos": [], "plan": ""}
+
+
+def _todo_list(items, text_key):
+    return [[str(it.get("status") or "pending"), str(it.get(text_key) or "").strip()]
+            for it in items if isinstance(it, dict) and it.get(text_key)]
+
+
+def _update_todos(st, name, args):
+    """할 일 목록을 마지막 상태로 다시 쌓는다. 데스크톱 앱 목록(update_plan)은 통째 교체와 증분(advance·done·start)이 섞인다."""
+    todos = st["todos"]
+    if name == "TodoWrite" and isinstance(args.get("todos"), list):          # Claude Code CLI
+        st["todos"] = _todo_list(args["todos"], "content")
+    elif name == "update_plan" and isinstance(args.get("plan"), list):        # Codex
+        st["todos"] = _todo_list(args["plan"], "step")
+    elif name.endswith("update_plan"):                                        # Claude 데스크톱 앱
+        if isinstance(args.get("items"), list):
+            st["todos"] = todos = _todo_list(args["items"], "content")
+        if args.get("advance"):
+            cur = next((i for i, t in enumerate(todos) if t[0] == "in_progress"), None)
+            if cur is not None:
+                todos[cur][0] = "completed"
+            nxt = next((i for i, t in enumerate(todos) if t[0] == "pending" and (cur is None or i > cur)), None)
+            if nxt is not None:
+                todos[nxt][0] = "in_progress"
+        for n in args.get("done") or []:
+            if isinstance(n, int) and 0 < n <= len(todos):
+                todos[n - 1][0] = "completed"
+        n = args.get("start")
+        if isinstance(n, int) and 0 < n <= len(todos):
+            todos[n - 1][0] = "in_progress"
+    elif name == "ExitPlanMode" and args.get("plan"):
+        st["plan"] = str(args["plan"])
 
 
 def _add_tool(st, name, args):
     if not isinstance(args, dict):
         return
+    _update_todos(st, name or "", args)
     if name in WRITE_TOOLS:
         p = args.get("Path") or args.get("file_path") or args.get("notebook_path")
         if p:
@@ -250,6 +287,15 @@ def _parse_agy(path, st):
     for f in sorted(brain.iterdir()) if brain.is_dir() else []:
         if f.is_file() and not f.name.startswith(".") and not f.name.endswith(".metadata.json"):
             st["artifacts"].append(f)
+    if not st["todos"]:   # Antigravity는 할 일을 산출물 체크리스트로 남긴다(task.md 우선)
+        for f in sorted((a for a in st["artifacts"] if a.suffix.lower() == ".md"), key=lambda a: a.name != "task.md"):
+            try:
+                found = CHECK.findall(f.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if found:
+                st["todos"] = [[TODO_STATUS[m], t.strip()] for m, t in found]
+                break
 
 
 def _parse_claude(path, st):
@@ -364,6 +410,25 @@ def workspace(cwd, runner=subprocess.run):
 
 # ---- 문서 만들기 ------------------------------------------------------------
 
+def _todo_section(st, src_name, keep_done=3):
+    """남은 할 일을 맨 위 가까이: 진행 중·남은 것은 모두, 끝낸 것은 개수와 마지막 몇 개만."""
+    out = []
+    todos = [(s, _cut(t, 200)) for s, t in st["todos"]]
+    if todos:
+        left = [(s, t) for s, t in todos if s != "completed"]
+        done = [t for s, t in todos if s == "completed"]
+        out += ["## 남은 할 일", "", f"{src_name}가 마지막으로 남긴 할 일 목록입니다(그 도구가 표시한 상태라 실제와 다를 수 있습니다)."]
+        out += [""] + [f"- [{'진행 중' if s == 'in_progress' else ' '}] {t}" for s, t in left]
+        if not left:
+            out += ["", "- 목록의 일은 모두 끝났다고 표시돼 있습니다."]
+        if done:
+            out += [f"- 끝낸 일 {len(done)}개: " + " · ".join(done[-keep_done:]) + (" 등" if len(done) > keep_done else "")]
+        out += [""]
+    if st["plan"]:
+        out += ["## 승인된 계획(마지막)", "", _quote(_cut(st["plan"], 1500)), ""]
+    return out
+
+
 def _artifact_text(f, n=2500):
     if f.suffix.lower() not in (".md", ".txt"):
         return None
@@ -406,6 +471,7 @@ def build(src, dst, session=None, runner=subprocess.run):
         else:
             sec += ["- 커밋하지 않은 변경 없음"]
         sec += [""]
+    sec += _todo_section(st, NAMES[src])
     sec += ["## 목표(첫 요청)", "", _quote(_cut(st["goal"], 1200)) or "(기록된 요청 없음)", ""]
     recent = st["users"][1:][-6:]
     if recent:
@@ -445,7 +511,7 @@ def build(src, dst, session=None, runner=subprocess.run):
             "title": _title(st["goal"]),
             "cwd": st["cwd"], "doc": doc, "masked": _masked(raw, doc),
             "counts": {"requests": len(st["users"]), "files": len(st["files"]), "commands": len(st["commands"]),
-                       "artifacts": len(st["artifacts"])},
+                       "artifacts": len(st["artifacts"]), "todos": sum(s != "completed" for s, _ in st["todos"])},
             "notes": notes}
 
 
@@ -582,7 +648,7 @@ def cli(src=None, dst=None, session=None, yes=False, list_only=False, show=False
     c = plan["counts"]
     print(f"{NAMES[plan['src']]} 세션 {plan['session'][:8]} (마지막 활동 {plan['updated']}) → {NAMES[plan['dst']]}")
     print(f"  작업 폴더: {plan['cwd'] or '모름'}")
-    print(f"  요청 {c['requests']}개 · 바꾼 파일 {c['files']}개 · 명령 {c['commands']}개 · 산출물 {c['artifacts']}개"
+    print(f"  남은 할 일 {c['todos']}개 · 요청 {c['requests']}개 · 바꾼 파일 {c['files']}개 · 명령 {c['commands']}개 · 산출물 {c['artifacts']}개"
           f" · 문서 {len(plan['doc'])}자" + (" · 비밀값으로 보이는 부분을 가림" if plan["masked"] else ""))
     for n in plan["notes"]:
         print(f"  참고: {n}")
