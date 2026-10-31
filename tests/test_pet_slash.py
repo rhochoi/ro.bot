@@ -170,7 +170,12 @@ class SlashTest(unittest.TestCase):
         p = self.page
         p.evaluate("moveStageBy(-300, 0)")
         p.set_viewport_size({"width": 520, "height": 760})
-        p.wait_for_timeout(100)
+        # 고정 시간(100ms)만 기다리면 느린 CI에서 resize 처리 전에 읽어 -150으로 실패했다(2026-10-31).
+        # 들어올 때까지 기다리되, 끝내 안 들어오면 시간 초과 뒤 아래 단언이 실패한다
+        try:
+            p.wait_for_function("document.querySelector('#bubble').getBoundingClientRect().left >= 0", timeout=3000)
+        except Exception:
+            pass
         left = p.eval_on_selector("#bubble", "e => e.getBoundingClientRect().left")
         self.assertGreaterEqual(left, 0)
 
