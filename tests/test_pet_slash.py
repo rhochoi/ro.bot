@@ -146,6 +146,20 @@ class SlashTest(unittest.TestCase):
         self.page.wait_for_selector("#tabBtnSettings .conn-badge")
         bg = self.page.eval_on_selector("#tabBtnSettings .conn-badge", "e => getComputedStyle(e).backgroundColor")
         self.assertEqual(bg, "rgb(199, 51, 16)")
+        self.assertEqual(self.page.get_attribute("#tabBtnSettings", "aria-label"), "설정, 연결할 항목 1개")
+        self.plan.return_value = {"ok": True, "id": "p0", "notes": [], "items": []}
+        self.page.evaluate("checkConnect()")
+        self.page.wait_for_selector("#tabBtnSettings .conn-badge", state="detached")
+        self.assertIsNone(self.page.get_attribute("#tabBtnSettings", "aria-label"))
+
+    def test_resizing_the_browser_keeps_bubble_on_screen(self):
+        # 2026-10-31 감사: 펫을 옮긴 뒤 창을 줄이면 말풍선이 화면 밖(left<0)으로 나갔다
+        p = self.page
+        p.evaluate("moveStageBy(-300, 0)")
+        p.set_viewport_size({"width": 520, "height": 760})
+        p.wait_for_timeout(100)
+        left = p.eval_on_selector("#bubble", "e => e.getBoundingClientRect().left")
+        self.assertGreaterEqual(left, 0)
 
     def test_engine_command_with_text_hands_off(self):
         p = self.page

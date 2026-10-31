@@ -82,6 +82,7 @@ def main(argv=None):
     cn = sub.add_parser("connect", help="Claude Code·Codex·Antigravity에 공통 규칙·안전 훅 연결(미리 보기 → --yes로 적용 → undo)")
     cn.add_argument("action", nargs="?", default="plan", choices=["plan", "undo"])
     cn.add_argument("--yes", action="store_true", help="보여 준 계획을 적용")
+    cn.add_argument("--source", metavar="파일", help="공통 규칙 원본을 정한다(기본: ~/.codex/AGENTS.md가 있으면 그것)")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정 상태")
@@ -255,7 +256,7 @@ def main(argv=None):
     elif args.cmd == "doctor":
         raise SystemExit(selfupdate.doctor())
     elif args.cmd == "connect":
-        raise SystemExit(engines.connect_cli(args.action, args.yes))
+        raise SystemExit(engines.connect_cli(args.action, args.yes, args.source))
     elif args.cmd == "setup":
         try:
             if args.setup_cmd in ("status", None):

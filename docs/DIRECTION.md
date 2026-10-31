@@ -61,6 +61,8 @@ M3(측정)를 M1보다 앞세울 수도 있으나, M1·M2는 작고 위험이 �
   `python -m ro.adapters build`로 생성하는 파일이며 직접 고치지 않는다(`check`와 단위 테스트가 드리프트를 잡는다).
   codex·agy용 `AGENTS.md`는 `@import`가 없어 원칙 본문을 포함하고, `CLAUDE.md`는 `@identity/principles.md` 포인터다.
 - **전역 설치는 자동으로 하지 않는다.** `~/.codex/AGENTS.md`·`~/.claude/CLAUDE.md` 수정은 지속 설정 변경이라 사용자 승인 뒤에만 한다.
+  (2026-10-30 갱신: `ro connect`·펫 `/연결`이 고칠 파일을 먼저 보여 주고 승인한 것만 쓴다. 자동은 '알아채기'까지이고 쓰기는 늘 승인 뒤다.
+  원본은 도구에 묶지 않고 사용자가 고른다 — `ro connect --source 파일`, 정하지 않으면 `~/.codex/AGENTS.md`가 있을 때만 그것)
   이 저장소 폴더에서 도구를 실행할 때만 어댑터가 적용된다.
 - **확인 방법**: `python -m ro.adapters probe --engine <엔진>` — 같은 질문(식별 문구)을 저장소 폴더와 빈 폴더에서 던져
   저장소에서만 답이 나오는지 본다. 한계: 지시로 파일 읽기를 막았을 뿐이라 정황 증거다.

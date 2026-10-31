@@ -2910,6 +2910,9 @@ function fitStage() {
   }
 }
 
+// 브라우저 창을 줄이거나 늘려도 옮겨 둔 펫·말풍선이 화면 밖으로 나가지 않게
+window.addEventListener("resize", () => { if (!isNativeHost) fitStage(); });
+
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
   if (e.target.closest("button") || e.target.closest("input")) return;
@@ -4483,10 +4486,11 @@ const HOOK_TEXT = { on: "안전 훅", missing: "안전 훅 없음", stale: "안�
 function setConnBadge(n) {
   for (const el of [document.getElementById("tabBtnSettings"), document.getElementById("connOpenBtn")]) {
     let b = el.querySelector(".conn-badge");
-    if (!n) { if (b) b.remove(); continue; }
-    if (!b) { b = h("span", { class: "conn-badge" }); el.append(b); }
+    if (!el.dataset.label) el.dataset.label = el.textContent.trim();
+    if (!n) { if (b) b.remove(); el.removeAttribute("aria-label"); continue; }
+    if (!b) { b = h("span", { class: "conn-badge", "aria-hidden": "true" }); el.append(b); }
     b.textContent = n;
-    b.setAttribute("aria-label", `연결할 항목 ${n}개`);
+    el.setAttribute("aria-label", `${el.dataset.label}, 연결할 항목 ${n}개`);  // 숫자만 붙여 "설정1"로 읽히지 않게
   }
 }
 async function checkConnect() {
@@ -4497,9 +4501,10 @@ async function checkConnect() {
 }
 function connPlanBox(p) {
   if (!p) return null;
+  const src = p.source ? h("div", { class: "conn-note", text: `공통 규칙 원본: ${p.source} (바꾸기: ro connect --source 파일)` }) : null;
   if (!p.items.length) {
-    return p.notes.length ? h("div", { class: "conn-note" }, p.notes.map(n => h("div", { text: n }))) :
-      h("div", { class: "conn-note", text: "설치된 도구는 모두 연결돼 있어요." });
+    return h("div", { class: "conn-note" }, p.notes.length ? p.notes.map(n => h("div", { text: n })) :
+      h("div", { text: "설치된 도구는 모두 연결돼 있어요." }), src);
   }
   const go = h("button", { class: "mini-btn primary", type: "button", text: "승인하고 연결", onclick: async () => {
     go.disabled = true;
@@ -4519,7 +4524,7 @@ function connPlanBox(p) {
   return h("div", { class: "conn-plan", role: "region", "aria-label": "연결할 항목" },
     h("div", { class: "conn-name", text: `연결할 항목 ${p.items.length}개 · 아직 아무것도 바뀌지 않았어요` }),
     h("ul", {}, p.items.map(it => h("li", { title: it.path, text: it.desc }))),
-    p.notes.map(n => h("div", { class: "conn-note", text: n })),
+    p.notes.map(n => h("div", { class: "conn-note", text: n })), src,
     h("div", { class: "conn-note", text: "되돌리기는 ro가 넣은 줄·훅·링크만 빼요. 그 뒤에 바뀐 설정은 그대로 둬요." }),
     h("div", { class: "chip-row" }, go));
 }
@@ -4576,8 +4581,9 @@ async function handoffTo(id, text) {
     return false;
   }
   const head = r.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : `${r.name}을(를) 열었어요`;
-  const sub = r.mode === "cli" ? "터미널에서 ⌘V 후 ↵" : r.copied ? "입력을 복사했어요 · ⌘V로 붙여 넣으세요" : null;
-  showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 4000);
+  const sub = (r.mode === "cli" ? "터미널에서 ⌘V 후 ↵" : r.copied ? "입력을 복사했어요 · ⌘V로 붙여 넣으세요" : "")
+    + (r.masked ? " · 비밀값으로 보이는 부분은 가렸어요" : "");
+  showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub.replace(/^ · /, "") }) : null], 4000);
   return true;
 }
 document.getElementById("connOpenBtn").addEventListener("click", () => openConn(""));

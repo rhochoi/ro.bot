@@ -27,7 +27,7 @@ MASK = "[REDACTED]"
 SECRET_ASSIGN = re.compile(
     r"(?<![A-Za-z0-9_-])((?:[A-Za-z0-9]+[_-])*(?:PG)?(?:pass(?:word|wd)?|secret|token|api[_-]?key|authorization)"
     r"(?:[_-]?(?:access[_-]?)?key)?)(\s*[:=]\s*)(?!\[REDACTED\])"
-    r"(\"[^\"]*\"|'[^']*'|\S+)", re.I)
+    r"(\"[^\"]*\"|'[^']*'|[^\s&]+)", re.I)   # 따옴표 없는 값은 & 앞까지(URL의 다음 매개변수는 남긴다)
 # "비밀번호는 hunter2"처럼 조사로 이어진 값: 숫자·기호가 섞인 낱말만 비밀로 본다("비밀번호는 어떻게"는 그대로)
 SECRET_KO = re.compile(
     r"(비밀\s*번호|패스워드|암호|토큰)(\s*[:=]\s*|\s*(?:은|는|이|가)\s+(?=\"|'|\S*[0-9!@#$%^&*_-]))"
