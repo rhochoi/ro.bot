@@ -1,4 +1,5 @@
 # ro
+<img width="200" height="200" alt="App Icon" src="https://github.com/user-attachments/assets/be2bfbd9-90c8-4fe6-b9b3-92ba80fa3358" />
 
 **폴더 정리, 안 해도 됩니다. 필요할 때 ro에게 물어보세요.**
 
