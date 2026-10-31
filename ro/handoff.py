@@ -22,9 +22,19 @@ OUT_DIR = "~/.ro/handoff"
 PENDING = "~/.ro/handoff/pending/claude.json"   # Claude Code 새 세션이 갈아타기 훅으로 한 번 이어받는다
 KEEP = 20          # 남겨 둘 인수인계 문서 수. 오래된 것부터 지운다(ro가 만든 파일만)
 MAX_DOC = 12000    # 클립보드로 넘길 문서 길이. 넘으면 뒤(산출물)부터 줄인다 — 지금 상태·목표는 앞에 둔다
-NAMES = {e["id"]: e["name"] for e in engines.ENGINES}
-WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit"}
-CMD_TOOLS = {"run_command", "Bash", "exec_command", "shell", "local_shell"}
+# 갈아타기 도구: 연결(engines) 셋에 더해, 기록을 읽을 수 있는 Gemini CLI와 기록이 이 Mac에 없어 받는 쪽으로만 쓰는 앱
+# (붙여 넣기로 받는다). cli_cmd는 앱이 없을 때 터미널에 붙여 넣을 명령({cli}·{path}).
+TOOLS = tuple(dict(e) for e in engines.ENGINES) + (
+    {"id": "gemini", "name": "Gemini CLI", "cli": "gemini", "apps": (), "cli_cmd": '{cli} -i "$(cat {path})"'},
+    {"id": "cursor", "name": "Cursor", "cli": "cursor-agent", "apps": ("Cursor.app",)},
+    {"id": "chatgpt", "name": "ChatGPT", "cli": None, "apps": ("ChatGPT.app",)},
+    {"id": "geminiapp", "name": "Gemini 앱", "cli": None, "apps": ("Gemini.app", "Google Gemini.app")},
+    {"id": "copilot", "name": "GitHub Copilot", "cli": None, "apps": ("GitHub Copilot.app",)},
+)
+NAMES = {t["id"]: t["name"] for t in TOOLS}
+SOURCES = ("claude", "codex", "agy", "gemini")   # 이 Mac에 대화 기록이 남아 읽을 수 있는 도구
+WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit", "replace"}
+CMD_TOOLS = {"run_command", "Bash", "exec_command", "shell", "local_shell", "run_shell_command"}
 # 남은 할 일: 원래 도구가 직접 남긴 목록만 쓴다(문장에서 추측하지 않는다)
 CHECK = re.compile(r"^\s*[-*] \[([ xX/])\] (.+)$", re.M)   # Antigravity task.md 같은 체크리스트
 TODO_STATUS = {" ": "pending", "/": "in_progress", "x": "completed", "X": "completed"}
@@ -43,6 +53,18 @@ PII = (
 
 def _x(p):
     return engines._x(p)
+
+
+def tool(tid):
+    return next((t for t in TOOLS if t["id"] == tid), None)
+
+
+def _app(t, app_dirs):
+    return engines._find_app(t["apps"], app_dirs) if t["apps"] else None
+
+
+def _cli(t, which):
+    return which(t["cli"]) if t.get("cli") else None
 
 
 def _mask(text):
@@ -91,6 +113,8 @@ def _session_files(engine_id):
         pats = ["~/.claude/projects/*/*.jsonl"]
     elif engine_id == "codex":
         pats = ["~/.codex/sessions/*/*/*/*.jsonl"]
+    elif engine_id == "gemini":   # 프로젝트마다 tmp/<이름>/chats/session-*.jsonl(예전 형식은 .json 한 덩어리)
+        pats = ["~/.gemini/tmp/*/chats/session-*.jsonl", "~/.gemini/tmp/*/chats/session-*.json"]
     else:
         return []
     files = [Path(p) for pat in pats for p in glob.glob(str(_x(pat)))]
@@ -100,6 +124,8 @@ def _session_files(engine_id):
 def _session_id(engine_id, path):
     if engine_id == "agy":
         return path.parents[2].name
+    if engine_id == "gemini":     # session-2026-10-14T16-13-9f4636fe → 9f4636fe
+        return path.stem.rsplit("-", 1)[-1]
     m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", path.stem)   # codex: rollout-날짜-<uuid>
     return m[0] if m else path.stem
 
@@ -128,7 +154,7 @@ def find_session(engine_id, session=None):
 
 
 # ---- 자동으로 고르기 ---------------------------------------------------------
-PREFER = ("claude", "codex", "agy")   # 받을 도구 후보가 여럿일 때
+PREFER = ("claude", "codex", "agy", "gemini", "cursor", "chatgpt", "geminiapp", "copilot")   # 받을 도구 후보가 여럿일 때
 
 
 def _run_out(args, runner):
@@ -151,22 +177,21 @@ def running(runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_DIRS
     (Codex처럼 늘 도는 백그라운드 데몬은 '열어 둔 것'이 아니다)."""
     comms = _run_out(["ps", "-axo", "comm="], runner).splitlines()
     out = set()
-    for e in engines.ENGINES:
-        app = engines._find_app(e["apps"], app_dirs)
-        cli = which(e["cli"])
+    for e in TOOLS:
+        app, cli = _app(e, app_dirs), _cli(e, which)
         if any((app and c.startswith(str(app) + "/")) or (cli and c.strip() in (cli, e["cli"])) for c in comms):
             out.add(e["id"])
     return out
 
 
 def _installed(which, app_dirs):
-    return [e["id"] for e in engines.ENGINES if engines._find_app(e["apps"], app_dirs) or which(e["cli"])]
+    return [e["id"] for e in TOOLS if _app(e, app_dirs) or _cli(e, which)]
 
 
 def latest_source(exclude=None, n=5):
     """내용 있는 세션을 가장 최근에 남긴 도구와 그 시각. 받을 도구(exclude)는 뺀다."""
     best = (None, 0.0)
-    for eid in NAMES:
+    for eid in SOURCES:
         if eid == exclude:
             continue
         for p in _session_files(eid)[:n]:
@@ -184,8 +209,8 @@ def choose(src=None, dst=None, runner=subprocess.run, which=shutil.which, app_di
     why = []
     if dst is None:
         front = front_app(runner)
-        for e in engines.ENGINES:
-            app = engines._find_app(e["apps"], app_dirs)
+        for e in TOOLS:
+            app = _app(e, app_dirs)
             if front and app and str(app) == front and e["id"] != src:
                 dst = e["id"]
                 why.append(f"받을 도구: 맨 앞에 열린 {e['name']}")
@@ -235,6 +260,8 @@ def _update_todos(st, name, args):
         st["todos"] = _todo_list(args["todos"], "content")
     elif name == "update_plan" and isinstance(args.get("plan"), list):        # Codex
         st["todos"] = _todo_list(args["plan"], "step")
+    elif name == "write_todos" and isinstance(args.get("todos"), list):       # Gemini CLI
+        st["todos"] = _todo_list(args["todos"], "description")
     elif name.endswith("update_plan"):                                        # Claude 데스크톱 앱
         if isinstance(args.get("items"), list):
             st["todos"] = todos = _todo_list(args["items"], "content")
@@ -353,6 +380,48 @@ def _parse_codex(path, st):
             st["files"].extend(PATCH_FILE.findall(pl.get("input") or ""))
 
 
+def _projects():
+    """Gemini CLI 작업 폴더 표(~/.gemini/projects.json: 경로 → tmp 폴더 이름)."""
+    try:
+        v = json.loads(_x("~/.gemini/projects.json").read_text(encoding="utf-8")).get("projects")
+        return v if isinstance(v, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _parse_gemini(path, st):
+    """메시지 목록 전체를 담은 줄($set)이 이어진다 — 마지막 목록이 지금 상태. 예전 형식은 파일 하나가 JSON 한 덩어리."""
+    msgs = []
+    if path.suffix == ".json":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            msgs = data.get("messages") or [] if isinstance(data, dict) else []
+            st["lines"] = len(msgs) + 1
+        except (OSError, ValueError):
+            pass
+    else:
+        for d in _jsonl(path, st):
+            sv = d.get("$set")
+            if isinstance(sv, dict) and isinstance(sv.get("messages"), list):
+                msgs = sv["messages"]
+            elif d.get("type") and "content" in d:     # 메시지를 한 줄씩 덧붙이는 형식
+                msgs.append(d)
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        text = c if isinstance(c, str) else "\n".join(x.get("text", "") for x in c or [] if isinstance(x, dict))
+        if m.get("type") == "user" and (t := _user_text(text)):
+            st["users"].append(t)
+        elif m.get("type") in ("gemini", "model") and text.strip():
+            st["ai"].append(text)
+        for tc in m.get("toolCalls") or []:
+            if isinstance(tc, dict):
+                _add_tool(st, tc.get("name"), tc.get("args"))
+    folder = path.parents[1].name
+    st["cwd"] = next((k for k, v in _projects().items() if v == folder), None)
+
+
 def _dedupe(seq):
     seen, out = set(), []
     for x in reversed(seq):   # 마지막에 만진 순서를 지킨다
@@ -374,7 +443,7 @@ def _git_root(p):
 def parse(engine_id, path, light=False):
     """세션 기록 → 정리된 상태. light면 목록용으로 첫 요청·작업 폴더만 본다(그래도 파일은 끝까지 읽는다)."""
     st = _blank()
-    {"agy": _parse_agy, "claude": _parse_claude, "codex": _parse_codex}[engine_id](Path(path), st)
+    {"agy": _parse_agy, "claude": _parse_claude, "codex": _parse_codex, "gemini": _parse_gemini}[engine_id](Path(path), st)
     st["goal"] = st["users"][0] if st["users"] else ""
     st["files"] = _dedupe(st["files"])
     if not st["cwd"]:   # Antigravity는 작업 폴더를 남기지 않는다: 바꾼 파일이 가장 많이 속한 git 저장소로 추정
@@ -441,7 +510,9 @@ def _artifact_text(f, n=2500):
 def build(src, dst, session=None, runner=subprocess.run):
     """인수인계 문서(가린 Markdown)와 요약 정보. 아무것도 쓰지 않는다."""
     if src not in NAMES or dst not in NAMES:
-        return {"ok": False, "error": "도구는 claude·codex·agy 중에서 골라 주세요."}
+        return {"ok": False, "error": "도구는 " + "·".join(NAMES) + " 중에서 골라 주세요."}
+    if src not in SOURCES:
+        return {"ok": False, "error": f"{NAMES[src]}는 대화 기록이 이 Mac에 남지 않아 받는 쪽으로만 쓸 수 있어요."}
     if src == dst:
         return {"ok": False, "error": "넘겨줄 도구와 받을 도구가 같아요."}
     path = find_session(src, session)
@@ -449,6 +520,8 @@ def build(src, dst, session=None, runner=subprocess.run):
         return {"ok": False, "error": f"{NAMES[src]} 대화 기록을 이 Mac에서 찾지 못했어요."}
     st = parse(src, path)
     fmt = readable(st)
+    if fmt == "empty":
+        return {"ok": False, "error": f"이 {NAMES[src]} 세션은 열기만 하고 대화가 없어 넘길 내용이 없어요. 다른 세션을 고르세요."}
     if fmt == "unreadable":   # 빈 문서를 넘기느니 멈춘다
         return {"ok": False, "error": f"이 {NAMES[src]} 세션에서 넘길 내용을 읽지 못했어요. 빈 세션이면 다른 세션을 고르고, "
                                       "최근 세션이 모두 이렇다면 기록 형식이 바뀐 것이니 `ro doctor`로 확인하세요."}
@@ -489,7 +562,7 @@ def build(src, dst, session=None, runner=subprocess.run):
     others = [f.name for f in st["artifacts"] if _artifact_text(f) is None]
     if others:
         sec += ["## 그 밖의 산출물(내용은 옮기지 않음)", ""] + [f"- `{f}`" for f in others] + [""]
-    rules = engines.rules_state(dst)
+    rules = engines.rules_state(dst) if engines.get(dst) else None   # 공통 규칙은 연결할 수 있는 도구만
     if rules in ("source", "linked"):
         sec += [f"공통 규칙: {NAMES[dst]}도 같은 공통 규칙 원본을 가리키고 있습니다.", ""]
     raw = "\n".join(sec)
@@ -503,7 +576,7 @@ def build(src, dst, session=None, runner=subprocess.run):
         notes.append("요청 기록이 없는 세션이에요(다른 에이전트가 시작했을 수 있어요). 목표를 받는 쪽에 직접 알려 주세요.")
     if fmt == "partial":
         notes.append(f"{NAMES[src]} 기록 일부(응답·파일·명령)를 읽지 못했어요. 도구가 업데이트됐을 수 있으니 내용을 확인하세요.")
-    if rules not in ("source", "linked"):
+    if rules not in ("source", "linked", None):
         notes.append(f"{NAMES[dst]}에 공통 규칙이 연결돼 있지 않아요. 같은 규칙을 쓰려면 `ro connect`로 먼저 연결하세요.")
     if not st["cwd"]:
         notes.append("작업 폴더를 알아내지 못했어요. 받는 쪽에서 폴더를 직접 알려 주세요.")
@@ -522,12 +595,12 @@ def _masked(raw, doc):
 
 
 def readable(st):
-    """기록을 제대로 읽었는지: ok · partial(요청만 읽음) · unreadable(줄은 있는데 아무것도 못 읽음).
+    """기록을 제대로 읽었는지: ok · partial(요청만 읽음) · unreadable(줄은 있는데 아무것도 못 읽음) · empty(빈 세션).
     각 도구의 기록 형식은 공개 규격이 아니라서, 바뀌면 조용히 빈 문서를 만드는 대신 여기서 알린다.
     요청이 없어도 응답·명령이 있으면 읽은 것이다(다른 에이전트가 시작한 세션)."""
     work = st["ai"] or st["files"] or st["commands"]
     if not st["users"] and not work:
-        return "unreadable" if st["lines"] >= 3 else "ok"
+        return "unreadable" if st["lines"] >= 3 else "empty"
     if st["users"] and st["lines"] >= 20 and not work:
         return "partial"
     return "ok"
@@ -537,8 +610,9 @@ def check(n=5):
     """`ro doctor`용: 도구마다 최근 세션 n개 중 하나라도 지금 형식으로 읽히면 ok.
     빈 세션 하나 때문에 경고하지 않되, 최근 것이 모두 안 읽히면 형식이 바뀐 것으로 본다."""
     out = []
-    for eid in NAMES:
+    for eid in SOURCES:
         states = [readable(parse(eid, p)) for p in _session_files(eid)[:n]]
+        states = [x for x in states if x != "empty"]   # 빈 세션(열기만 함)은 형식 판단의 근거가 아니다
         if states:
             out.append((eid, "ok" if "ok" in states else ("partial" if "partial" in states else "unreadable")))
     return out
@@ -546,8 +620,12 @@ def check(n=5):
 
 # 펫용: 미리 보기한 문서는 서버에만 두고 화면에는 id만 넘긴다(승인할 때 본 그대로를 적용하려고)
 _PENDING = {}
+# '제미나이'는 지금까지처럼 Antigravity(Gemini 모델로 쓰던 도구). Gemini CLI·앱은 따로 이름을 쓴다
 ALIASES = {"claude": "claude", "클로드": "claude", "codex": "codex", "코덱스": "codex", "agy": "agy",
-           "antigravity": "agy", "안티그래비티": "agy", "안티": "agy", "gemini": "agy", "제미나이": "agy", "제미니": "agy"}
+           "antigravity": "agy", "안티그래비티": "agy", "안티": "agy", "제미나이": "agy", "제미니": "agy",
+           "gemini": "gemini", "gemini-cli": "gemini", "제미나이cli": "gemini",
+           "cursor": "cursor", "커서": "cursor", "chatgpt": "chatgpt", "gpt": "chatgpt", "챗지피티": "chatgpt",
+           "geminiapp": "geminiapp", "제미나이앱": "geminiapp", "copilot": "copilot", "코파일럿": "copilot"}
 
 
 def plan_for_pet(arg="", session=None, **kw):
@@ -561,7 +639,7 @@ def plan_for_pet(arg="", session=None, **kw):
     plan = build(src, dst, session or None)
     if not plan["ok"]:
         return plan
-    pool = [x for eid in NAMES if eid != dst for x in sessions(eid, limit=5) if not x["empty"]]   # 빈 세션은 고를 게 없다
+    pool = [x for eid in SOURCES if eid != dst for x in sessions(eid, limit=5) if not x["empty"]]   # 빈 세션은 고를 게 없다
     others = [{k: x[k] for k in ("engine", "id", "updated", "title", "requests")} | {"engine_name": NAMES[x["engine"]]}
               for x in sorted(pool, key=lambda x: x["updated"], reverse=True)
               if not (x["engine"] == src and x["id"] == plan["session"])][:4]
@@ -593,9 +671,9 @@ def _prune(out):
 
 def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_DIRS):
     """승인한 문서를 저장하고 클립보드에 넣은 뒤 받을 도구를 연다. 앱이 없으면 CLI 명령을 클립보드에 넣는다."""
-    e = engines.get(plan["dst"])
-    app = engines._find_app(e["apps"], app_dirs)
-    if app is None and which(e["cli"]) is None:
+    e = tool(plan["dst"])
+    app = _app(e, app_dirs)
+    if app is None and _cli(e, which) is None:
         return {"ok": False, "error": f"{e['name']}이(가) 이 Mac에 없어요."}
     out = fsutil.ensure_dir(_x(OUT_DIR))
     path = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{plan['src']}-to-{plan['dst']}.md"
@@ -607,7 +685,7 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
             old.unlink(missing_ok=True)
         fsutil.atomic_write(_x(PENDING), json.dumps({"doc": str(path), "cwd": plan["cwd"], "src": plan["src"],
                                                      "created": time.time()}, ensure_ascii=False))
-    clip = plan["doc"] if app else f'{e["cli"]} "$(cat {shlex.quote(str(path))})"'
+    clip = plan["doc"] if app else e.get("cli_cmd", '{cli} "$(cat {path})"').format(cli=e["cli"], path=shlex.quote(str(path)))
 
     def run(args, **kw):
         try:
@@ -628,7 +706,7 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
 def cli(src=None, dst=None, session=None, yes=False, list_only=False, show=False):
     """`ro handoff`: 비운 쪽은 자동으로 고른 뒤 미리 보기 → `--yes`면 저장·클립보드·앱 열기. `--list`는 최근 세션 목록."""
     if list_only:
-        for eid in ([src] if src else list(NAMES)):
+        for eid in ([src] if src else SOURCES):
             ss = sessions(eid, limit=5)
             print(f"[{NAMES[eid]}]" + ("" if ss else " 기록 없음"))
             for s in ss:

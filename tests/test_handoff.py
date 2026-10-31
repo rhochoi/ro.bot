@@ -202,6 +202,47 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(handoff.parse("codex", handoff.find_session("codex"))["todos"],
                          [["completed", "조사"], ["in_progress", "수정"]])
 
+    def test_gemini_cli_sessions_and_receive_only_apps(self):
+        proj = self.home / ".gemini/tmp/myproj/chats"
+        (self.home / ".gemini").mkdir(parents=True, exist_ok=True)
+        (self.home / ".gemini/projects.json").write_text(json.dumps({"projects": {str(self.repo): "myproj"}}))
+        ctx = {"id": "0", "type": "user", "content": [{"text": "<session_context>\n환경\n</session_context>"}]}
+        _jsonl(proj / "session-2026-10-14T16-13-9f4636fe.jsonl", [
+            {"sessionId": "s", "projectHash": "h", "kind": "main"},
+            {"$set": {"messages": [ctx]}},                              # 열기만 한 세션: 시스템 문맥뿐
+        ])
+        self.assertIn("넘길 내용이 없어요", handoff.build("gemini", "claude")["error"])
+        _jsonl(proj / "session-2026-10-14T16-13-9f4636fe.jsonl", [
+            {"sessionId": "s", "projectHash": "h", "kind": "main"},
+            {"$set": {"messages": [ctx, {"id": "1", "type": "user", "content": [{"text": "로그인 고쳐 줘"}]}]}},
+            {"$set": {"messages": [ctx, {"id": "1", "type": "user", "content": [{"text": "로그인 고쳐 줘"}]},
+                                   {"id": "2", "type": "gemini", "content": "고치는 중",
+                                    "toolCalls": [{"name": "replace", "args": {"file_path": "/p/login.py"}},
+                                                  {"name": "run_shell_command", "args": {"command": "npm test"}},
+                                                  {"name": "write_todos", "args": {"todos": [
+                                                      {"description": "테스트 통과", "status": "pending"}]}}]}]}},
+        ])
+        p = handoff.build("gemini", "chatgpt")
+        self.assertTrue(p["ok"], p)
+        self.assertEqual((p["session"], p["cwd"]), ("9f4636fe", str(self.repo)))
+        self.assertEqual((p["counts"]["requests"], p["counts"]["files"], p["counts"]["commands"], p["counts"]["todos"]),
+                         (1, 1, 1, 1))
+        self.assertIn("> 고치는 중", p["doc"])
+        self.assertNotIn("session_context", p["doc"])
+        self.assertIn("받는 쪽으로만", handoff.build("chatgpt", "claude")["error"])   # 기록이 없는 앱은 원래 도구가 못 된다
+        (self.apps / "ChatGPT.app").mkdir()
+        run = Run()
+        r = handoff.apply(p, runner=run, which=lambda c: None, app_dirs=(str(self.apps),))
+        self.assertEqual((r["ok"], r["mode"], r["relay"]), (True, "app", False))
+        self.assertEqual(run.calls[0], (["pbcopy"], p["doc"].encode()))   # 붙여 넣기로 받는다
+        self.assertEqual(run.calls[1][0], ["open", str(self.apps / "ChatGPT.app")])
+        run = Run()
+        self.agy()
+        r = handoff.apply(handoff.build("agy", "gemini"), runner=run, which=lambda c: "/bin/gemini", app_dirs=())
+        self.assertEqual(run.calls[0][1].decode(), f'gemini -i "$(cat {r["path"]})"')   # Gemini CLI는 대화형으로 시작
+        self.assertEqual(handoff.plan_for_pet("커서")["dst"], "cursor")
+        self.assertEqual(handoff.plan_for_pet("안티 챗지피티")["dst"], "chatgpt")
+
     def test_claude_and_codex_sessions(self):
         _jsonl(self.home / ".claude/projects/-x/s1.jsonl", [
             {"type": "user", "cwd": str(self.repo), "message": {"role": "user", "content": "로그인 버그 고쳐 줘"}},
