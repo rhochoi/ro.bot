@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import (config, engines, find, findeval, findsignals, harden, log, mapper, organize, pet, selfupdate,
+from . import (config, engines, find, findeval, findsignals, handoff, harden, log, mapper, organize, pet, selfupdate,
                setup as setup_mod)
 
 DEFAULT_OUT = "~/.ro/map.json"
@@ -83,6 +83,13 @@ def main(argv=None):
     cn.add_argument("action", nargs="?", default="plan", choices=["plan", "undo"])
     cn.add_argument("--yes", action="store_true", help="보여 준 계획을 적용")
     cn.add_argument("--source", metavar="파일", help="공통 규칙 원본을 정한다(기본: ~/.codex/AGENTS.md가 있으면 그것)")
+    ho = sub.add_parser("handoff", help="AI 갈아타기: 하던 작업을 다른 AI 도구로 인수인계(미리 보기 → --yes로 적용)")
+    ho.add_argument("--from", dest="src", choices=list(handoff.SOURCES), help="넘겨줄 도구(기본: 가장 최근에 작업한 도구)")
+    ho.add_argument("--to", dest="dst", choices=list(handoff.NAMES), help="받을 도구(기본: 맨 앞·열려 있는 AI 앱)")
+    ho.add_argument("--list", action="store_true", help="도구별 최근 세션 목록만")
+    ho.add_argument("--session", metavar="ID", help="세션 ID 앞자리(기본: 가장 최근)")
+    ho.add_argument("--show", action="store_true", help="인수인계 문서 전체 보기")
+    ho.add_argument("--yes", action="store_true", help="저장 → 클립보드 → 받을 도구 열기")
     su = sub.add_parser("setup", help="첫 실행·설정: 상태 보기, 스캔 폴더")
     ssub = su.add_subparsers(dest="setup_cmd")  # 하위 명령 없이 `ro setup`이면 상태를 보여 준다
     ss = ssub.add_parser("status", help="현재 설정 상태")
@@ -257,6 +264,8 @@ def main(argv=None):
         raise SystemExit(selfupdate.doctor())
     elif args.cmd == "connect":
         raise SystemExit(engines.connect_cli(args.action, args.yes, args.source))
+    elif args.cmd == "handoff":
+        raise SystemExit(handoff.cli(args.src, args.dst, args.session, args.yes, list_only=args.list, show=args.show))
     elif args.cmd == "setup":
         try:
             if args.setup_cmd in ("status", None):

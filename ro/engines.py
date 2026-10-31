@@ -23,6 +23,10 @@ AGY_RULES = ("~/.gemini/GEMINI.md", "~/.gemini/AGENTS.md", "~/.gemini/config/GEM
 GUARD_SRC = Path(__file__).resolve().parent / "hooks" / "ro_guard.py"  # 패키지 안: 설치본(wheel)에도 들어간다
 GUARD_DST = "~/.ro/hooks/ro_guard.py"
 GUARD_MODES = (("secrets", "Bash|Write|Edit|MultiEdit"), ("destructive", "Bash"))
+# 갈아타기 훅: Claude Code 새 세션이 시작될 때 대기 중인 인수인계를 넣는다(ro/hooks/ro_handoff.py)
+RELAY_SRC = Path(__file__).resolve().parent / "hooks" / "ro_handoff.py"
+RELAY_DST = "~/.ro/hooks/ro_handoff.py"
+RELAY_EVENT, RELAY_MATCHER = "SessionStart", "startup|clear"
 CONNECT_DIR = "~/.ro/connect"
 HISTORY_MAX = 20   # 되돌릴 수 있는 연결 기록 수. 밀려난 기록의 훅 백업(ro가 만든 파일)만 함께 지운다
 
@@ -36,6 +40,8 @@ ENGINES = (
      "rules": "~/.gemini/GEMINI.md", "hook": None},
 )
 MAX_TEXT = 4000
+# pbcopy는 UTF-8 로케일이 없으면(앱·메뉴바에서 띄운 펫) 한글을 깨뜨려 넣는다
+PBCOPY_ENV = {**os.environ, "LANG": "en_US.UTF-8", "LC_CTYPE": "UTF-8"}
 HOME = None   # None이면 실제 홈. 테스트는 임시 폴더로 바꿔 실제 ~/.claude·~/.ro를 읽거나 쓰지 않는다
 
 
@@ -68,8 +74,8 @@ def _real(p):
     return p.resolve() if p.is_symlink() and p.resolve().exists() else p
 
 
-def _hook_entries(path):
-    """settings.json의 PreToolUse (matcher, command) 목록. 파일이 없으면 [], JSON이 아니면 None."""
+def _hook_entries(path, event="PreToolUse"):
+    """settings.json의 event 훅 (matcher, command) 목록. 파일이 없으면 [], JSON이 아니면 None."""
     text = _read(path)
     if text is None:
         return []
@@ -80,7 +86,7 @@ def _hook_entries(path):
     if not isinstance(data, dict):
         return None
     out = []
-    for ent in (data.get("hooks") or {}).get("PreToolUse") or []:
+    for ent in (data.get("hooks") or {}).get(event) or []:
         if isinstance(ent, dict):
             for hk in ent.get("hooks") or []:
                 if isinstance(hk, dict) and isinstance(hk.get("command"), str):
@@ -128,6 +134,26 @@ def hook_state(path):
     if not dst.is_file() or _sha(dst) != _sha(GUARD_SRC):
         return "stale"
     return "on" if _guard_selftest(dst) else "broken"
+
+
+def _relay_cmd():
+    return f"python3 {shlex.quote(str(_x(RELAY_DST)))}"
+
+
+def relay_state(path):
+    """갈아타기 훅: missing(등록 안 됨) · stale(복사본이 없거나 이 ro 버전과 다름) · on."""
+    entries = _hook_entries(path, RELAY_EVENT) or []
+
+    def is_relay(cmd):
+        try:
+            t = shlex.split(cmd)
+        except ValueError:
+            return False
+        return bool(t) and os.path.basename(t[-1]) == "ro_handoff.py"
+    if not any(is_relay(c) for _, c in entries):
+        return "missing"
+    dst = _x(RELAY_DST)
+    return "on" if dst.is_file() and _sha(dst) == _sha(RELAY_SRC) else "stale"
 
 
 def _tilde(path):
@@ -213,7 +239,8 @@ def status(which=shutil.which, app_dirs=APP_DIRS):
             "rules": rs in ("source", "linked"), "rules_state": rs,
             "rules_path": AGY_RULES[1] if e["id"] == "agy" else e["rules"],
             **({"hook": None} if e["hook"] is None else
-               {"hook": (hs := hook_state(e["hook"])) == "on", "hook_state": hs}),
+               {"hook": (hs := hook_state(e["hook"])) == "on", "hook_state": hs,
+                "relay": (rs2 := relay_state(e["hook"])) == "on", "relay_state": rs2}),
         })
     return out
 
@@ -236,7 +263,7 @@ def handoff(engine_id, text="", runner=subprocess.run, which=shutil.which, app_d
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    copied = bool(clip) and run(["pbcopy"], input=clip.encode("utf-8"))
+    copied = bool(clip) and run(["pbcopy"], input=clip.encode("utf-8"), env=PBCOPY_ENV)
     masked = text != raw
     if app is None:
         return {"ok": copied, "name": e["name"], "opened": False, "copied": copied, "mode": "cli", "masked": masked,
@@ -301,6 +328,15 @@ def connect_plan(which=shutil.which, app_dirs=APP_DIRS):
                               "desc": f"안전 훅 스크립트 {GUARD_DST}를 이 ro 버전으로 갱신(검사 규칙이 바뀜)"})
             elif e["hook_state"] == "broken":
                 notes.append(f"안전 훅이 등록돼 있지만 실행해 보니 막지 않았어요(python3·{GUARD_DST} 확인).")
+            if not RELAY_SRC.is_file() or _hook_entries(settings, RELAY_EVENT) is None:
+                pass                               # 위에서 이미 알렸다(설치본·JSON 문제)
+            elif e["relay_state"] == "missing":
+                items.append({"engine": "claude", "kind": "relay", "path": settings,
+                              "desc": "갈아타기 훅 등록: 다른 AI에서 넘긴 작업을 Claude Code 새 세션이 붙여 넣기 없이 이어받음"
+                                      f"(같은 폴더·24시간·한 번만, 스크립트는 {RELAY_DST}에 복사)"})
+            elif e["relay_state"] == "stale":
+                items.append({"engine": "claude", "kind": "relay_update", "path": RELAY_DST,
+                              "desc": f"갈아타기 훅 스크립트 {RELAY_DST}를 이 ro 버전으로 갱신"})
         elif e["id"] == "agy":
             if e["rules_state"] == "other":
                 notes.append("Antigravity는 이미 따로 쓰는 전역 규칙이 있어 그대로 둬요.")
@@ -319,14 +355,14 @@ def _write_keep_mode(p, text, default=0o644):
     p.chmod(mode)
 
 
-def _copy_guard(bdir, entries):
-    dst = _x(GUARD_DST)
+def _copy_guard(bdir, entries, src=GUARD_SRC, dst=GUARD_DST):
+    dst = _x(dst)
     backup = None
     if dst.exists():
-        backup = str(bdir / "ro_guard.py")   # 훅 스크립트에는 비밀값이 없다
+        backup = str(bdir / dst.name)   # 훅 스크립트에는 비밀값이 없다
         shutil.copy2(dst, backup)
     fsutil.ensure_dir(dst.parent)
-    shutil.copyfile(GUARD_SRC, dst)
+    shutil.copyfile(src, dst)
     dst.chmod(0o700)
     entries.append({"op": "file", "path": str(dst), "backup": backup, "after": _sha(dst)})
 
@@ -373,6 +409,18 @@ def connect_apply(plan_id, which=shutil.which, app_dirs=APP_DIRS):
                             pre.append({"matcher": matcher, "hooks": [{"type": "command", "command": cmds[-1]}]})
                     _write_keep_mode(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
                     entries.append({"op": "hooks", "path": str(p), "commands": cmds, "created": created})
+            elif it["kind"] in ("relay", "relay_update"):
+                fsutil.ensure_dir(bdir)
+                _copy_guard(bdir, entries, RELAY_SRC, RELAY_DST)
+                if it["kind"] == "relay":
+                    p = _real(it["path"])
+                    created = not p.exists()
+                    data = json.loads(_read(p) or "{}")
+                    data.setdefault("hooks", {}).setdefault(RELAY_EVENT, []).append(
+                        {"matcher": RELAY_MATCHER, "hooks": [{"type": "command", "command": _relay_cmd()}]})
+                    _write_keep_mode(p, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+                    entries.append({"op": "hooks", "path": str(p), "commands": [_relay_cmd()], "created": created,
+                                    "event": RELAY_EVENT})
     finally:
         if entries:
             hist = _history()
@@ -444,14 +492,15 @@ def _undo_entry(en):
         except ValueError:
             return False
         cmds = set(en["commands"])
-        pre = (data.get("hooks") or {}).get("PreToolUse") or []
+        event = en.get("event", "PreToolUse")
+        pre = (data.get("hooks") or {}).get(event) or []
         keep = [ent for ent in pre if not (isinstance(ent, dict) and ent.get("hooks")
                                            and all(isinstance(h, dict) and h.get("command") in cmds for h in ent["hooks"]))]
         if len(keep) == len(pre):
             return False
-        data["hooks"]["PreToolUse"] = keep
+        data["hooks"][event] = keep
         if not keep:
-            del data["hooks"]["PreToolUse"]
+            del data["hooks"][event]
             if not data["hooks"]:
                 del data["hooks"]
         if en.get("created") and not data:

@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, engines, findui, fsutil, harden, log, mapper, organize, recall, records
+from . import config, engines, findui, fsutil, handoff, harden, log, mapper, organize, recall, records
 
 STATE_WAIT_TIMEOUT = 20.0
 STATE_WAIT_INTERVAL = 2.0
@@ -1797,6 +1797,11 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
   .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
+  .relay-scroll { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; max-height: max(120px, calc(100vh - 420px)); }
+  .relay-scroll .mini-btn { text-align: left; }
+  .relay-doc { flex-shrink: 0; max-height: 200px; overflow: auto; margin: 0; font: 11px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+    word-break: break-word; background: var(--panel-bg); border-radius: 9px; padding: 8px; }
+  .relay-doc[hidden] { display: none; }
   .toast-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
   .toast-row select {
     background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
@@ -4260,6 +4265,7 @@ const COMMANDS = [
   { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)", aliases: ["organize", "정리"] },
   { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기", aliases: ["focus"] },
   { id: "connect", label: "/연결", desc: "Claude·Codex·Antigravity 연결 상태", aliases: ["connect", "ai"] },
+  { id: "relay", label: "/이어가기", desc: "하던 작업을 다른 AI로 인수인계 (예: /이어가기 agy claude)", hint: "원래 도구 받을 도구", aliases: ["handoff", "갈아타기", "인수인계"] },
   { id: "claude", label: "/claude", desc: "Claude Code로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["클로드"] },
   { id: "codex", label: "/codex", desc: "Codex로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["코덱스"] },
   { id: "agy", label: "/agy", desc: "Antigravity로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["antigravity", "안티그래비티", "안티"] },
@@ -4362,6 +4368,7 @@ async function runCommand(c, arg) {
   else if (c.id === "file") await runFind(arg);
   else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
   else if (c.id === "connect") await openConn(arg || "");
+  else if (c.id === "relay") return relayPlan(arg || "");
   else if (c.engine) return handoffTo(c.id, arg || "");
   return true;
 }
@@ -4598,6 +4605,58 @@ async function handoffTo(id, text) {
   showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub.replace(/^ · /, "") }) : null], 4000);
   return true;
 }
+/* AI 갈아타기: 미리 보기(요약, 원하면 본문) → 넘기기를 눌러야 저장·클립보드·앱 열기 */
+async function relayPlan(arg, session) {
+  let r = null;
+  try { r = await apiPost("/api/handoff/plan", { arg, session: session || "" }); } catch (err) { r = null; }
+  if (!r || !r.ok) {
+    showToast([h("div", { class: "toast-head", text: r ? (r.error || "인수인계를 만들지 못했어요") : "서버에 연결하지 못했어요." })], 5500);
+    return false;
+  }
+  const c = r.counts;
+  const go = h("button", { class: "mini-btn primary", type: "button", text: `${r.dst_name}로 넘기기`, onclick: async () => {
+    let a = null;
+    try { a = await apiPost("/api/handoff/apply", { id: r.id, approve: true }); } catch (err) { a = null; }
+    const head = !a ? "서버에 연결하지 못했어요." : !a.ok ? (a.error || "넘기지 못했어요")
+      : a.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : a.opened ? `${a.name} 앱을 열었어요` : `${a.name} 앱을 열지 못했어요`;
+    const sub = a && a.ok ? (a.relay ? "이 폴더로 새 세션을 열면 자동으로 이어받아요 · 채팅이면 ⌘V"
+      : a.mode === "cli" ? "작업 폴더에서 ⌘V 후 ↵" : "인수인계 문서를 복사했어요 · 새 대화에 ⌘V") : "";
+    showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 5000);
+  } });
+  const body = h("pre", { class: "relay-doc", hidden: true, tabindex: "0", "aria-label": "넘길 문서 본문" });
+  const peek = h("button", { class: "mini-btn", type: "button", text: "내용 보기", "aria-expanded": "false", onclick: async () => {
+    if (!body.textContent) {
+      let v = null;
+      try { v = await apiPost("/api/handoff/preview", { id: r.id }); } catch (err) { v = null; }
+      body.textContent = v && v.ok ? v.doc : "본문을 불러오지 못했어요.";
+    }
+    body.hidden = !body.hidden;
+    peek.textContent = body.hidden ? "내용 보기" : "내용 접기";
+    peek.setAttribute("aria-expanded", String(!body.hidden));
+  } });
+  // 본문·다른 세션까지 펼쳐도 창을 넘지 않게 가운데만 스크롤하고, 넘기기 버튼은 늘 보인다
+  showToast([
+    h("div", { class: "toast-head", text: `${r.src_name} → ${r.dst_name} 인수인계` }),
+    h("div", { class: "relay-scroll" },
+    ...(r.why || []).map(w => h("div", { class: "block-sub", text: `자동 선택 · ${w}` })),
+    h("div", { class: "toast-file", text: r.title }),
+    h("div", { class: "block-sub", text: `마지막 활동 ${r.updated} · ${r.cwd || "작업 폴더 모름"}` }),
+    h("div", { class: "block-sub", text: `남은 할 일 ${c.todos || 0} · 요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
+      + (r.masked ? " · 비밀값은 가림" : "") }),
+    ...(r.notes || []).map(n => h("div", { class: "block-sub", text: n })),
+    body,
+    (r.others || []).length ? h("div", { class: "block-sub", text: "이 작업이 아니면 다른 세션:" }) : null,
+    ...(r.others || []).map(o => h("button", { class: "mini-btn", type: "button",
+      "aria-label": `${o.engine_name} ${o.updated} 세션으로 바꾸기: ${o.title}`,
+      text: `${o.engine_name} · ${o.updated.slice(5)} · ${o.title} (요청 ${o.requests})`,
+      onclick: () => relayPlan(`${o.engine} ${r.dst}`, o.id) }))),
+    h("div", { class: "toast-row" }, go, peek,
+      h("button", { class: "mini-btn", type: "button", text: "반대로", "aria-label": `${r.dst_name} → ${r.src_name}로 바꾸기`,
+        onclick: () => relayPlan(`${r.dst} ${r.src}`) })),
+  ], 20000);
+  go.focus();
+  return true;
+}
 document.getElementById("connOpenBtn").addEventListener("click", () => openConn(""));
 setTimeout(checkConnect, 1200);  // 새로 설치한 도구도 시작할 때 알아챈다
 connWin.addEventListener("mousedown", (e) => { if (e.target === connWin) closeConn(); });
@@ -4786,6 +4845,15 @@ def make_handler(runtime):
                     self._send_json(200, engines.connect_apply(str(data.get("id") or "")))
             elif parsed.path == "/api/engines/undo":
                 self._send_json(200, engines.connect_undo())
+            elif parsed.path == "/api/handoff/plan":
+                self._send_json(200, handoff.plan_for_pet(str(data.get("arg") or ""), str(data.get("session") or "")))
+            elif parsed.path == "/api/handoff/preview":
+                self._send_json(200, handoff.preview_for_pet(str(data.get("id") or "")))
+            elif parsed.path == "/api/handoff/apply":
+                if data.get("approve") is not True:
+                    self._send_json(400, {"ok": False, "error": "approve는 true여야 합니다."})
+                else:
+                    self._send_json(200, handoff.apply_for_pet(str(data.get("id") or "")))
             elif parsed.path == "/api/engines/handoff":
                 self._send_json(200, engines.handoff(str(data.get("id") or ""), str(data.get("text") or "")))
             elif parsed.path == "/api/action":
