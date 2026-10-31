@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import config, engines, findui, fsutil, harden, log, mapper, organize, recall, records
+from . import config, engines, findui, fsutil, handoff, harden, log, mapper, organize, recall, records
 
 STATE_WAIT_TIMEOUT = 20.0
 STATE_WAIT_INTERVAL = 2.0
@@ -4260,6 +4260,7 @@ const COMMANDS = [
   { id: "organize", label: "/분류", desc: "흩어진 기록을 프로젝트별로 분류 (파일 정리는 '정리' 탭)", aliases: ["organize", "정리"] },
   { id: "focus", label: "/집중", desc: "집중 모드 켜고 끄기", aliases: ["focus"] },
   { id: "connect", label: "/연결", desc: "Claude·Codex·Antigravity 연결 상태", aliases: ["connect", "ai"] },
+  { id: "relay", label: "/이어가기", desc: "하던 작업을 다른 AI로 인수인계 (예: /이어가기 agy claude)", hint: "원래 도구 받을 도구", aliases: ["handoff", "갈아타기", "인수인계"] },
   { id: "claude", label: "/claude", desc: "Claude Code로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["클로드"] },
   { id: "codex", label: "/codex", desc: "Codex로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["코덱스"] },
   { id: "agy", label: "/agy", desc: "Antigravity로 넘기기 (클립보드 + 앱 열기)", hint: "질문", engine: true, aliases: ["antigravity", "안티그래비티", "안티"] },
@@ -4362,6 +4363,7 @@ async function runCommand(c, arg) {
   else if (c.id === "file") await runFind(arg);
   else if (c.id === "focus") { await apiPost("/api/focus", { on: !(ambient && ambient.focus) }); await refreshState(); }
   else if (c.id === "connect") await openConn(arg || "");
+  else if (c.id === "relay") return relayPlan(arg || "");
   else if (c.engine) return handoffTo(c.id, arg || "");
   return true;
 }
@@ -4598,6 +4600,34 @@ async function handoffTo(id, text) {
   showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub.replace(/^ · /, "") }) : null], 4000);
   return true;
 }
+/* AI 갈아타기: 미리 보기(요약) → 넘기기를 눌러야 저장·클립보드·앱 열기. 문서 본문은 서버에만 있다 */
+async function relayPlan(arg) {
+  let r = null;
+  try { r = await apiPost("/api/handoff/plan", { arg }); } catch (err) { r = null; }
+  if (!r || !r.ok) {
+    showToast([h("div", { class: "toast-head", text: r ? (r.error || "인수인계를 만들지 못했어요") : "서버에 연결하지 못했어요." })], 5500);
+    return false;
+  }
+  const c = r.counts;
+  const go = h("button", { class: "mini-btn primary", type: "button", text: `${r.dst_name}로 넘기기`, onclick: async () => {
+    let a = null;
+    try { a = await apiPost("/api/handoff/apply", { id: r.id, approve: true }); } catch (err) { a = null; }
+    const head = !a ? "서버에 연결하지 못했어요." : !a.ok ? (a.error || "넘기지 못했어요")
+      : a.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : a.opened ? `${a.name} 앱을 열었어요` : `${a.name} 앱을 열지 못했어요`;
+    const sub = a && a.ok ? (a.mode === "cli" ? "작업 폴더에서 ⌘V 후 ↵" : "인수인계 문서를 복사했어요 · 새 대화에 ⌘V") : "";
+    showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 5000);
+  } });
+  showToast([
+    h("div", { class: "toast-head", text: `${r.src_name} → ${r.dst_name} 인수인계` }),
+    h("div", { class: "block-sub", text: `마지막 활동 ${r.updated} · ${r.cwd || "작업 폴더 모름"}` }),
+    h("div", { class: "block-sub", text: `요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
+      + (r.masked ? " · 비밀값은 가림" : "") }),
+    ...(r.notes || []).map(n => h("div", { class: "block-sub", text: n })),
+    h("div", { class: "toast-row" }, go),
+  ], 15000);
+  go.focus();
+  return true;
+}
 document.getElementById("connOpenBtn").addEventListener("click", () => openConn(""));
 setTimeout(checkConnect, 1200);  // 새로 설치한 도구도 시작할 때 알아챈다
 connWin.addEventListener("mousedown", (e) => { if (e.target === connWin) closeConn(); });
@@ -4786,6 +4816,13 @@ def make_handler(runtime):
                     self._send_json(200, engines.connect_apply(str(data.get("id") or "")))
             elif parsed.path == "/api/engines/undo":
                 self._send_json(200, engines.connect_undo())
+            elif parsed.path == "/api/handoff/plan":
+                self._send_json(200, handoff.plan_for_pet(str(data.get("arg") or "")))
+            elif parsed.path == "/api/handoff/apply":
+                if data.get("approve") is not True:
+                    self._send_json(400, {"ok": False, "error": "approve는 true여야 합니다."})
+                else:
+                    self._send_json(200, handoff.apply_for_pet(str(data.get("id") or "")))
             elif parsed.path == "/api/engines/handoff":
                 self._send_json(200, engines.handoff(str(data.get("id") or ""), str(data.get("text") or "")))
             elif parsed.path == "/api/action":
