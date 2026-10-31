@@ -128,7 +128,7 @@ def load_plan(home=HOME):
     try:
         return json.loads((_dir(home) / "plan.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        raise ValueError("계획이 없습니다. 먼저 `ro tidy scan --root DIR`를 실행하세요.")
+        raise ValueError("계획이 없습니다. 먼저 `ro tidy scan --root DIR`를 실행하세요.") from None
 
 
 def _journal(home):
@@ -272,7 +272,7 @@ def main(argv=None):
             for e in read_journal():
                 print(f"{e['ts']} {e['op']:7} {e['batch']} [{e['id']}] {e['src']}")
     except ValueError as e:
-        raise SystemExit(str(e))
+        raise SystemExit(str(e)) from None
 
 
 if __name__ == "__main__":

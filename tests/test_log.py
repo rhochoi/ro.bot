@@ -107,3 +107,11 @@ class LogDeleteTest(unittest.TestCase):
             (Path(h) / "pending.json").write_text("[]")
             log.delete(log_dir=d)
             self.assertTrue((Path(h) / "pending.json").exists())
+
+
+class RedactUrlTest(unittest.TestCase):
+    def test_masks_secret_param_but_keeps_following_params(self):
+        # 2026-10-31 감사: token= 뒤의 &page=2까지 지워 링크가 달라지던 문제
+        self.assertEqual(log.redact("https://x.com/a?token=abcd1234efgh&page=2&api_key=zz98765"),
+                         "https://x.com/a?token=[REDACTED]&page=2&api_key=[REDACTED]")
+

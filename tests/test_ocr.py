@@ -1,5 +1,4 @@
 """OCR 검증은 합성 자료와 가짜 프로세스만 사용한다."""
-import json
 import os
 import stat
 import subprocess

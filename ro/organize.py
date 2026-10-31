@@ -551,7 +551,7 @@ def _reserve(dst, unique=True):
             return dst
         except FileExistsError:
             if not unique:
-                raise ValueError("목적지가 이미 있음")
+                raise ValueError("목적지가 이미 있음") from None
             dst = dst.with_name(f"{stem}_{n}{ext}")
             n += 1
 
@@ -961,7 +961,7 @@ def main(argv=None):
             for e in read_journal():
                 print(f"{e['ts']} {e['op']:10} {e['source']:8} {e['batch']} [{e['id']}] {e['src']}")
     except ValueError as e:
-        raise SystemExit(str(e))
+        raise SystemExit(str(e)) from None
 
 
 def _days(spec):

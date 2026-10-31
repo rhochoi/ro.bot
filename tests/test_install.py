@@ -1,5 +1,4 @@
 """install.sh: gh·uv·curl·pipx를 가짜 명령으로 바꿔 흐름만 검증한다(네트워크·실제 설치 없음)."""
-import os
 import re
 import stat
 import subprocess

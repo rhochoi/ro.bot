@@ -11,19 +11,20 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 
-from . import fsutil
+from . import config, fsutil, log
 
-SOURCE = "~/.codex/AGENTS.md"          # 사용자 전역 규칙 원본(Claude는 @import, Antigravity는 심볼릭 링크로 가리킨다)
-IMPORT_LINE = "@" + SOURCE
+# 공통 규칙 원본은 도구에 묶지 않는다: ~/.ro/config.json의 rules_source(`ro connect --source 파일`)로 정한다.
+# 정하지 않았으면 예전 기본값(~/.codex/AGENTS.md)이 있을 때만 그것을 쓴다. Claude는 @import, Antigravity는 링크로 가리킨다
+DEFAULT_SOURCE = "~/.codex/AGENTS.md"
 AGY_RULES = ("~/.gemini/GEMINI.md", "~/.gemini/AGENTS.md", "~/.gemini/config/GEMINI.md", "~/.gemini/config/AGENTS.md")
 GUARD_SRC = Path(__file__).resolve().parent / "hooks" / "ro_guard.py"  # 패키지 안: 설치본(wheel)에도 들어간다
 GUARD_DST = "~/.ro/hooks/ro_guard.py"
 GUARD_MODES = (("secrets", "Bash|Write|Edit|MultiEdit"), ("destructive", "Bash"))
 CONNECT_DIR = "~/.ro/connect"
+HISTORY_MAX = 20   # 되돌릴 수 있는 연결 기록 수. 밀려난 기록의 훅 백업(ro가 만든 파일)만 함께 지운다
 
 APP_DIRS = ("/Applications", "~/Applications")
 ENGINES = (
@@ -35,19 +36,23 @@ ENGINES = (
      "rules": "~/.gemini/GEMINI.md", "hook": None},
 )
 MAX_TEXT = 4000
+HOME = None   # None이면 실제 홈. 테스트는 임시 폴더로 바꿔 실제 ~/.claude·~/.ro를 읽거나 쓰지 않는다
 
 
 def _find_app(names, app_dirs=APP_DIRS):
     for d in app_dirs:
         for n in names:
-            p = Path(d).expanduser() / n
+            p = _x(d) / n
             if p.is_dir():
                 return p
     return None
 
 
 def _x(p):
-    return Path(p).expanduser()
+    s = str(p)
+    if HOME and (s == "~" or s.startswith("~/")):
+        return Path(HOME + s[1:])
+    return Path(s).expanduser()
 
 
 def _read(p):
@@ -125,13 +130,49 @@ def hook_state(path):
     return "on" if _guard_selftest(dst) else "broken"
 
 
-def _import_forms():
-    return {IMPORT_LINE, "@" + str(_x(SOURCE))}
+def _tilde(path):
+    path = str(path)
+    for home in (str(_x("~").resolve()), str(_x("~"))):   # /var ↔ /private/var 같은 링크 차이를 흡수
+        if path == home or path.startswith(home + "/"):
+            return "~" + path[len(home):]
+    return path
 
 
-def _points_to_source(p):
+def source():
+    """공통 규칙 원본(~로 시작하는 경로 문자열) 또는 None."""
+    v = config.load(str(_x("~/.ro"))).get("rules_source")
+    if isinstance(v, str) and v:
+        return v
+    return DEFAULT_SOURCE if _x(DEFAULT_SOURCE).is_file() else None
+
+
+def set_source(path):
+    """공통 규칙 원본을 정한다(사용자가 고른 파일). 연결 대상 파일 자신을 원본으로 고르면 고리가 생기므로 거절한다."""
+    p = Path(path).expanduser().resolve() if not str(path).startswith("~") else _x(path).resolve()
+    if not p.is_file():
+        raise ValueError(f"파일이 없습니다: {path}")
+    targets = [get("claude")["rules"], *AGY_RULES]
+    if any(_x(t).exists() and _x(t).resolve() == p for t in targets) or any(str(_x(t)) == str(p) for t in targets):
+        raise ValueError("연결 대상(Claude·Antigravity 전역 규칙) 파일은 원본으로 쓸 수 없습니다.")
+    v = _tilde(p)
+    config.update(str(_x("~/.ro")), rules_source=v)
+    return v
+
+
+def import_line(src):
+    return "@" + src
+
+
+def _import_forms(src):
+    return {import_line(src), "@" + str(_x(src))}
+
+
+def _points_to_source(p, src_path=None):
     """규칙 파일이 공통 규칙 원본을 가리키는가: 원본으로 가는 링크, 그 자체로 한 줄인 @import, 또는 원본과 같은 내용."""
-    src = _x(SOURCE)
+    src_path = src_path or source()
+    if not src_path:
+        return False
+    src = _x(src_path)
     try:
         if _x(p).resolve() == src.resolve():
             return True
@@ -140,15 +181,16 @@ def _points_to_source(p):
     text = _read(p)
     if text is None:
         return False
-    forms = _import_forms()
-    return any(line.strip() in forms for line in text.splitlines()) or text == _read(SOURCE)
+    forms = _import_forms(src_path)
+    return any(line.strip() in forms for line in text.splitlines()) or text == _read(src_path)
 
 
 def rules_state(engine_id):
     """source(원본 자체) · linked(원본을 가리킴) · other(따로 쓰는 규칙) · missing."""
-    if engine_id == "codex":
-        return "source" if _x(SOURCE).is_file() else "missing"
+    src = source()
     paths = AGY_RULES if engine_id == "agy" else (get(engine_id)["rules"],)
+    if src and any(_x(p).is_file() and not _x(p).is_symlink() and _x(p).resolve() == _x(src).resolve() for p in paths):
+        return "source"
     found = [p for p in paths if _x(p).is_file()]
     if any(_points_to_source(p) for p in found):
         return "linked"
@@ -181,7 +223,8 @@ def handoff(engine_id, text="", runner=subprocess.run, which=shutil.which, app_d
     e = get(engine_id)
     if not e:
         return {"ok": False, "error": "알 수 없는 도구예요."}
-    text = (text or "").strip()[:MAX_TEXT]
+    raw = (text or "").strip()[:MAX_TEXT]
+    text = log.redact(raw)   # 원칙 1: 외부 모델로 가는 길이므로 비밀값으로 보이는 부분은 가린다
     app = _find_app(e["apps"], app_dirs)
     if app is None and which(e["cli"]) is None:
         return {"ok": False, "error": f"{e['name']}이(가) 이 Mac에 없어요."}
@@ -194,11 +237,12 @@ def handoff(engine_id, text="", runner=subprocess.run, which=shutil.which, app_d
             return False
 
     copied = bool(clip) and run(["pbcopy"], input=clip.encode("utf-8"))
+    masked = text != raw
     if app is None:
-        return {"ok": copied, "name": e["name"], "opened": False, "copied": copied, "mode": "cli",
+        return {"ok": copied, "name": e["name"], "opened": False, "copied": copied, "mode": "cli", "masked": masked,
                 **({} if copied else {"error": "클립보드에 넣지 못했어요."})}
     opened = run(["open", str(app)])
-    return {"ok": opened, "name": e["name"], "opened": opened, "copied": copied, "mode": "app",
+    return {"ok": opened, "name": e["name"], "opened": opened, "copied": copied, "mode": "app", "masked": masked,
             **({} if opened else {"error": f"{app.name}을(를) 열지 못했어요."})}
 
 
@@ -218,7 +262,12 @@ MODE_NAMES = {"secrets": "비밀값 차단", "destructive": "파괴적 명령 �
 def connect_plan(which=shutil.which, app_dirs=APP_DIRS):
     """설치된 도구에 공통 규칙·안전 훅을 잇는 변경 목록. 아무것도 쓰지 않는다."""
     items, notes = [], []
-    src_ok = _x(SOURCE).is_file()
+    src = source()
+    src_ok = bool(src) and _x(src).is_file()
+    if not src:
+        notes.append("공통 규칙 원본이 정해지지 않아 규칙은 연결하지 않아요. `ro connect --source 파일`로 정하세요.")
+    elif not src_ok:
+        notes.append(f"공통 규칙 원본({src})이 없어 규칙은 연결하지 않아요.")
     st = status(which, app_dirs)
     for e in st:
         if not (e["app"] or e["cli"]):
@@ -226,17 +275,17 @@ def connect_plan(which=shutil.which, app_dirs=APP_DIRS):
         if e["id"] == "claude":
             rs = e["rules_state"]
             rules = _x(e["rules_path"])
-            if rs != "linked" and not src_ok:
-                notes.append(f"공통 규칙 원본({SOURCE})이 없어 Claude Code 규칙은 연결하지 않아요.")
+            if rs in ("linked", "source") or not src_ok:
+                pass
             elif rs == "missing" and rules.is_symlink():
                 notes.append(f"{e['rules_path']}이(가) 없는 곳을 가리키는 링크라 그대로 둬요.")
             elif rs == "missing":
-                items.append({"engine": "claude", "kind": "create", "path": e["rules_path"],
-                              "desc": f"Claude Code 전역 규칙 파일을 만들고 {IMPORT_LINE} 한 줄로 공통 규칙 연결"})
+                items.append({"engine": "claude", "kind": "create", "path": e["rules_path"], "line": import_line(src),
+                              "desc": f"Claude Code 전역 규칙 파일을 만들고 {import_line(src)} 한 줄로 공통 규칙 연결"})
             elif rs == "other":
                 where = f" (링크가 가리키는 {_real(rules)}에 씀)" if rules.is_symlink() else ""
-                items.append({"engine": "claude", "kind": "append", "path": e["rules_path"],
-                              "desc": f"Claude Code 전역 규칙 끝에 {IMPORT_LINE} 한 줄 추가(기존 내용은 그대로){where}"})
+                items.append({"engine": "claude", "kind": "append", "path": e["rules_path"], "line": import_line(src),
+                              "desc": f"Claude Code 전역 규칙 끝에 {import_line(src)} 한 줄 추가(기존 내용은 그대로){where}"})
             settings = get("claude")["hook"]
             missing = _guard_missing(settings)
             if not GUARD_SRC.is_file():
@@ -252,18 +301,16 @@ def connect_plan(which=shutil.which, app_dirs=APP_DIRS):
                               "desc": f"안전 훅 스크립트 {GUARD_DST}를 이 ro 버전으로 갱신(검사 규칙이 바뀜)"})
             elif e["hook_state"] == "broken":
                 notes.append(f"안전 훅이 등록돼 있지만 실행해 보니 막지 않았어요(python3·{GUARD_DST} 확인).")
-        elif e["id"] == "codex" and not src_ok:
-            notes.append(f"Codex 전역 규칙({SOURCE})이 없어요. 원본이라 ro가 만들지 않아요.")
         elif e["id"] == "agy":
             if e["rules_state"] == "other":
                 notes.append("Antigravity는 이미 따로 쓰는 전역 규칙이 있어 그대로 둬요.")
             elif e["rules_state"] == "missing" and src_ok:
-                items.append({"engine": "agy", "kind": "symlink", "path": AGY_RULES[1], "target": SOURCE,
-                              "desc": f"Antigravity 전역 규칙 {AGY_RULES[1]} → {SOURCE} 링크(원본을 고치면 함께 바뀜)"})
+                items.append({"engine": "agy", "kind": "symlink", "path": AGY_RULES[1], "target": src,
+                              "desc": f"Antigravity 전역 규칙 {AGY_RULES[1]} → {src} 링크(원본을 고치면 함께 바뀜)"})
     if any(i["kind"] in ("hook", "hook_update") for i in items) or any(e.get("hook") for e in st):
         notes.append("안전 훅은 위험한 명령 문자열을 찾는 보조 장치예요. 모든 우회를 막지는 못해요.")
     pid = hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
-    return {"ok": True, "id": pid, "items": items, "notes": notes}
+    return {"ok": True, "id": pid, "items": items, "notes": notes, "source": src}
 
 
 def _write_keep_mode(p, text, default=0o644):
@@ -300,8 +347,8 @@ def connect_apply(plan_id, which=shutil.which, app_dirs=APP_DIRS):
                 p = _real(it["path"])
                 text = _read(p) or ""
                 sep = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
-                _write_keep_mode(p, text + sep + IMPORT_LINE + "\n")
-                entries.append({"op": "line", "path": str(p), "line": IMPORT_LINE, "added": sep + IMPORT_LINE + "\n",
+                _write_keep_mode(p, text + sep + it["line"] + "\n")
+                entries.append({"op": "line", "path": str(p), "line": it["line"], "added": sep + it["line"] + "\n",
                                 "created": it["kind"] == "create"})
             elif it["kind"] == "symlink":
                 p = _x(it["path"])
@@ -330,6 +377,11 @@ def connect_apply(plan_id, which=shutil.which, app_dirs=APP_DIRS):
         if entries:
             hist = _history()
             hist.append({"stamp": stamp, "entries": entries})
+            for old in hist[:-HISTORY_MAX]:
+                d = _x(CONNECT_DIR) / old.get("stamp", "")
+                if old.get("stamp") and d.is_dir() and d.parent == _x(CONNECT_DIR):
+                    shutil.rmtree(d)
+            hist = hist[-HISTORY_MAX:]
             fsutil.atomic_write(_x(CONNECT_DIR) / "history.json", json.dumps(hist, ensure_ascii=False))
             legacy = _x(CONNECT_DIR) / "last.json"
             if legacy.exists():
@@ -436,8 +488,14 @@ def connect_undo():
     return {"ok": True, "reverted": reverted, "kept": kept}
 
 
-def connect_cli(action="plan", yes=False):
-    """`ro connect`: 계획 출력 → `--yes`면 적용. `ro connect undo`는 마지막 연결 되돌리기."""
+def connect_cli(action="plan", yes=False, source_path=None):
+    """`ro connect`: 계획 출력 → `--yes`면 적용. `--source 파일`은 공통 규칙 원본을 정한다. `undo`는 마지막 연결 되돌리기."""
+    if source_path:
+        try:
+            print(f"공통 규칙 원본: {set_source(source_path)}")
+        except ValueError as e:
+            print(e)
+            return 1
     if action == "undo":
         r = connect_undo()
         if not r["ok"]:

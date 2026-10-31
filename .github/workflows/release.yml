@@ -28,9 +28,12 @@ jobs:
           python-version: "3.13"
       - name: test
         # 일부 테스트가 pytest 방식(tmp_path·monkeypatch)이라 pytest로 돌린다. unittest 방식 테스트도 함께 실행된다.
+        # 펫 화면 테스트(test_pet_slash·test_pet_ui)는 playwright와 axe가 있어야 돌고, 없으면 조용히 건너뛰므로 여기서 설치한다
         run: |
-          python -m pip install pytest
-          python -m pytest -q
+          python -m pip install pytest playwright==1.63.0
+          python -m playwright install chromium
+          npm install --no-save --no-audit --no-fund axe-core@4.10.2
+          RO_AXE_JS="$PWD/node_modules/axe-core/axe.min.js" python -m pytest -q -rs
       - name: wheel contents
         # 설치본(uv tool·pipx)에도 훅·Swift 호스트가 들어가는지 본다. 체크아웃에서만 되는 경로 가정을 막는다
         run: |

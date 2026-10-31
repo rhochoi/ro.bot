@@ -26,7 +26,7 @@ class SlashTest(unittest.TestCase):
         except Exception as e:  # 브라우저 미설치
             cls.pw.stop()
             cls.server.shutdown()
-            raise unittest.SkipTest(f"chromium 없음: {e}")
+            raise unittest.SkipTest(f"chromium 없음: {e}") from None
         fake = [{"id": "claude", "name": "Claude Code", "cli": True, "cli_name": "claude", "app": "Claude.app",
                  "rules": True, "rules_path": "~/.claude/CLAUDE.md", "hook": False},
                 {"id": "codex", "name": "Codex", "cli": False, "cli_name": "codex", "app": None,
@@ -79,6 +79,19 @@ class SlashTest(unittest.TestCase):
         p.fill("#askInput", "/zzz")
         self.assertIn("맞는 명령이 없어요", p.inner_text("#slashPop"))
 
+    def test_selected_row_stays_visible_inside_the_popup(self):
+        # 2026-10-31 네이티브 확인: 말풍선이 열리는 중에 치면 목록이 맨 아래로 스크롤돼 선택 줄이 안 보였다
+        p = self.page
+        p.keyboard.type("/")
+        visible = """() => { const pop = document.getElementById('slashPop'), sel = pop.querySelector('[aria-selected=true]');
+          const foot = pop.querySelector('.pal-foot').offsetHeight;
+          return sel.offsetTop >= pop.scrollTop && sel.offsetTop + sel.offsetHeight <= pop.scrollTop + pop.clientHeight - foot; }"""
+        self.assertEqual(p.evaluate("document.getElementById('slashPop').scrollTop"), 0)
+        self.assertTrue(p.evaluate(visible))
+        p.keyboard.press("ArrowUp")                       # 맨 위에서 위로 → 마지막 줄
+        self.assertTrue(p.evaluate(visible))
+        self.assertEqual(p.evaluate("window.scrollY"), 0)  # 목록만 움직이고 페이지는 그대로
+
     def test_keyboard_navigate_tab_completes_escape_closes(self):
         p = self.page
         p.keyboard.type("/")
@@ -129,6 +142,45 @@ class SlashTest(unittest.TestCase):
         p.wait_for_selector("#tabBtnSettings .conn-badge", state="detached")
         p.click("#toast >> text=되돌리기")
         p.wait_for_function("document.querySelector('#toast').innerText.includes('되돌렸어요')")
+
+    def test_escape_closes_conn_window_even_without_focus_inside(self):
+        p = self.page
+        with mock.patch.object(engines, "status", side_effect=OSError("x")):   # 서버 오류: 창에 버튼이 없다
+            p.evaluate("openConn('')")
+            p.wait_for_selector("#connWin:not([hidden])")
+            p.focus("#askInput")
+            p.keyboard.press("Escape")
+        self.assertTrue(p.locator("#connWin").is_hidden())
+        self.assertFalse(p.locator("#bubble.hidden").count())   # 말풍선은 그대로
+
+    def test_badge_text_has_enough_contrast(self):
+        self.plan.return_value = {"ok": True, "id": "p9", "notes": [], "items": [{"kind": "x", "path": "p", "desc": "d"}]}
+        self.page.evaluate("checkConnect()")
+        self.page.wait_for_selector("#tabBtnSettings .conn-badge")
+        bg = self.page.eval_on_selector("#tabBtnSettings .conn-badge", "e => getComputedStyle(e).backgroundColor")
+        self.assertEqual(bg, "rgb(199, 51, 16)")
+        self.assertEqual(self.page.get_attribute("#tabBtnSettings", "aria-label"), "설정, 연결할 항목 1개")
+        self.plan.return_value = {"ok": True, "id": "p0", "notes": [], "items": []}
+        self.page.evaluate("checkConnect()")
+        self.page.wait_for_selector("#tabBtnSettings .conn-badge", state="detached")
+        self.assertIsNone(self.page.get_attribute("#tabBtnSettings", "aria-label"))
+
+    def test_resizing_the_browser_keeps_bubble_on_screen(self):
+        # 2026-10-31 감사: 펫을 옮긴 뒤 창을 줄이면 말풍선이 화면 밖(left<0)으로 나갔다
+        p = self.page
+        p.evaluate("moveStageBy(-300, 0)")
+        p.set_viewport_size({"width": 520, "height": 760})
+        p.wait_for_timeout(100)
+        left = p.eval_on_selector("#bubble", "e => e.getBoundingClientRect().left")
+        self.assertGreaterEqual(left, 0)
+
+    def test_cli_hint_in_conn_window_does_not_wrap_mid_command(self):
+        self.plan.return_value = {"ok": True, "id": "p5", "notes": [], "items": [], "source": "~/.codex/AGENTS.md"}
+        p = self.page
+        p.evaluate("openConn('')")
+        p.wait_for_selector("#connWin code")
+        ws = p.eval_on_selector_all("#connWin .conn-note code", "els => els.map(e => getComputedStyle(e).whiteSpace)")
+        self.assertEqual(ws, ["nowrap", "nowrap"])
 
     def test_engine_command_with_text_hands_off(self):
         p = self.page

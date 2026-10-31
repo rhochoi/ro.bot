@@ -1901,6 +1901,12 @@ PET_HTML = r"""<!DOCTYPE html>
     background: var(--panel-bg); color: var(--panel-fg); border: 1px solid var(--panel-border);
     border-radius: 12px; box-shadow: 0 10px 24px rgba(15, 14, 13, 0.24); padding: 4px; max-height: 232px; overflow-y: auto;
   }
+  .slash-pop, .conn-list, .pal-list { scrollbar-width: thin; scrollbar-color: var(--panel-border) transparent; }
+  .slash-pop::-webkit-scrollbar, .conn-list::-webkit-scrollbar, .pal-list::-webkit-scrollbar { width: 6px; }
+  .slash-pop::-webkit-scrollbar-thumb, .conn-list::-webkit-scrollbar-thumb, .pal-list::-webkit-scrollbar-thumb {
+    background: var(--panel-border); border-radius: 3px; }
+  .slash-pop::-webkit-scrollbar-track, .conn-list::-webkit-scrollbar-track, .pal-list::-webkit-scrollbar-track { background: transparent; }
+  .conn-note code { font: inherit; font-weight: 700; white-space: nowrap; }
   .slash-pop .pal-item { align-items: center; }
   .slash-pop .pal-item b { min-width: 52px; }
   .slash-pop .pal-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1918,7 +1924,7 @@ PET_HTML = r"""<!DOCTYPE html>
   .conn-plan ul { margin: 0; padding-left: 16px; font-size: 11px; display: flex; flex-direction: column; gap: 3px; }
   .conn-plan code { font: inherit; font-weight: 700; }
   .conn-note { font-size: 10.5px; color: var(--muted); }
-  .conn-badge { display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
+  .conn-badge { display: inline-block; min-width: 15px; padding: 0 4px; margin-left: 4px; border-radius: 999px; background: #C73310; color: #fff; font-size: 10px; font-weight: 800; line-height: 15px; text-align: center; }
   .conn-pending { padding: 8px 11px 0; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pal-foot { display: flex; gap: 12px; padding: 6px 11px; border-top: 1px solid var(--divider); font-size: 11px; color: var(--muted); }
   kbd { font: inherit; font-weight: 800; background: var(--panel-soft); border-radius: 4px; padding: 0 4px; }
@@ -2615,6 +2621,7 @@ wanderToggle.addEventListener("change", (e) => {
 
 window.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
+  if (!connWin.hidden) { closeConn(); return; }  // 연결 창 안에 포커스가 없어도 Esc는 창부터 닫는다
   if (document.activeElement === askInput && askInput.value) {
     askInput.value = "";  // 입력 중 Esc는 입력만 지우고 창은 둔다
     return;
@@ -2908,6 +2915,9 @@ function fitStage() {
     stage.style.transform = `translate(${stageX}px, ${stageY}px)`;
   }
 }
+
+// 브라우저 창을 줄이거나 늘려도 옮겨 둔 펫·말풍선이 화면 밖으로 나가지 않게
+window.addEventListener("resize", () => { if (!isNativeHost) fitStage(); });
 
 function beginDrag(e, fromPet) {
   if (e.button !== 0) return;
@@ -4430,7 +4440,12 @@ function renderSlash() {
   askInput.setAttribute("aria-expanded", "true");
   askInput.setAttribute("aria-activedescendant", `slashOpt${slashSel}`);
   const sel = document.getElementById(`slashOpt${slashSel}`);
-  if (sel) sel.scrollIntoView({ block: "nearest" });
+  if (sel) {  // 목록 안에서만 스크롤한다(scrollIntoView는 열리는 중인 말풍선까지 움직여 목록이 맨 아래로 가기도 했다)
+    const foot = slashPop.querySelector(".pal-foot");
+    const view = slashPop.clientHeight - (foot ? foot.offsetHeight : 0);
+    if (sel.offsetTop < slashPop.scrollTop) slashPop.scrollTop = sel.offsetTop - 4;
+    else if (sel.offsetTop + sel.offsetHeight > slashPop.scrollTop + view) slashPop.scrollTop = sel.offsetTop + sel.offsetHeight - view;
+  }
 }
 function setAsk(v) {
   askInput.value = v;
@@ -4448,7 +4463,7 @@ async function pickSlash(run) {
   hideSlash();
   await runCommand(c, "");
 }
-askInput.addEventListener("input", () => { slashSel = 0; renderSlash(); });
+askInput.addEventListener("input", () => { slashSel = 0; slashPop.scrollTop = 0; renderSlash(); });
 askInput.addEventListener("focus", renderSlash);
 askInput.addEventListener("blur", () => setTimeout(() => { if (document.activeElement !== askInput) hideSlash(); }, 0));
 askInput.addEventListener("keydown", (e) => {
@@ -4482,10 +4497,11 @@ const HOOK_TEXT = { on: "안전 훅", missing: "안전 훅 없음", stale: "안�
 function setConnBadge(n) {
   for (const el of [document.getElementById("tabBtnSettings"), document.getElementById("connOpenBtn")]) {
     let b = el.querySelector(".conn-badge");
-    if (!n) { if (b) b.remove(); continue; }
-    if (!b) { b = h("span", { class: "conn-badge" }); el.append(b); }
+    if (!el.dataset.label) el.dataset.label = el.textContent.trim();
+    if (!n) { if (b) b.remove(); el.removeAttribute("aria-label"); continue; }
+    if (!b) { b = h("span", { class: "conn-badge", "aria-hidden": "true" }); el.append(b); }
     b.textContent = n;
-    b.setAttribute("aria-label", `연결할 항목 ${n}개`);
+    el.setAttribute("aria-label", `${el.dataset.label}, 연결할 항목 ${n}개`);  // 숫자만 붙여 "설정1"로 읽히지 않게
   }
 }
 async function checkConnect() {
@@ -4496,9 +4512,11 @@ async function checkConnect() {
 }
 function connPlanBox(p) {
   if (!p) return null;
+  const src = p.source ? h("div", { class: "conn-note" }, `공통 규칙 원본: `, h("code", { text: p.source }),
+    ` · 바꾸려면 터미널에서 `, h("code", { text: "ro connect --source 파일" })) : null;
   if (!p.items.length) {
-    return p.notes.length ? h("div", { class: "conn-note" }, p.notes.map(n => h("div", { text: n }))) :
-      h("div", { class: "conn-note", text: "설치된 도구는 모두 연결돼 있어요." });
+    return h("div", { class: "conn-note" }, p.notes.length ? p.notes.map(n => h("div", { text: n })) :
+      h("div", { text: "설치된 도구는 모두 연결돼 있어요." }), src);
   }
   const go = h("button", { class: "mini-btn primary", type: "button", text: "승인하고 연결", onclick: async () => {
     go.disabled = true;
@@ -4518,7 +4536,7 @@ function connPlanBox(p) {
   return h("div", { class: "conn-plan", role: "region", "aria-label": "연결할 항목" },
     h("div", { class: "conn-name", text: `연결할 항목 ${p.items.length}개 · 아직 아무것도 바뀌지 않았어요` }),
     h("ul", {}, p.items.map(it => h("li", { title: it.path, text: it.desc }))),
-    p.notes.map(n => h("div", { class: "conn-note", text: n })),
+    p.notes.map(n => h("div", { class: "conn-note", text: n })), src,
     h("div", { class: "conn-note", text: "되돌리기는 ro가 넣은 줄·훅·링크만 빼요. 그 뒤에 바뀐 설정은 그대로 둬요." }),
     h("div", { class: "chip-row" }, go));
 }
@@ -4575,8 +4593,9 @@ async function handoffTo(id, text) {
     return false;
   }
   const head = r.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : `${r.name}을(를) 열었어요`;
-  const sub = r.mode === "cli" ? "터미널에서 ⌘V 후 ↵" : r.copied ? "입력을 복사했어요 · ⌘V로 붙여 넣으세요" : null;
-  showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 4000);
+  const sub = (r.mode === "cli" ? "터미널에서 ⌘V 후 ↵" : r.copied ? "입력을 복사했어요 · ⌘V로 붙여 넣으세요" : "")
+    + (r.masked ? " · 비밀값으로 보이는 부분은 가렸어요" : "");
+  showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub.replace(/^ · /, "") }) : null], 4000);
   return true;
 }
 document.getElementById("connOpenBtn").addEventListener("click", () => openConn(""));

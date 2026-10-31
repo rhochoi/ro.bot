@@ -30,13 +30,15 @@ class EnginesTest(unittest.TestCase):
         self.apps = Path(self.tmp.name) / "Applications"
         self.apps.mkdir()
         (self.home / ".claude").mkdir(parents=True)
-        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env = mock.patch.object(engines, "HOME", str(self.home))
         env.start()
         self.addCleanup(env.stop)
 
     def test_status_reads_cli_app_rules_and_hook(self):
         (self.apps / "Claude.app").mkdir()
         (self.apps / "Antigravity IDE.app").mkdir()
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex" / "AGENTS.md").write_text("# 공통 규칙\n")
         (self.home / ".claude" / "CLAUDE.md").write_text("@~/.codex/AGENTS.md")
         (self.home / ".ro" / "hooks").mkdir(parents=True)
         shutil.copyfile(engines.GUARD_SRC, self.home / ".ro" / "hooks" / "ro_guard.py")
@@ -50,7 +52,7 @@ class EnginesTest(unittest.TestCase):
         self.assertEqual((st["claude"]["app"], st["claude"]["cli"], st["claude"]["rules"], st["claude"]["hook"]),
                          ("Claude.app", False, True, True))
         self.assertEqual((st["codex"]["app"], st["codex"]["cli"], st["codex"]["rules"], st["codex"]["hook"]),
-                         (None, True, False, None))  # 훅은 Claude에만 있다
+                         (None, True, True, None))  # 기본 원본(~/.codex/AGENTS.md) 자체. 훅은 Claude에만 있다
         self.assertEqual(st["agy"]["app"], "Antigravity IDE.app")
         self.assertEqual(st["claude"]["hook_state"], "on")          # 실제로 실행해 승인 요구가 나온다
         # 문자열만 있고 훅 항목이 아니면 연결되지 않은 것이다(2026-10-30 재감사 재현)
@@ -66,6 +68,19 @@ class EnginesTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["mode"], r["copied"], r["opened"]), (True, "app", True, True))
         self.assertEqual(run.calls[0], (["pbcopy"], "이 함수 설명해줘".encode("utf-8")))
         self.assertEqual(run.calls[1][0], ["open", str(self.apps / "Claude.app")])
+
+    def test_handoff_masks_secrets_before_leaving_for_the_ai_tool(self):
+        # 원칙 1: 외부 모델에는 마스킹한 것만(2026-10-31 감사)
+        (self.apps / "Claude.app").mkdir()
+        run = Run()
+        key = "sk-" + "a1B2c3D4" * 3
+        r = engines.handoff("claude", f"이 키 {key} 왜 안 돼? password=hunter2x", runner=run, which=lambda c: None,
+                            app_dirs=(str(self.apps),))
+        sent = run.calls[0][1].decode("utf-8")
+        self.assertNotIn(key, sent)
+        self.assertNotIn("hunter2x", sent)
+        self.assertIn("왜 안 돼", sent)
+        self.assertTrue(r["masked"])
 
     def test_handoff_without_text_only_opens_app(self):
         (self.apps / "Codex.app").mkdir()
@@ -107,7 +122,7 @@ class ConnectTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        env = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        env = mock.patch.object(engines, "HOME", str(self.home))
         env.start()
         self.addCleanup(env.stop)
         (self.home / ".codex").mkdir()
@@ -270,12 +285,64 @@ class ConnectAuditFixTest(ConnectTest):
         self.assertFalse(legacy.exists())
         self.assertEqual(len(engines._history()), 2)       # 예전 기록 + 이번 연결
 
+    def test_history_is_capped_and_drops_only_old_backup_dirs(self):
+        cdir = self.home / ".ro" / "connect"
+        cdir.mkdir(parents=True)
+        old = [{"stamp": f"old{i}", "entries": []} for i in range(engines.HISTORY_MAX)]
+        (cdir / "history.json").write_text(json.dumps(old))
+        (cdir / "old0").mkdir()
+        (cdir / "old1").mkdir()
+        engines.connect_apply(self.plan()["id"], **self.kw)
+        hist = engines._history()
+        self.assertEqual(len(hist), engines.HISTORY_MAX)
+        self.assertEqual(hist[0]["stamp"], "old1")
+        self.assertFalse((cdir / "old0").exists())
+        self.assertTrue((cdir / "old1").exists())
+
     def test_hook_that_does_not_block_is_reported_broken(self):
         engines.connect_apply(self.plan()["id"], **self.kw)
         with mock.patch.object(engines, "_guard_selftest", return_value=False):
             st = {e["id"]: e for e in engines.status(**self.kw)}
             self.assertEqual((st["claude"]["hook"], st["claude"]["hook_state"]), (False, "broken"))
             self.assertIn("막지 않았어요", " ".join(self.plan()["notes"]))
+
+
+class RulesSourceTest(ConnectTest):
+    """공통 규칙 원본은 도구에 묶이지 않는다(2026-10-31 감사: ~/.codex/AGENTS.md가 코드에 박혀 있었음)."""
+
+    def test_no_source_means_no_rule_items_and_a_hint(self):
+        self.src.unlink()
+        p = self.plan()
+        self.assertFalse([i for i in p["items"] if i["kind"] in ("create", "append", "symlink")])
+        self.assertIn("--source", " ".join(p["notes"]))
+
+    def test_chosen_source_is_used_for_import_and_link(self):
+        mine = self.home / "rules" / "my-rules.md"
+        mine.parent.mkdir()
+        mine.write_text("# 내 규칙\n")
+        self.assertEqual(engines.set_source(str(mine)), "~/rules/my-rules.md")
+        p = self.plan()
+        self.assertIn("@~/rules/my-rules.md", " ".join(i["desc"] for i in p["items"]))
+        engines.connect_apply(p["id"], **self.kw)
+        self.assertEqual((self.home / ".claude" / "CLAUDE.md").read_text(), "@~/rules/my-rules.md\n")
+        self.assertEqual((self.home / ".gemini" / "AGENTS.md").resolve(), mine.resolve())
+        st = {e["id"]: e for e in engines.status(**self.kw)}
+        self.assertEqual(st["codex"]["rules_state"], "other")   # Codex 파일은 이제 원본이 아니다(건드리지도 않음)
+
+    def test_source_must_exist_and_cannot_be_a_target(self):
+        with self.assertRaises(ValueError):
+            engines.set_source(str(self.home / "nope.md"))
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "CLAUDE.md").write_text("x")
+        with self.assertRaises(ValueError):
+            engines.set_source(str(self.home / ".claude" / "CLAUDE.md"))
+
+
+class TestHomeIsolationTest(unittest.TestCase):
+    def test_tests_never_touch_the_real_home(self):
+        # tests/__init__.py가 연결 기능의 홈을 임시 폴더로 고정한다(펫 서버 테스트도 시작할 때 연결 상태를 묻는다)
+        self.assertIn("ro-test-home-", engines.HOME)
+        self.assertEqual(engines._x("~/.claude"), Path(engines.HOME) / ".claude")
 
 
 class PackagingTest(unittest.TestCase):
