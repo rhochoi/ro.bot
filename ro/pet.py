@@ -1797,6 +1797,11 @@ PET_HTML = r"""<!DOCTYPE html>
   }
   .toast-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 800; }
   .toast-file { font-size: 11.5px; background: var(--panel-bg); border-radius: 9px; padding: 6px 8px; word-break: break-all; }
+  .relay-scroll { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; max-height: max(120px, calc(100vh - 420px)); }
+  .relay-scroll .mini-btn { text-align: left; }
+  .relay-doc { flex-shrink: 0; max-height: 200px; overflow: auto; margin: 0; font: 11px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+    word-break: break-word; background: var(--panel-bg); border-radius: 9px; padding: 8px; }
+  .relay-doc[hidden] { display: none; }
   .toast-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
   .toast-row select {
     background: var(--ink); color: var(--chalk); border: none; border-radius: 999px;
@@ -4600,10 +4605,10 @@ async function handoffTo(id, text) {
   showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub.replace(/^ · /, "") }) : null], 4000);
   return true;
 }
-/* AI 갈아타기: 미리 보기(요약) → 넘기기를 눌러야 저장·클립보드·앱 열기. 문서 본문은 서버에만 있다 */
-async function relayPlan(arg) {
+/* AI 갈아타기: 미리 보기(요약, 원하면 본문) → 넘기기를 눌러야 저장·클립보드·앱 열기 */
+async function relayPlan(arg, session) {
   let r = null;
-  try { r = await apiPost("/api/handoff/plan", { arg }); } catch (err) { r = null; }
+  try { r = await apiPost("/api/handoff/plan", { arg, session: session || "" }); } catch (err) { r = null; }
   if (!r || !r.ok) {
     showToast([h("div", { class: "toast-head", text: r ? (r.error || "인수인계를 만들지 못했어요") : "서버에 연결하지 못했어요." })], 5500);
     return false;
@@ -4617,14 +4622,32 @@ async function relayPlan(arg) {
     const sub = a && a.ok ? (a.mode === "cli" ? "작업 폴더에서 ⌘V 후 ↵" : "인수인계 문서를 복사했어요 · 새 대화에 ⌘V") : "";
     showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 5000);
   } });
+  const body = h("pre", { class: "relay-doc", hidden: true, tabindex: "0", "aria-label": "넘길 문서 본문" });
+  const peek = h("button", { class: "mini-btn", type: "button", text: "내용 보기", "aria-expanded": "false", onclick: async () => {
+    if (!body.textContent) {
+      let v = null;
+      try { v = await apiPost("/api/handoff/preview", { id: r.id }); } catch (err) { v = null; }
+      body.textContent = v && v.ok ? v.doc : "본문을 불러오지 못했어요.";
+    }
+    body.hidden = !body.hidden;
+    peek.textContent = body.hidden ? "내용 보기" : "내용 접기";
+    peek.setAttribute("aria-expanded", String(!body.hidden));
+  } });
+  // 본문·다른 세션까지 펼쳐도 창을 넘지 않게 가운데만 스크롤하고, 넘기기 버튼은 늘 보인다
   showToast([
     h("div", { class: "toast-head", text: `${r.src_name} → ${r.dst_name} 인수인계` }),
+    h("div", { class: "relay-scroll" },
+    h("div", { class: "toast-file", text: r.title }),
     h("div", { class: "block-sub", text: `마지막 활동 ${r.updated} · ${r.cwd || "작업 폴더 모름"}` }),
     h("div", { class: "block-sub", text: `요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
       + (r.masked ? " · 비밀값은 가림" : "") }),
     ...(r.notes || []).map(n => h("div", { class: "block-sub", text: n })),
-    h("div", { class: "toast-row" }, go),
-  ], 15000);
+    body,
+    (r.others || []).length ? h("div", { class: "block-sub", text: "이 작업이 아니면 다른 세션:" }) : null,
+    ...(r.others || []).map(o => h("button", { class: "mini-btn", type: "button", "aria-label": `${o.updated} 세션으로 바꾸기: ${o.title}`,
+      text: `${o.updated.slice(5)} · ${o.title} (요청 ${o.requests})`, onclick: () => relayPlan(arg, o.id) }))),
+    h("div", { class: "toast-row" }, go, peek),
+  ], 20000);
   go.focus();
   return true;
 }
@@ -4817,7 +4840,9 @@ def make_handler(runtime):
             elif parsed.path == "/api/engines/undo":
                 self._send_json(200, engines.connect_undo())
             elif parsed.path == "/api/handoff/plan":
-                self._send_json(200, handoff.plan_for_pet(str(data.get("arg") or "")))
+                self._send_json(200, handoff.plan_for_pet(str(data.get("arg") or ""), str(data.get("session") or "")))
+            elif parsed.path == "/api/handoff/preview":
+                self._send_json(200, handoff.preview_for_pet(str(data.get("id") or "")))
             elif parsed.path == "/api/handoff/apply":
                 if data.get("approve") is not True:
                     self._send_json(400, {"ok": False, "error": "approve는 true여야 합니다."})

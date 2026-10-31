@@ -36,6 +36,8 @@ ENGINES = (
      "rules": "~/.gemini/GEMINI.md", "hook": None},
 )
 MAX_TEXT = 4000
+# pbcopy는 UTF-8 로케일이 없으면(앱·메뉴바에서 띄운 펫) 한글을 깨뜨려 넣는다
+PBCOPY_ENV = {**os.environ, "LANG": "en_US.UTF-8", "LC_CTYPE": "UTF-8"}
 HOME = None   # None이면 실제 홈. 테스트는 임시 폴더로 바꿔 실제 ~/.claude·~/.ro를 읽거나 쓰지 않는다
 
 
@@ -236,7 +238,7 @@ def handoff(engine_id, text="", runner=subprocess.run, which=shutil.which, app_d
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    copied = bool(clip) and run(["pbcopy"], input=clip.encode("utf-8"))
+    copied = bool(clip) and run(["pbcopy"], input=clip.encode("utf-8"), env=PBCOPY_ENV)
     masked = text != raw
     if app is None:
         return {"ok": copied, "name": e["name"], "opened": False, "copied": copied, "mode": "cli", "masked": masked,

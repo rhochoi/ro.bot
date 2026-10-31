@@ -20,15 +20,32 @@ from . import engines, fsutil, log
 
 OUT_DIR = "~/.ro/handoff"
 KEEP = 20          # 남겨 둘 인수인계 문서 수. 오래된 것부터 지운다(ro가 만든 파일만)
-MAX_DOC = 12000    # 클립보드로 넘길 문서 길이. 넘으면 앞부분(목표)을 지키고 긴 절을 줄인다
+MAX_DOC = 12000    # 클립보드로 넘길 문서 길이. 넘으면 뒤(산출물)부터 줄인다 — 지금 상태·목표는 앞에 둔다
 NAMES = {e["id"]: e["name"] for e in engines.ENGINES}
 WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "NotebookEdit"}
 CMD_TOOLS = {"run_command", "Bash", "exec_command", "shell", "local_shell"}
 PATCH_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.M)
+# 비밀값(log.redact) 말고도 외부 모델로 가면 안 되는 개인정보: 이메일·주민번호·전화·카드번호
+PII = (
+    (re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b"), "[이메일]"),
+    (re.compile(r"(?<!\d)\d{6}\s*-\s*[1-8]\d{6}(?!\d)"), "[주민번호]"),
+    (re.compile(r"(?<!\d)(?:\+82[ -]?1\d|01[016789])[ -]?\d{3,4}[ -]?\d{4}(?!\d)"), "[전화번호]"),
+    (re.compile(r"(?<!\d)0(?:2|[3-6][1-5])-\d{3,4}-\d{4}(?!\d)"), "[전화번호]"),
+    (re.compile(r"(?<!\d)\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}(?!\d)"), "[카드번호]"),
+)
 
 
 def _x(p):
     return engines._x(p)
+
+
+def _mask(text):
+    """밖으로 나갈 문서를 가린다: 비밀값 + 개인정보 + 홈 폴더의 사용자 이름(경로는 ~로 남겨 받는 쪽도 쓸 수 있다)."""
+    text = log.redact(text)
+    for pat, mask in PII:
+        text = pat.sub(mask, text)
+    home = str(_x("~"))
+    return re.sub(re.escape(home) + r"(?=/|\b)", "~", text)
 
 
 def _cut(s, n):
@@ -41,7 +58,8 @@ def _quote(s):
     return "\n".join("> " + line if line else ">" for line in s.splitlines())
 
 
-def _jsonl(path):
+def _jsonl(path, st=None):
+    """JSON 줄만 읽는다. st를 주면 읽은 줄 수를 세어 둔다(형식이 바뀌었는지 판단용)."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -50,6 +68,8 @@ def _jsonl(path):
                 except ValueError:
                     continue
                 if isinstance(d, dict):
+                    if st is not None:
+                        st["lines"] += 1
                     yield d
     except OSError:
         return
@@ -78,6 +98,10 @@ def _session_id(engine_id, path):
     return m[0] if m else path.stem
 
 
+def _title(goal):
+    return _mask(_cut(goal.splitlines()[0] if goal else "", 60)) or "(요청 없음)"
+
+
 def sessions(engine_id, limit=10):
     """최근 세션 목록(새것부터). 제목은 첫 요청 앞부분이고 가린 뒤 보여 준다."""
     out = []
@@ -85,8 +109,7 @@ def sessions(engine_id, limit=10):
         s = parse(engine_id, p, light=True)
         out.append({"engine": engine_id, "id": _session_id(engine_id, p), "path": str(p),
                     "updated": time.strftime("%Y-%m-%d %H:%M", time.localtime(p.stat().st_mtime)),
-                    "title": log.redact(_cut(s["goal"].splitlines()[0] if s["goal"] else "", 60)) or "(요청 없음)",
-                    "cwd": s["cwd"]})
+                    "title": _title(s["goal"]), "requests": len(s["users"]), "cwd": s["cwd"]})
     return out
 
 
@@ -111,7 +134,7 @@ def _user_text(s):
 
 
 def _blank():
-    return {"cwd": None, "users": [], "ai": [], "files": [], "commands": [], "artifacts": [], "goal": ""}
+    return {"cwd": None, "users": [], "ai": [], "files": [], "commands": [], "artifacts": [], "goal": "", "lines": 0}
 
 
 def _add_tool(st, name, args):
@@ -130,7 +153,7 @@ def _add_tool(st, name, args):
 
 
 def _parse_agy(path, st):
-    for d in _jsonl(path):
+    for d in _jsonl(path, st):
         if d.get("type") == "USER_INPUT":
             t = _user_text(d.get("content"))
             if t:
@@ -148,10 +171,10 @@ def _parse_agy(path, st):
 
 
 def _parse_claude(path, st):
-    for d in _jsonl(path):
+    for d in _jsonl(path, st):
         if d.get("cwd") and not st["cwd"]:
             st["cwd"] = d["cwd"]
-        if d.get("isSidechain") or d.get("isMeta"):
+        if d.get("isSidechain") or d.get("isMeta") or d.get("isCompactSummary"):   # 압축 요약은 사용자 요청이 아니다
             continue
         m = d.get("message") or {}
         content = m.get("content")
@@ -170,7 +193,7 @@ def _parse_claude(path, st):
 
 
 def _parse_codex(path, st):
-    for d in _jsonl(path):
+    for d in _jsonl(path, st):
         pl = d.get("payload") or {}
         if d.get("type") == "session_meta" and pl.get("cwd"):
             st["cwd"] = pl["cwd"]
@@ -235,9 +258,13 @@ def parse(engine_id, path, light=False):
 
 # ---- 작업 폴더 상태 ---------------------------------------------------------
 
+# 작업 폴더는 대화 기록에서 온 값이라 믿지 않는다: 저장소 설정의 core.fsmonitor가 git status에서 명령을 실행하지 않게 끈다
+GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
+
+
 def _git(cwd, *args, runner=subprocess.run):
     try:
-        r = runner(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=10)
+        r = runner(["git", *GIT_SAFE, "-C", str(cwd), *args], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.strip() if r.returncode == 0 else None
@@ -274,6 +301,10 @@ def build(src, dst, session=None, runner=subprocess.run):
     if path is None:
         return {"ok": False, "error": f"{NAMES[src]} 대화 기록을 이 Mac에서 찾지 못했어요."}
     st = parse(src, path)
+    fmt = readable(st)
+    if fmt == "unreadable":   # 빈 문서를 넘기느니 멈춘다
+        return {"ok": False, "error": f"이 {NAMES[src]} 세션에서 넘길 내용을 읽지 못했어요. 빈 세션이면 다른 세션을 고르고, "
+                                      "최근 세션이 모두 이렇다면 기록 형식이 바뀐 것이니 `ro doctor`로 확인하세요."}
     ws = workspace(st["cwd"], runner=runner)
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(path.stat().st_mtime))
     sec = [f"# 작업 인수인계: {NAMES[src]} → {NAMES[dst]}",
@@ -285,6 +316,14 @@ def build(src, dst, session=None, runner=subprocess.run):
     if st["cwd"]:
         sec += [f"- 작업 폴더: `{st['cwd']}`"]
     sec += [f"- 원래 세션: {NAMES[src]} `{_session_id(src, path)}`", ""]
+    if ws:
+        sec += ["## 작업 폴더 지금 상태", "", f"- 브랜치: `{ws['branch']}`"]
+        sec += ["- 최근 커밋:", "```", *ws["log"], "```"] if ws["log"] else []
+        if ws["status"]:
+            sec += ["- 커밋하지 않은 변경:", "```", *ws["status"]] + ([f"… 외 {ws['more']}개"] if ws["more"] else []) + ["```"]
+        else:
+            sec += ["- 커밋하지 않은 변경 없음"]
+        sec += [""]
     sec += ["## 목표(첫 요청)", "", _quote(_cut(st["goal"], 1200)) or "(기록된 요청 없음)", ""]
     recent = st["users"][1:][-6:]
     if recent:
@@ -302,31 +341,59 @@ def build(src, dst, session=None, runner=subprocess.run):
     others = [f.name for f in st["artifacts"] if _artifact_text(f) is None]
     if others:
         sec += ["## 그 밖의 산출물(내용은 옮기지 않음)", ""] + [f"- `{f}`" for f in others] + [""]
-    if ws:
-        sec += ["## 작업 폴더 지금 상태", "", f"- 브랜치: `{ws['branch']}`"]
-        sec += ["- 최근 커밋:", "```", *ws["log"], "```"] if ws["log"] else []
-        if ws["status"]:
-            sec += ["- 커밋하지 않은 변경:", "```", *ws["status"]] + ([f"… 외 {ws['more']}개"] if ws["more"] else []) + ["```"]
-        else:
-            sec += ["- 커밋하지 않은 변경 없음"]
-        sec += [""]
     rules = engines.rules_state(dst)
     if rules in ("source", "linked"):
         sec += [f"공통 규칙: {NAMES[dst]}도 같은 공통 규칙 원본을 가리키고 있습니다.", ""]
     raw = "\n".join(sec)
-    doc = log.redact(raw)
+    doc = _mask(raw)
     if len(doc) > MAX_DOC:
-        doc = doc[:MAX_DOC].rstrip() + "\n\n…(길어서 뒷부분을 줄였습니다. 전체는 작업 폴더에서 확인하세요)\n"
+        doc = doc[:MAX_DOC].rstrip()
+        doc += "\n```" * (doc.count("```") % 2)   # 코드 블록 안에서 잘렸으면 닫는다
+        doc += "\n\n…(길어서 뒷부분을 줄였습니다. 전체는 작업 폴더에서 확인하세요)\n"
     notes = []
+    if not st["users"]:
+        notes.append("요청 기록이 없는 세션이에요(다른 에이전트가 시작했을 수 있어요). 목표를 받는 쪽에 직접 알려 주세요.")
+    if fmt == "partial":
+        notes.append(f"{NAMES[src]} 기록 일부(응답·파일·명령)를 읽지 못했어요. 도구가 업데이트됐을 수 있으니 내용을 확인하세요.")
     if rules not in ("source", "linked"):
         notes.append(f"{NAMES[dst]}에 공통 규칙이 연결돼 있지 않아요. 같은 규칙을 쓰려면 `ro connect`로 먼저 연결하세요.")
     if not st["cwd"]:
         notes.append("작업 폴더를 알아내지 못했어요. 받는 쪽에서 폴더를 직접 알려 주세요.")
     return {"ok": True, "src": src, "dst": dst, "session": _session_id(src, path), "updated": when,
-            "cwd": st["cwd"], "doc": doc, "masked": doc.count(log.MASK) > raw.count(log.MASK),
+            "title": _title(st["goal"]),
+            "cwd": st["cwd"], "doc": doc, "masked": _masked(raw, doc),
             "counts": {"requests": len(st["users"]), "files": len(st["files"]), "commands": len(st["commands"]),
                        "artifacts": len(st["artifacts"])},
             "notes": notes}
+
+
+def _masked(raw, doc):
+    """비밀값·개인정보를 가렸는지(홈 경로를 ~로 바꾼 것은 세지 않는다)."""
+    marks = (log.MASK, *{m for _, m in PII})
+    return any(doc.count(m) > raw.count(m) for m in marks)
+
+
+def readable(st):
+    """기록을 제대로 읽었는지: ok · partial(요청만 읽음) · unreadable(줄은 있는데 아무것도 못 읽음).
+    각 도구의 기록 형식은 공개 규격이 아니라서, 바뀌면 조용히 빈 문서를 만드는 대신 여기서 알린다.
+    요청이 없어도 응답·명령이 있으면 읽은 것이다(다른 에이전트가 시작한 세션)."""
+    work = st["ai"] or st["files"] or st["commands"]
+    if not st["users"] and not work:
+        return "unreadable" if st["lines"] >= 3 else "ok"
+    if st["users"] and st["lines"] >= 20 and not work:
+        return "partial"
+    return "ok"
+
+
+def check(n=5):
+    """`ro doctor`용: 도구마다 최근 세션 n개 중 하나라도 지금 형식으로 읽히면 ok.
+    빈 세션 하나 때문에 경고하지 않되, 최근 것이 모두 안 읽히면 형식이 바뀐 것으로 본다."""
+    out = []
+    for eid in NAMES:
+        states = [readable(parse(eid, p)) for p in _session_files(eid)[:n]]
+        if states:
+            out.append((eid, "ok" if "ok" in states else ("partial" if "partial" in states else "unreadable")))
+    return out
 
 
 # 펫용: 미리 보기한 문서는 서버에만 두고 화면에는 id만 넘긴다(승인할 때 본 그대로를 적용하려고)
@@ -335,20 +402,29 @@ ALIASES = {"claude": "claude", "클로드": "claude", "codex": "codex", "코덱�
            "antigravity": "agy", "안티그래비티": "agy", "안티": "agy", "gemini": "agy", "제미나이": "agy", "제미니": "agy"}
 
 
-def plan_for_pet(arg=""):
-    """'/이어가기 [원래 도구] [받을 도구]' → 요약과 id. 하나만 쓰면 받을 도구, 없으면 Antigravity → Claude Code."""
+def plan_for_pet(arg="", session=None):
+    """'/이어가기 [원래 도구] [받을 도구]' → 요약과 id. 하나만 쓰면 받을 도구, 없으면 Antigravity → Claude Code.
+    가장 최근 세션이 하던 작업이 아닐 수 있어 다른 최근 세션(others)도 함께 돌려준다(session으로 다시 고른다)."""
     ids = [ALIASES[w] for w in (arg or "").lower().replace("→", " ").replace("->", " ").split() if w in ALIASES]
     src, dst = (ids + [None, None])[:2] if len(ids) >= 2 else ("agy", ids[0] if ids else "claude")
     if src == dst == "agy":
         src = "claude"
-    plan = build(src, dst)
+    plan = build(src, dst, session or None)
     if not plan["ok"]:
         return plan
+    others = [{k: x[k] for k in ("id", "updated", "title", "requests")}
+              for x in sessions(src, limit=5) if x["id"] != plan["session"]][:4]
     pid = hashlib.sha256(plan["doc"].encode()).hexdigest()[:12]
     _PENDING.clear()   # 승인은 마지막 미리 보기 하나만
     _PENDING[pid] = plan
-    return {k: v for k, v in plan.items() if k != "doc"} | {"id": pid, "chars": len(plan["doc"]),
+    return {k: v for k, v in plan.items() if k != "doc"} | {"id": pid, "chars": len(plan["doc"]), "others": others,
                                                              "src_name": NAMES[src], "dst_name": NAMES[dst]}
+
+
+def preview_for_pet(pid):
+    """미리 본 인수인계의 문서 본문(가린 뒤). 무엇이 나가는지 승인 전에 읽어 보게."""
+    plan = _PENDING.get(pid)
+    return {"ok": True, "doc": plan["doc"]} if plan else {"ok": False, "error": "미리 본 인수인계가 아니에요."}
 
 
 def apply_for_pet(pid):
@@ -382,7 +458,7 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    copied = run(["pbcopy"], input=clip.encode("utf-8"))
+    copied = run(["pbcopy"], input=clip.encode("utf-8"), env=engines.PBCOPY_ENV)
     opened = bool(app) and run(["open", str(app)])
     log.append("handoff", f"{NAMES[plan['src']]} → {NAMES[plan['dst']]} 인수인계",
                {"src": plan["src"], "dst": plan["dst"], "session": plan["session"], "chars": len(plan["doc"])},
@@ -402,7 +478,7 @@ def cli(src=None, dst=None, session=None, yes=False, list_only=False, show=False
         if not dst:
             print("\n넘기려면: ro handoff --from agy --to claude [--session 앞자리]  (미리 보기 → --yes로 적용)")
         return 0
-    plan = build(src or "agy", dst, session)
+    plan = build(src or ("claude" if dst == "agy" else "agy"), dst, session)
     if not plan["ok"]:
         print(plan["error"])
         return 1

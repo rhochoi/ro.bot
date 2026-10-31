@@ -55,4 +55,8 @@ def doctor():
         found = shutil.which(e)
         missing += not found
         print(f"- {e}: {found or '미설치'}")
+    from . import handoff   # 갈아타기가 읽는 기록 형식이 바뀌었는지(도구 업데이트 뒤 조용히 빈 문서가 되지 않게)
+    words = {"ok": "읽기 정상", "partial": "일부만 읽음 — 형식이 바뀌었을 수 있어요", "unreadable": "형식을 못 읽음 — ro update 필요"}
+    for eid, state in handoff.check():
+        print(f"- 갈아타기 기록({handoff.NAMES[eid]}): {words[state]}")
     return 0 if missing < len(TOOLS) else 1
