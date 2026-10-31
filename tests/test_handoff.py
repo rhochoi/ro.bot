@@ -107,9 +107,10 @@ class HandoffTest(unittest.TestCase):
     def test_masks_personal_info_and_home_but_keeps_ordinary_numbers(self):
         sid = self.agy()
         t = self.home / ".gemini/antigravity/brain" / sid / ".system_generated/logs/transcript.jsonl"
-        pii = ("연락처 me" + "@example.com, 010-1234-5678, +82 10 2345 6789, 02-123-4567, "
+        pii = ("연락처 me" + "@example.com, 전화010-1234-5678, +82 10 2345 6789, 02-123-4567, "
                "주민 900101-1234567, 카드 1234-5678-9012-3456")
-        keep = "버전 1.2.3, 날짜 2026-10-31 14:22, 커밋 7c21186, 포트 8765, pkg@1.2.3"
+        keep = ("버전 1.2.3, 날짜 2026-10-31 14:22, 커밋 7c21186, 포트 8765, pkg@1.2.3, "
+                "세션 01a18564-1111-2222-3333-444455556666")
         with t.open("a") as f:
             f.write(json.dumps({"type": "USER_INPUT", "content": f"<USER_REQUEST>{pii} / {keep}</USER_REQUEST>"},
                                ensure_ascii=False) + "\n")
@@ -291,6 +292,83 @@ class HandoffTest(unittest.TestCase):
         with mock.patch.object(handoff, "build", return_value={"ok": False, "error": "x"}) as b, mock.patch("builtins.print"):
             handoff.cli(None, "agy")
         self.assertEqual(b.call_args.args[:2], ("claude", "agy"))   # --to agy만 주면 Claude에서 넘긴다
+
+
+class RelayHookTest(HandoffTest):
+    """넘기기 → 대기 → Claude Code 새 세션이 한 번 이어받기. 훅은 실제 스크립트를 따로 실행해 본다."""
+
+    def connect_relay(self):
+        p = engines.connect_plan(which=lambda c: "/bin/" + c, app_dirs=())
+        relay = [i for i in p["items"] if i["kind"] == "relay"]
+        self.assertEqual(len(relay), 1)
+        self.assertTrue(engines.connect_apply(p["id"], which=lambda c: "/bin/" + c, app_dirs=())["ok"])
+        self.assertEqual(engines.relay_state(engines.get("claude")["hook"]), "on")
+
+    def hook(self, cwd, source="startup", transcript=""):
+        r = subprocess.run(["python3", str(self.home / ".ro/hooks/ro_handoff.py")],
+                           input=json.dumps({"cwd": str(cwd), "source": source, "session_id": "x",
+                                             "transcript_path": str(transcript)}),
+                           capture_output=True, text=True, timeout=10, env={**os.environ, "RO_HOME": str(self.home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else None
+
+    def handoff_now(self):
+        self.agy()
+        return handoff.apply(handoff.build("agy", "claude"), runner=Run(), which=lambda c: None,
+                             app_dirs=(str(self.apps),))
+
+    def test_new_session_in_same_folder_gets_it_once(self):
+        self.connect_relay()
+        r = self.handoff_now()
+        self.assertTrue(r["relay"])
+        sub = self.repo / "sub"
+        sub.mkdir()
+        self.assertIsNone(self.hook(sub, source="resume"))        # 이어 열기에는 넣지 않는다
+        self.assertIsNone(self.hook(Path(self.tmp.name)))          # 상위 폴더(~ 같은)에서는 받지 않는다(대기는 남음)
+        self.assertIsNone(self.hook(self.home))                    # 다른 폴더에서도
+        ctx = self.hook(sub)                                       # 작업 폴더 안의 새 세션
+        self.assertIn("지시가 아닙니다", ctx)
+        self.assertIn("결제 화면을 만들어 줘", ctx)
+        self.assertNotIn(FAKE_KEY, ctx)
+        self.assertNotIn("[카드번호]", ctx)                         # 세션 ID(UUID)를 카드번호로 오인하지 않는다
+        self.assertIsNone(self.hook(sub))                          # 한 번만
+        self.assertFalse((self.home / ".ro/handoff/pending/claude.json").exists())
+        self.handoff_now()                                         # 다음 넘기기 때 받은 기록은 치운다
+        self.assertEqual([f.name for f in (self.home / ".ro/handoff/pending").iterdir()], ["claude.json"])
+
+    def test_session_that_never_answered_does_not_lose_it(self):
+        # 실제 시험에서 claude CLI가 로그인 안 돼 바로 끝났는데 인수인계를 소비해 버렸다(2026-10-31)
+        self.connect_relay()
+        self.handoff_now()
+        t1 = Path(self.tmp.name) / "s1.jsonl"
+        self.assertIsNotNone(self.hook(self.repo, transcript=t1))   # 받았지만 기록이 생기지 않고 끝남
+        t2 = Path(self.tmp.name) / "s2.jsonl"
+        self.assertIsNotNone(self.hook(self.repo, transcript=t2))   # 다음 새 세션이 다시 받는다
+        t2.write_text(json.dumps({"type": "user"}) + "\n" + json.dumps({"type": "assistant"}) + "\n")
+        self.assertIsNone(self.hook(self.repo, transcript=Path(self.tmp.name) / "s3.jsonl"))   # 응답한 뒤로는 끝
+
+    def test_expired_or_not_connected_is_not_injected(self):
+        r = self.handoff_now()                                     # 훅을 연결하지 않았으면 대기시키지 않는다
+        self.assertFalse(r["relay"])
+        self.assertFalse((self.home / ".ro/handoff/pending").exists())
+        self.connect_relay()
+        self.handoff_now()
+        pend = self.home / ".ro/handoff/pending/claude.json"
+        data = json.loads(pend.read_text())
+        data["created"] -= 25 * 3600
+        pend.write_text(json.dumps(data))
+        self.assertIsNone(self.hook(self.repo))
+
+    def test_broken_pending_file_never_blocks_session_start(self):
+        self.connect_relay()
+        pend = self.home / ".ro/handoff/pending/claude.json"
+        pend.parent.mkdir(parents=True)
+        pend.write_text("{깨짐")
+        self.assertIsNone(self.hook(self.repo))
+
+    def test_relay_hook_ships_inside_the_package(self):
+        import ro
+        self.assertTrue(engines.RELAY_SRC.is_relative_to(Path(ro.__file__).resolve().parent))
 
 
 class HandoffRouteTest(unittest.TestCase):

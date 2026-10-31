@@ -137,10 +137,10 @@ class ConnectTest(unittest.TestCase):
     def test_plan_writes_nothing_and_apply_links_rules_and_hooks(self):
         claude_md = self.home / ".claude" / "CLAUDE.md"
         p = self.plan()
-        self.assertEqual([i["kind"] for i in p["items"]], ["create", "hook", "symlink"])
+        self.assertEqual([i["kind"] for i in p["items"]], ["create", "hook", "relay", "symlink"])
         self.assertFalse((self.home / ".claude").exists())  # 계획은 아무것도 쓰지 않는다
         r = engines.connect_apply(p["id"], **self.kw)
-        self.assertEqual(r, {"ok": True, "applied": 3})
+        self.assertEqual(r, {"ok": True, "applied": 4})
         self.assertEqual(claude_md.read_text(), "@~/.codex/AGENTS.md\n")
         agy = self.home / ".gemini" / "AGENTS.md"
         self.assertTrue(agy.is_symlink())
@@ -148,7 +148,11 @@ class ConnectTest(unittest.TestCase):
         hooks = json.loads((self.home / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
         self.assertEqual([h["matcher"] for h in hooks], ["Bash|Write|Edit|MultiEdit", "Bash"])
         self.assertTrue((self.home / ".ro" / "hooks" / "ro_guard.py").is_file())
+        start = json.loads((self.home / ".claude" / "settings.json").read_text())["hooks"]["SessionStart"]
+        self.assertEqual(start, [{"matcher": "startup|clear", "hooks": [{"type": "command", "command": engines._relay_cmd()}]}])
+        self.assertTrue((self.home / ".ro" / "hooks" / "ro_handoff.py").is_file())
         st = {e["id"]: e for e in engines.status(**self.kw)}
+        self.assertEqual(st["claude"]["relay_state"], "on")
         self.assertEqual((st["claude"]["rules_state"], st["claude"]["hook"], st["agy"]["rules_state"], st["codex"]["rules_state"]),
                          ("linked", True, "linked", "source"))
         self.assertEqual(self.plan()["items"], [])  # 두 번 연결해도 같은 줄을 또 넣지 않는다
@@ -162,7 +166,7 @@ class ConnectTest(unittest.TestCase):
         (self.home / ".gemini").mkdir()
         (self.home / ".gemini" / "GEMINI.md").write_text("agy 전용 규칙")
         p = self.plan()
-        self.assertEqual([i["kind"] for i in p["items"]], ["append", "hook"])
+        self.assertEqual([i["kind"] for i in p["items"]], ["append", "hook", "relay"])
         self.assertIn("그대로 둬요", " ".join(p["notes"]))  # 따로 쓰는 agy 규칙은 덮어쓰지 않는다
         engines.connect_apply(p["id"], **self.kw)
         self.assertEqual(claude_md.read_text(), "내 규칙\n\n@~/.codex/AGENTS.md\n")
@@ -170,10 +174,13 @@ class ConnectTest(unittest.TestCase):
         self.assertEqual(data["model"], "x")
         self.assertEqual(len(data["hooks"]["PreToolUse"]), 3)  # 기존 항목은 그대로 두고 더한다
         r = engines.connect_undo()
-        self.assertEqual((r["ok"], r["reverted"], r["kept"]), (True, 3, []))
+        self.assertEqual((r["ok"], r["reverted"], r["kept"]), (True, 5, []))
         self.assertEqual(claude_md.read_text(), "내 규칙")
-        self.assertEqual(len(json.loads(settings.read_text())["hooks"]["PreToolUse"]), 1)
+        data = json.loads(settings.read_text())
+        self.assertEqual(len(data["hooks"]["PreToolUse"]), 1)
+        self.assertNotIn("SessionStart", data["hooks"])     # ro가 넣은 갈아타기 훅만 빠진다
         self.assertFalse((self.home / ".ro" / "hooks" / "ro_guard.py").exists())
+        self.assertFalse((self.home / ".ro" / "hooks" / "ro_handoff.py").exists())
         self.assertFalse(engines.connect_undo()["ok"])  # 한 번만 되돌린다
 
     def test_undo_keeps_files_changed_after_connecting(self):

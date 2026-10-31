@@ -19,6 +19,7 @@ from pathlib import Path
 from . import engines, fsutil, log
 
 OUT_DIR = "~/.ro/handoff"
+PENDING = "~/.ro/handoff/pending/claude.json"   # Claude Code 새 세션이 갈아타기 훅으로 한 번 이어받는다
 KEEP = 20          # 남겨 둘 인수인계 문서 수. 오래된 것부터 지운다(ro가 만든 파일만)
 MAX_DOC = 12000    # 클립보드로 넘길 문서 길이. 넘으면 뒤(산출물)부터 줄인다 — 지금 상태·목표는 앞에 둔다
 NAMES = {e["id"]: e["name"] for e in engines.ENGINES}
@@ -26,12 +27,14 @@ WRITE_TOOLS = {"edit_file", "write_file", "Edit", "Write", "MultiEdit", "Noteboo
 CMD_TOOLS = {"run_command", "Bash", "exec_command", "shell", "local_shell"}
 PATCH_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", re.M)
 # 비밀값(log.redact) 말고도 외부 모델로 가면 안 되는 개인정보: 이메일·주민번호·전화·카드번호
+# 숫자 패턴은 앞뒤가 영문·숫자·-로 이어지면 잡지 않는다(UUID·해시 조각을 카드번호로 오인하지 않게). 한글은 붙어도 잡는다
+_B, _E = r"(?<![A-Za-z0-9_-])", r"(?![A-Za-z0-9_-])"
 PII = (
     (re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b"), "[이메일]"),
-    (re.compile(r"(?<!\d)\d{6}\s*-\s*[1-8]\d{6}(?!\d)"), "[주민번호]"),
-    (re.compile(r"(?<!\d)(?:\+82[ -]?1\d|01[016789])[ -]?\d{3,4}[ -]?\d{4}(?!\d)"), "[전화번호]"),
-    (re.compile(r"(?<!\d)0(?:2|[3-6][1-5])-\d{3,4}-\d{4}(?!\d)"), "[전화번호]"),
-    (re.compile(r"(?<!\d)\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}(?!\d)"), "[카드번호]"),
+    (re.compile(_B + r"\d{6}\s*-\s*[1-8]\d{6}" + _E), "[주민번호]"),
+    (re.compile(_B + r"(?:\+82[ -]?1\d|01[016789])[ -]?\d{3,4}[ -]?\d{4}" + _E), "[전화번호]"),
+    (re.compile(_B + r"0(?:2|[3-6][1-5])-\d{3,4}-\d{4}" + _E), "[전화번호]"),
+    (re.compile(_B + r"\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,4}" + _E), "[카드번호]"),
 )
 
 
@@ -450,6 +453,12 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
     path = out / f"{time.strftime('%Y%m%d-%H%M%S')}-{plan['src']}-to-{plan['dst']}.md"
     fsutil.atomic_write(path, plan["doc"])
     _prune(out)
+    relay = plan["dst"] == "claude" and engines.relay_state(engines.get("claude")["hook"]) == "on"
+    if relay:   # 훅이 연결돼 있을 때만 대기시킨다(안 쓰이는 대기 파일을 남기지 않는다)
+        for old in _x(PENDING).parent.glob("claude.used-*.json"):   # 훅이 이미 넘긴 대기 기록
+            old.unlink(missing_ok=True)
+        fsutil.atomic_write(_x(PENDING), json.dumps({"doc": str(path), "cwd": plan["cwd"], "src": plan["src"],
+                                                     "created": time.time()}, ensure_ascii=False))
     clip = plan["doc"] if app else f'{e["cli"]} "$(cat {shlex.quote(str(path))})"'
 
     def run(args, **kw):
@@ -464,6 +473,7 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
                {"src": plan["src"], "dst": plan["dst"], "session": plan["session"], "chars": len(plan["doc"])},
                log_dir=str(_x(log.LOG_DIR)))   # 테스트 홈(engines.HOME)을 따른다
     return {"ok": copied, "path": str(path), "copied": copied, "opened": opened, "mode": "app" if app else "cli",
+            "relay": relay,
             "name": e["name"], **({} if copied else {"error": "클립보드에 넣지 못했어요."})}
 
 
@@ -499,8 +509,13 @@ def cli(src=None, dst=None, session=None, yes=False, list_only=False, show=False
         print(r["error"])
         return 1
     print(f"저장했어요: {r['path']}")
+    if r["relay"]:
+        print("Claude Code에서 이 작업 폴더로 새 세션을 열면 붙여 넣지 않아도 자동으로 이어받아요(24시간 안, 한 번).")
+    elif plan["dst"] == "claude":
+        print("참고: `ro connect`로 갈아타기 훅을 연결하면 다음부터는 붙여 넣지 않아도 새 세션이 바로 이어받아요.")
     if r["mode"] == "app":
-        print(f"문서를 클립보드에 넣고 {r['name']} 앱을 " + ("열었어요. 새 대화에 붙여 넣으세요." if r["opened"] else "열지 못했어요. 직접 열어 붙여 넣으세요."))
+        paste = "채팅에 쓰려면 ⌘V로 붙여 넣으세요." if r["relay"] else "새 대화에 붙여 넣으세요."
+        print(f"문서를 클립보드에도 넣고 {r['name']} 앱을 " + ("열었어요. " if r["opened"] else "열지 못했어요(직접 여세요). ") + paste)
     else:
         print("터미널에 붙여 넣을 명령을 클립보드에 넣었어요(작업 폴더에서 실행하세요).")
     return 0

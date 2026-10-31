@@ -4619,7 +4619,8 @@ async function relayPlan(arg, session) {
     try { a = await apiPost("/api/handoff/apply", { id: r.id, approve: true }); } catch (err) { a = null; }
     const head = !a ? "서버에 연결하지 못했어요." : !a.ok ? (a.error || "넘기지 못했어요")
       : a.mode === "cli" ? "터미널에 붙여 넣을 명령을 복사했어요" : a.opened ? `${a.name} 앱을 열었어요` : `${a.name} 앱을 열지 못했어요`;
-    const sub = a && a.ok ? (a.mode === "cli" ? "작업 폴더에서 ⌘V 후 ↵" : "인수인계 문서를 복사했어요 · 새 대화에 ⌘V") : "";
+    const sub = a && a.ok ? (a.relay ? "이 폴더로 새 세션을 열면 자동으로 이어받아요 · 채팅이면 ⌘V"
+      : a.mode === "cli" ? "작업 폴더에서 ⌘V 후 ↵" : "인수인계 문서를 복사했어요 · 새 대화에 ⌘V") : "";
     showToast([h("div", { class: "toast-head", text: head }), sub ? h("div", { class: "block-sub", text: sub }) : null], 5000);
   } });
   const body = h("pre", { class: "relay-doc", hidden: true, tabindex: "0", "aria-label": "넘길 문서 본문" });
