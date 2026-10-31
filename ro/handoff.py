@@ -112,7 +112,8 @@ def sessions(engine_id, limit=10):
         s = parse(engine_id, p, light=True)
         out.append({"engine": engine_id, "id": _session_id(engine_id, p), "path": str(p),
                     "updated": time.strftime("%Y-%m-%d %H:%M", time.localtime(p.stat().st_mtime)),
-                    "title": _title(s["goal"]), "requests": len(s["users"]), "cwd": s["cwd"]})
+                    "title": _title(s["goal"]), "requests": len(s["users"]), "cwd": s["cwd"],
+                    "empty": not (s["users"] or s["ai"] or s["files"] or s["commands"])})
     return out
 
 
@@ -121,6 +122,84 @@ def find_session(engine_id, session=None):
     if not session:
         return files[0] if files else None
     return next((p for p in files if _session_id(engine_id, p).startswith(session)), None)
+
+
+# ---- 자동으로 고르기 ---------------------------------------------------------
+PREFER = ("claude", "codex", "agy")   # 받을 도구 후보가 여럿일 때
+
+
+def _run_out(args, runner):
+    try:
+        r = runner(args, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout if r.returncode == 0 else ""
+
+
+def front_app(runner=subprocess.run):
+    """맨 앞 앱의 번들 경로(권한 없이 lsappinfo로). 모르면 None."""
+    asn = _run_out(["lsappinfo", "front"], runner).strip()
+    m = re.search(r'"(/[^"]+?\.app)"', _run_out(["lsappinfo", "info", "-only", "bundlepath", asn], runner)) if asn else None
+    return m[1] if m else None
+
+
+def running(runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_DIRS):
+    """지금 열려 있는 AI 도구. 앱은 번들 안 프로세스로, CLI는 사용자가 쓰는 그 실행 파일로만 센다
+    (Codex처럼 늘 도는 백그라운드 데몬은 '열어 둔 것'이 아니다)."""
+    comms = _run_out(["ps", "-axo", "comm="], runner).splitlines()
+    out = set()
+    for e in engines.ENGINES:
+        app = engines._find_app(e["apps"], app_dirs)
+        cli = which(e["cli"])
+        if any((app and c.startswith(str(app) + "/")) or (cli and c.strip() in (cli, e["cli"])) for c in comms):
+            out.add(e["id"])
+    return out
+
+
+def _installed(which, app_dirs):
+    return [e["id"] for e in engines.ENGINES if engines._find_app(e["apps"], app_dirs) or which(e["cli"])]
+
+
+def latest_source(exclude=None, n=5):
+    """내용 있는 세션을 가장 최근에 남긴 도구와 그 시각. 받을 도구(exclude)는 뺀다."""
+    best = (None, 0.0)
+    for eid in NAMES:
+        if eid == exclude:
+            continue
+        for p in _session_files(eid)[:n]:
+            st = parse(eid, p)
+            if st["users"] or st["ai"] or st["files"] or st["commands"]:
+                if p.stat().st_mtime > best[1]:
+                    best = (eid, p.stat().st_mtime)
+                break
+    return best[0]
+
+
+def choose(src=None, dst=None, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_DIRS):
+    """비어 있는 쪽을 고른다: 받을 도구는 맨 앞 AI 앱 → 실행 중 → 설치됨, 원래 도구는 가장 최근에 작업한 도구.
+    반환: (src, dst, 고른 이유 목록). 고르지 못하면 None인 채로 돌려준다."""
+    why = []
+    if dst is None:
+        front = front_app(runner)
+        for e in engines.ENGINES:
+            app = engines._find_app(e["apps"], app_dirs)
+            if front and app and str(app) == front and e["id"] != src:
+                dst = e["id"]
+                why.append(f"받을 도구: 맨 앞에 열린 {e['name']}")
+    if src is None:
+        src = latest_source(exclude=dst)
+        if src:
+            why.append(f"원래 도구: 가장 최근에 작업한 {NAMES[src]}")
+    if dst is None:
+        run = running(runner, which, app_dirs) - {src}
+        inst = [x for x in _installed(which, app_dirs) if x != src]
+        for pool, label in ((run, "열려 있는"), (inst, "설치된")):
+            pick = next((x for x in PREFER if x in pool), None)
+            if pick:
+                dst = pick
+                why.append(f"받을 도구: {label} {NAMES[pick]}")
+                break
+    return src, dst, why
 
 
 # ---- 기록 읽기 -------------------------------------------------------------
@@ -405,23 +484,26 @@ ALIASES = {"claude": "claude", "클로드": "claude", "codex": "codex", "코덱�
            "antigravity": "agy", "안티그래비티": "agy", "안티": "agy", "gemini": "agy", "제미나이": "agy", "제미니": "agy"}
 
 
-def plan_for_pet(arg="", session=None):
-    """'/이어가기 [원래 도구] [받을 도구]' → 요약과 id. 하나만 쓰면 받을 도구, 없으면 Antigravity → Claude Code.
-    가장 최근 세션이 하던 작업이 아닐 수 있어 다른 최근 세션(others)도 함께 돌려준다(session으로 다시 고른다)."""
+def plan_for_pet(arg="", session=None, **kw):
+    """'/이어가기 [원래 도구] [받을 도구]' → 요약과 id. 하나만 쓰면 받을 도구, 비우면 둘 다 자동(choose).
+    고른 것이 틀릴 수 있어 반대 방향(swap)과 다른 도구까지 포함한 최근 세션(others)도 돌려준다."""
     ids = [ALIASES[w] for w in (arg or "").lower().replace("→", " ").replace("->", " ").split() if w in ALIASES]
-    src, dst = (ids + [None, None])[:2] if len(ids) >= 2 else ("agy", ids[0] if ids else "claude")
-    if src == dst == "agy":
-        src = "claude"
+    src, dst = (ids[0], ids[1]) if len(ids) >= 2 else (None, ids[0] if ids else None)
+    src, dst, why = choose(src, dst, **kw)
+    if not (src and dst):
+        return {"ok": False, "error": "넘겨줄 기록이나 받을 AI 도구를 이 Mac에서 찾지 못했어요."}
     plan = build(src, dst, session or None)
     if not plan["ok"]:
         return plan
-    others = [{k: x[k] for k in ("id", "updated", "title", "requests")}
-              for x in sessions(src, limit=5) if x["id"] != plan["session"]][:4]
+    pool = [x for eid in NAMES if eid != dst for x in sessions(eid, limit=5) if not x["empty"]]   # 빈 세션은 고를 게 없다
+    others = [{k: x[k] for k in ("engine", "id", "updated", "title", "requests")} | {"engine_name": NAMES[x["engine"]]}
+              for x in sorted(pool, key=lambda x: x["updated"], reverse=True)
+              if not (x["engine"] == src and x["id"] == plan["session"])][:4]
     pid = hashlib.sha256(plan["doc"].encode()).hexdigest()[:12]
     _PENDING.clear()   # 승인은 마지막 미리 보기 하나만
     _PENDING[pid] = plan
     return {k: v for k, v in plan.items() if k != "doc"} | {"id": pid, "chars": len(plan["doc"]), "others": others,
-                                                             "src_name": NAMES[src], "dst_name": NAMES[dst]}
+                                                             "why": why, "src_name": NAMES[src], "dst_name": NAMES[dst]}
 
 
 def preview_for_pet(pid):
@@ -478,17 +560,22 @@ def apply(plan, runner=subprocess.run, which=shutil.which, app_dirs=engines.APP_
 
 
 def cli(src=None, dst=None, session=None, yes=False, list_only=False, show=False):
-    """`ro handoff`: 세션 목록 → 미리 보기 → `--yes`면 저장·클립보드·앱 열기."""
-    if list_only or not dst:
+    """`ro handoff`: 비운 쪽은 자동으로 고른 뒤 미리 보기 → `--yes`면 저장·클립보드·앱 열기. `--list`는 최근 세션 목록."""
+    if list_only:
         for eid in ([src] if src else list(NAMES)):
             ss = sessions(eid, limit=5)
             print(f"[{NAMES[eid]}]" + ("" if ss else " 기록 없음"))
             for s in ss:
                 print(f"  {s['id'][:8]}  {s['updated']}  {s['title']}" + (f"  ({s['cwd']})" if s["cwd"] else ""))
-        if not dst:
-            print("\n넘기려면: ro handoff --from agy --to claude [--session 앞자리]  (미리 보기 → --yes로 적용)")
+        print("\n넘기려면: ro handoff [--from 도구] [--to 도구] [--session 앞자리]  (비우면 자동, 미리 보기 → --yes로 적용)")
         return 0
-    plan = build(src or ("claude" if dst == "agy" else "agy"), dst, session)
+    src, dst, why = choose(src, dst)
+    if not (src and dst):
+        print("넘겨줄 기록이나 받을 AI 도구를 이 Mac에서 찾지 못했어요.")
+        return 1
+    for w in why:
+        print(f"자동 선택 · {w}")
+    plan = build(src, dst, session)
     if not plan["ok"]:
         print(plan["error"])
         return 1

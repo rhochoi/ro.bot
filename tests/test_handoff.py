@@ -12,6 +12,7 @@ from ro import engines, handoff, pet
 from tests.test_engines import Run
 
 FAKE_KEY = "sk-" + "abcdefghijklmnopqrstuvwx"   # 안전 훅이 막지 않게 나눠 쓴 가짜 값
+REAL = {n: getattr(handoff, n) for n in ("front_app", "running", "_installed")}   # setUp이 가리기 전의 진짜 감지 함수
 
 
 def _jsonl(path, rows):
@@ -40,6 +41,14 @@ class HandoffTest(unittest.TestCase):
         (self.repo / "app.py").write_text("x = 2\n")
         self.apps = Path(self.tmp.name) / "Applications"
         (self.apps / "Claude.app").mkdir(parents=True)
+        # 자동 선택이 이 Mac의 실제 맨 앞 앱·프로세스에 흔들리지 않게: 앞 앱 없음, 열린 도구 없음, 셋 다 설치
+        for name, value in (("front_app", None), ("running", set())):
+            pt = mock.patch.object(handoff, name, return_value=value)
+            pt.start()
+            self.addCleanup(pt.stop)
+        pt = mock.patch.object(handoff, "_installed", return_value=["claude", "codex", "agy"])
+        pt.start()
+        self.addCleanup(pt.stop)
 
     def agy(self, sid="aaaa1111-0000-0000-0000-000000000000"):
         brain = self.home / ".gemini/antigravity/brain" / sid
@@ -289,9 +298,67 @@ class HandoffTest(unittest.TestCase):
         out = "\n".join(str(c.args[0]) for c in pr.call_args_list if c.args)
         self.assertIn("--yes", out)
         self.assertIn("aaaa1111", out)
-        with mock.patch.object(handoff, "build", return_value={"ok": False, "error": "x"}) as b, mock.patch("builtins.print"):
-            handoff.cli(None, "agy")
-        self.assertEqual(b.call_args.args[:2], ("claude", "agy"))   # --to agy만 주면 Claude에서 넘긴다
+        with mock.patch("builtins.print") as pr:
+            self.assertEqual(handoff.cli(None, "agy"), 1)              # 받을 도구 말고는 기록이 없다
+        self.assertIn("찾지 못했어요", pr.call_args.args[0])
+        with mock.patch("builtins.print") as pr:
+            self.assertEqual(handoff.cli(None, None, list_only=True), 0)
+        self.assertIn("[Antigravity]", [c.args[0] for c in pr.call_args_list])
+
+
+class ChooseTest(HandoffTest):
+    """비운 쪽 자동 선택: 받을 도구는 맨 앞 AI 앱 → 열려 있는 것 → 설치된 것, 원래 도구는 가장 최근에 작업한 도구."""
+
+    def fake(self, front=None, procs=()):
+        def runner(args, **kw):
+            out = {"front": "ASN:0x0-0x1:\n", "info": f'bundle path="{front}"\n' if front else "",
+                   "ps": "\n".join(procs) + "\n"}
+            key = "ps" if args[0] == "ps" else ("front" if args[1] == "front" else "info")
+            return mock.Mock(returncode=0, stdout=out[key])
+        return runner
+
+    def claude_session(self, mtime):
+        f = self.home / ".claude/projects/-p/c1.jsonl"
+        _jsonl(f, [{"type": "user", "cwd": str(self.repo), "message": {"role": "user", "content": "클로드 작업"}}])
+        os.utime(f, (mtime, mtime))
+
+    def test_front_and_running_apps_and_codex_daemon(self):
+        (self.apps / "Antigravity.app").mkdir()
+        kw = {"which": lambda c: f"/u/bin/{c}", "app_dirs": (str(self.apps),)}
+        for name, fn in REAL.items():                              # 이 테스트는 진짜 감지 함수를 가짜 출력으로 시험한다
+            pt = mock.patch.object(handoff, name, fn)
+            pt.start()
+            self.addCleanup(pt.stop)
+        self.assertEqual(handoff.front_app(self.fake(front=str(self.apps / "Claude.app"))), str(self.apps / "Claude.app"))
+        self.assertIsNone(handoff.front_app(self.fake()))
+        procs = [f"{self.apps}/Antigravity.app/Contents/MacOS/Electron",
+                 "/Users/x/.codex/packages/app-server-daemon/bin/codex"]   # Codex는 데몬만 돈다
+        self.assertEqual(handoff.running(self.fake(procs=procs), **kw), {"agy"})
+        self.assertEqual(handoff.running(self.fake(procs=["/u/bin/codex"]), **kw), {"codex"})   # 사용자가 연 CLI
+        self.agy()
+        self.claude_session(1)                                     # Antigravity 쪽이 더 최근
+        src, dst, why = handoff.choose(runner=self.fake(front=str(self.apps / "Claude.app")), **kw)
+        self.assertEqual((src, dst), ("agy", "claude"))
+        self.assertIn("받을 도구: 맨 앞에 열린 Claude Code", why)
+        src, dst, why = handoff.choose(runner=self.fake(procs=procs), **kw)   # 맨 앞이 AI가 아니면: 열린 도구 중 원래 도구 아닌 것
+        self.assertEqual((src, dst), ("agy", "claude"))                       # 열린 건 agy뿐 → 설치된 Claude
+        self.assertIn("받을 도구: 설치된 Claude Code", why)
+        src, dst, _ = handoff.choose(runner=self.fake(front=str(self.apps / "Antigravity.app")), **kw)
+        self.assertEqual((src, dst), ("claude", "agy"))            # Antigravity를 앞에 열면 반대 방향
+
+    def test_latest_source_skips_empty_sessions_and_others_span_tools(self):
+        self.agy()
+        f = self.home / ".claude/projects/-p/empty.jsonl"
+        _jsonl(f, [{"type": "user", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}}])
+        self.assertEqual(handoff.latest_source(exclude="codex"), "agy")    # 더 최근이지만 빈 Claude 세션은 건너뛴다
+        self.claude_session(10 ** 10)
+        self.assertEqual(handoff.latest_source(exclude="codex"), "claude")
+        r = handoff.plan_for_pet("", None)                          # 자동: Claude(최근) → 설치된 Codex
+        self.assertEqual((r["src"], r["dst"]), ("claude", "codex"))
+        self.assertTrue(any(w.startswith("원래 도구") for w in r["why"]))
+        self.assertIn("agy", [o["engine"] for o in r["others"]])   # 다른 도구 세션도 고를 수 있다
+        self.assertNotIn("empty", [o["id"] for o in r["others"]])  # 빈 세션은 목록에 없다
+        self.assertEqual(handoff.plan_for_pet("agy claude")["src"], "agy")   # 직접 쓰면 그대로
 
 
 class RelayHookTest(HandoffTest):

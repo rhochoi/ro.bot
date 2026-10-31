@@ -204,7 +204,9 @@ class SlashTest(unittest.TestCase):
         p = self.page
         plan = {"ok": True, "id": "h1", "src_name": "Antigravity", "dst_name": "Claude Code", "updated": "2026-10-31 10:00",
                 "cwd": "/p", "chars": 900, "masked": True, "notes": ["규칙 연결 안내"], "title": "결제 화면",
-                "others": [{"id": "s2", "updated": "2026-10-25 00:47", "title": "펫 위젯", "requests": 6}],
+                "src": "agy", "dst": "claude", "why": ["받을 도구: 맨 앞에 열린 Claude Code"],
+                "others": [{"engine": "codex", "engine_name": "Codex", "id": "s2", "updated": "2026-10-25 00:47",
+                            "title": "펫 위젯", "requests": 6}],
                 "counts": {"requests": 3, "files": 2, "commands": 5, "artifacts": 1}}
         with mock.patch.object(handoff, "plan_for_pet", return_value=plan) as pl, \
                 mock.patch.object(handoff, "apply_for_pet", return_value={"ok": True, "mode": "app", "opened": True,
@@ -216,10 +218,14 @@ class SlashTest(unittest.TestCase):
             for want in ("Antigravity → Claude Code", "요청 3", "비밀값은 가림", "규칙 연결 안내"):
                 self.assertIn(want, text)
             pl.assert_called_once_with("제미나이 클로드", "")
-            self.assertIn("10-25 00:47 · 펫 위젯 (요청 6)", text)
-            p.click("#toast >> text=펫 위젯")              # 다른 세션으로 다시 미리 보기
+            self.assertIn("자동 선택 · 받을 도구: 맨 앞에 열린 Claude Code", text)
+            self.assertIn("Codex · 10-25 00:47 · 펫 위젯 (요청 6)", text)
+            p.click("#toast >> text=펫 위젯")              # 다른 도구의 세션으로 다시 미리 보기
             p.wait_for_function("document.querySelector('#toast').innerText.includes('인수인계')")
-            pl.assert_called_with("제미나이 클로드", "s2")
+            pl.assert_called_with("codex claude", "s2")
+            p.click("#toast >> text=반대로")                # 방향 바꾸기
+            p.wait_for_function("document.querySelector('#toast').innerText.includes('인수인계')")
+            pl.assert_called_with("claude agy", "")
             ap.assert_not_called()                      # 누르기 전에는 넘기지 않는다
             with mock.patch.object(handoff, "preview_for_pet", return_value={"ok": True, "doc": "# 본문 미리 보기"}):
                 p.click("#toast >> text=내용 보기")

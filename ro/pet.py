@@ -4638,6 +4638,7 @@ async function relayPlan(arg, session) {
   showToast([
     h("div", { class: "toast-head", text: `${r.src_name} → ${r.dst_name} 인수인계` }),
     h("div", { class: "relay-scroll" },
+    ...(r.why || []).map(w => h("div", { class: "block-sub", text: `자동 선택 · ${w}` })),
     h("div", { class: "toast-file", text: r.title }),
     h("div", { class: "block-sub", text: `마지막 활동 ${r.updated} · ${r.cwd || "작업 폴더 모름"}` }),
     h("div", { class: "block-sub", text: `요청 ${c.requests} · 바꾼 파일 ${c.files} · 명령 ${c.commands} · 산출물 ${c.artifacts} · ${r.chars}자`
@@ -4645,9 +4646,13 @@ async function relayPlan(arg, session) {
     ...(r.notes || []).map(n => h("div", { class: "block-sub", text: n })),
     body,
     (r.others || []).length ? h("div", { class: "block-sub", text: "이 작업이 아니면 다른 세션:" }) : null,
-    ...(r.others || []).map(o => h("button", { class: "mini-btn", type: "button", "aria-label": `${o.updated} 세션으로 바꾸기: ${o.title}`,
-      text: `${o.updated.slice(5)} · ${o.title} (요청 ${o.requests})`, onclick: () => relayPlan(arg, o.id) }))),
-    h("div", { class: "toast-row" }, go, peek),
+    ...(r.others || []).map(o => h("button", { class: "mini-btn", type: "button",
+      "aria-label": `${o.engine_name} ${o.updated} 세션으로 바꾸기: ${o.title}`,
+      text: `${o.engine_name} · ${o.updated.slice(5)} · ${o.title} (요청 ${o.requests})`,
+      onclick: () => relayPlan(`${o.engine} ${r.dst}`, o.id) }))),
+    h("div", { class: "toast-row" }, go, peek,
+      h("button", { class: "mini-btn", type: "button", text: "반대로", "aria-label": `${r.dst_name} → ${r.src_name}로 바꾸기`,
+        onclick: () => relayPlan(`${r.dst} ${r.src}`) })),
   ], 20000);
   go.focus();
   return true;
